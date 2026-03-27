@@ -23,6 +23,8 @@ from aoi_loader import (
 )
 from alignment import (
     compute_alignment, apply_alignment, get_debug_info, AlignmentResult,
+    compute_alignment_cached, apply_alignment_cached, _dict_to_alignment_result,
+    compute_dataframe_hash,
     calculate_physical_unit_origin, get_panel_quadrant_bounds,
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
@@ -473,23 +475,30 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
     align_args = st.session_state.get('align_args', {})
     
     if parsed and aoi and parsed.layers and aoi.has_data:
-        alignment = compute_alignment(
+        # Compute file hash for caching key
+        _aoi_hash = compute_dataframe_hash(aoi.all_defects)
+        _fids_g = tuple(tuple(f) for f in parsed.fiducials) if parsed.fiducials else None
+
+        alignment_dict = compute_alignment_cached(
             gerber_bounds=parsed.board_bounds,
             aoi_bounds=aoi.coord_bounds,
-            aoi_df=aoi.all_defects,
-            fiducials_gerber=parsed.fiducials,
-            fiducials_aoi=None,
+            aoi_data_hash=_aoi_hash,
+            fiducials_gerber=_fids_g,
             origin_x=parsed.origin_x,
             origin_y=parsed.origin_y,
             flip_y=align_args.get('flip_y', False),
             manual_offset_x=align_args.get('manual_offset_x', 0.0),
             manual_offset_y=align_args.get('manual_offset_y', 0.0),
+            _aoi_df=aoi.all_defects,
         )
-        defect_df = apply_alignment(
-            aoi.all_defects, 
-            alignment, 
-            unit_row=align_args.get('unit_row'), 
-            unit_col=align_args.get('unit_col')
+        alignment = _dict_to_alignment_result(alignment_dict)
+
+        defect_df = apply_alignment_cached(
+            _df_hash=_aoi_hash,
+            alignment_dict=alignment_dict,
+            unit_row=align_args.get('unit_row'),
+            unit_col=align_args.get('unit_col'),
+            _df=aoi.all_defects,
         )
         st.session_state['alignment_result'] = alignment
     elif aoi and aoi.has_data:
@@ -517,7 +526,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
     _svg_store = st.session_state.get('svg_store', {})
-    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection"]
+    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection", "🎯 Calibration Wizard"]
     if _svg_store:
         _tabs += ["🧪 SVG Unit View", "🗺️ SVG Panel View"]
     _tab_cols = st.columns(len(_tabs), gap="small")
@@ -614,7 +623,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             if align_args.get('flip_y', False) and not panel_df.empty:
                 panel_df['ALIGNED_Y'] = panel_df['ALIGNED_Y'].max() - panel_df['ALIGNED_Y']
 
-            panel_config = OverlayConfig()
+            panel_config = OverlayConfig(min_feature_size=0.1)  # LOD: suppress sub-0.1mm traces at panel zoom
 
             # Full-panel bounds for the substrate background grid
             quad_bounds = get_panel_quadrant_bounds(
@@ -635,7 +644,28 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             panel_config.side_filter   = 'Both' if side_active == 'All' else side_active
 
             panel_fig = build_defect_only_figure(panel_df, panel_config)
-            
+
+            # ── Cluster Intelligence Overlay ──────────────────────────────
+            from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
+            if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
+                clustered_df = compute_clusters(panel_df, eps=2.0, min_samples=3)
+                cluster_summary = get_cluster_summary(clustered_df)
+                if not cluster_summary.empty:
+                    # Draw convex hull boundaries for each cluster
+                    for _, crow in cluster_summary.iterrows():
+                        hull = get_cluster_hull_coords(clustered_df, crow['cluster_id'])
+                        if hull:
+                            hx, hy = hull
+                            panel_fig.add_trace(go.Scatter(
+                                x=hx, y=hy, mode='lines',
+                                line=dict(color='#00FFCC', width=2, dash='dash'),
+                                name=f"Cluster {crow['cluster_id']} ({crow['defect_count']})",
+                                hoverinfo='name', showlegend=True,
+                            ))
+                    # Store for cluster panel below
+                    st.session_state['_cluster_summary'] = cluster_summary
+                    st.session_state['_clustered_df'] = clustered_df
+
             # Draw Substrate Structural Lines (Phase 5)
             for name, (bx1, by1, bx2, by2) in quad_bounds.items():
                 is_frame = name == 'frame'
@@ -714,32 +744,44 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             if side_sel != 'Both' and 'SIDE' in vrs_df.columns:
                 vrs_df = vrs_df[vrs_df['SIDE'] == ('F' if side_sel == 'Front' else 'B')]
         
-        # VRS Defect Stepper Console
-        vrs_col1, vrs_col2, vrs_col3, vrs_col4 = st.columns([3, 2, 2, 3])
+        # VRS Defect Stepper Console (with priority scoring)
+        vrs_col1, vrs_col2, vrs_col3, vrs_col4, vrs_col5 = st.columns([3, 1.5, 1.5, 3, 2])
         with vrs_col1:
             vrs_mode = st.toggle("🎯 VRS Auto-Zoom Mode", value=False, help="Enable Defect Review Station mode to auto-pan cameras")
-        
+
         num_def = len(vrs_df)
         if vrs_mode and num_def > 0:
+            # Sort defects by priority score (highest first)
+            from scoring import score_defect_priority
+            vrs_df = vrs_df.copy()
+            vrs_df['_PRIORITY'] = score_defect_priority(vrs_df)
+            vrs_df = vrs_df.sort_values('_PRIORITY', ascending=False).reset_index(drop=True)
+
             if 'vrs_idx' not in st.session_state:
                 st.session_state['vrs_idx'] = 0
-                
+
             def prev_def(): st.session_state['vrs_idx'] = max(0, st.session_state['vrs_idx'] - 1)
             def next_def(): st.session_state['vrs_idx'] = min(num_def - 1, st.session_state['vrs_idx'] + 1)
-            
+            def jump_top(): st.session_state['vrs_idx'] = 0
+
             # Safeguard boundary if filtering reduced the total defects
             st.session_state['vrs_idx'] = min(max(0, st.session_state['vrs_idx']), num_def - 1)
             idx = st.session_state['vrs_idx']
-            
+
             vrs_col2.button("⏪ Prev", on_click=prev_def, use_container_width=True)
             vrs_col3.button("Next ⏩", on_click=next_def, use_container_width=True)
-            vrs_col4.markdown(f"**Defect {idx + 1} of {num_def}**")
-            
-            # Extract active defect coordinates
+
+            # Show defect info with priority score
             active_def = vrs_df.iloc[idx]
+            priority = active_def.get('_PRIORITY', 0)
+            dtype = active_def.get('DEFECT_TYPE', '?')
+            vrs_col4.markdown(f"**{idx + 1}/{num_def}** — {dtype} (score: {priority:.0f})")
+            vrs_col5.button("🔝 Jump to top", on_click=jump_top, use_container_width=True)
+
+            # Extract active defect coordinates
             ax = active_def['ALIGNED_X']
             ay = active_def['ALIGNED_Y']
-            
+
             config.active_defect_x = ax
             config.active_defect_y = ay
         elif vrs_mode:
@@ -820,6 +862,31 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     'displaylogo': False,
                 },
             )
+
+            # ── Export Pipeline ──────────────────────────────────────────────
+            from export import export_current_view, export_unit_csv
+            exp_col1, exp_col2, exp_col3 = st.columns([2, 2, 6])
+            with exp_col1:
+                try:
+                    img_bytes = export_current_view(fig, fmt='png', scale=3)
+                    st.download_button(
+                        "📷 Export PNG",
+                        data=img_bytes,
+                        file_name="defect_overlay.png",
+                        mime="image/png",
+                        use_container_width=True,
+                    )
+                except Exception:
+                    st.button("📷 Export PNG (kaleido required)", disabled=True, use_container_width=True)
+            with exp_col2:
+                csv_str = export_unit_csv(defect_df)
+                st.download_button(
+                    "📊 Export CSV",
+                    data=csv_str,
+                    file_name="defect_summary.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
     # ── SVG Unit View ─────────────────────────────────────────────────────────
     elif view_mode == "🧪 SVG Unit View":
@@ -919,6 +986,108 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     font_color='white',
                 )
                 st.plotly_chart(fig_svg, width='stretch', config={'scrollZoom': True, 'displaylogo': False})
+
+    # ── Calibration Wizard ──────────────────────────────────────────────────
+    elif view_mode == "🎯 Calibration Wizard":
+        st.subheader("Fiducial Auto-Calibration Wizard")
+        st.markdown("""
+        **Instructions**: Click 3 fiducial points on the ODB++ render below, enter their
+        corresponding AOI machine coordinates, and the system computes the full affine
+        transform automatically. Store the calibration per machine ID.
+        """)
+
+        if parsed and parsed.layers:
+            from alignment import _align_affine
+
+            # Render ODB++ outline + fiducials for clicking
+            calib_fig = go.Figure()
+            outline_layer = next((l for l in parsed.layers.values() if l.layer_type == 'outline'), None)
+            if outline_layer:
+                from visualizer import _geometry_to_coords
+                for poly in outline_layer.polygons:
+                    px, py = _geometry_to_coords(poly)
+                    calib_fig.add_trace(go.Scatter(x=px, y=py, mode='lines',
+                        line=dict(color='gold', width=2), name='Board Outline', showlegend=False))
+
+            # Show known ODB++ fiducials
+            if parsed.fiducials:
+                fid_x = [f[0] for f in parsed.fiducials]
+                fid_y = [f[1] for f in parsed.fiducials]
+                calib_fig.add_trace(go.Scatter(
+                    x=fid_x, y=fid_y, mode='markers+text',
+                    marker=dict(size=15, color='cyan', symbol='diamond'),
+                    text=[f"F{i+1}" for i in range(len(parsed.fiducials))],
+                    textposition='top center',
+                    name='ODB++ Fiducials',
+                ))
+
+            bb = parsed.board_bounds
+            calib_fig.update_layout(
+                plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                font=dict(color='#e0e0e0'),
+                xaxis=dict(title='X (mm)', range=[bb[0]-5, bb[2]+5], scaleanchor='y'),
+                yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
+                height=500,
+            )
+            st.plotly_chart(calib_fig, use_container_width=True)
+
+            # Manual fiducial entry
+            st.subheader("Enter AOI Fiducial Coordinates")
+            n_fids = len(parsed.fiducials) if parsed.fiducials else 3
+            machine_id = st.text_input("Machine ID", value="AOI-01", key="calib_machine_id")
+
+            aoi_fid_entries = []
+            cols = st.columns(min(n_fids, 4))
+            for i in range(min(n_fids, 4)):
+                with cols[i]:
+                    st.caption(f"**Fiducial {i+1}**")
+                    if parsed.fiducials and i < len(parsed.fiducials):
+                        st.text(f"ODB++: ({parsed.fiducials[i][0]:.2f}, {parsed.fiducials[i][1]:.2f})")
+                    ax = st.number_input(f"AOI X{i+1} (mm)", value=0.0, key=f"calib_ax_{i}", format="%.3f")
+                    ay = st.number_input(f"AOI Y{i+1} (mm)", value=0.0, key=f"calib_ay_{i}", format="%.3f")
+                    aoi_fid_entries.append((ax, ay))
+
+            if st.button("Compute Calibration", type="primary"):
+                if parsed.fiducials and len(aoi_fid_entries) >= 2:
+                    n_use = min(len(parsed.fiducials), len(aoi_fid_entries))
+                    gerber_fids = parsed.fiducials[:n_use]
+                    aoi_fids = aoi_fid_entries[:n_use]
+
+                    # Check that AOI points are not all zeros
+                    if all(abs(x) < 1e-6 and abs(y) < 1e-6 for x, y in aoi_fids):
+                        st.error("All AOI coordinates are zero. Enter the machine-reported fiducial positions.")
+                    else:
+                        calib_result = _align_affine(gerber_fids, aoi_fids,
+                                                     parsed.board_bounds, parsed.board_bounds)
+                        st.success(f"Calibration computed: rotation={calib_result.rotation_deg:.4f}°, "
+                                   f"scale={calib_result.scale_x:.6f}")
+                        if calib_result.warnings:
+                            for w in calib_result.warnings:
+                                st.warning(w)
+
+                        # Store calibration per machine
+                        if 'calibrations' not in st.session_state:
+                            st.session_state['calibrations'] = {}
+                        st.session_state['calibrations'][machine_id] = {
+                            'matrix': calib_result.transform_matrix.tolist(),
+                            'rotation_deg': calib_result.rotation_deg,
+                            'scale_x': calib_result.scale_x,
+                            'scale_y': calib_result.scale_y,
+                        }
+                        st.info(f"Calibration stored for machine '{machine_id}'. "
+                                "It will be used automatically for subsequent panels on this machine.")
+                else:
+                    st.error("Need at least 2 ODB++ fiducials and 2 AOI fiducial entries.")
+
+            # Show stored calibrations
+            cals = st.session_state.get('calibrations', {})
+            if cals:
+                st.subheader("Stored Calibrations")
+                for mid, cal in cals.items():
+                    st.text(f"Machine '{mid}': rot={cal['rotation_deg']:.4f}°, "
+                            f"sx={cal['scale_x']:.6f}, sy={cal['scale_y']:.6f}")
+        else:
+            st.info("Upload an ODB++ archive to use the Calibration Wizard.")
 
     # ── SVG Panel View ────────────────────────────────────────────────────────
     elif view_mode == "🗺️ SVG Panel View":
@@ -1075,6 +1244,17 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             col3.metric("Offset X", f"{debug['offset_x_mm']:.3f} mm")
             col4.metric("Offset Y", f"{debug['offset_y_mm']:.3f} mm")
 
+            # Confidence and fiducial metrics
+            conf = debug.get('confidence', 0.0)
+            fids_used = debug.get('fiducials_used', 0)
+            mc1, mc2 = st.columns(2)
+            conf_color = "normal" if conf >= 0.5 else "off"
+            mc1.metric("Confidence", f"{conf:.0%}", delta=f"{fids_used} fiducials" if fids_used > 0 else "no fiducials")
+            if alignment.method == 'affine' and conf >= 0.5:
+                mc2.success("Fiducial auto-alignment active — manual offsets overridden")
+            elif alignment.method == 'offset':
+                mc2.info("Bounding-box offset alignment — provide fiducials for better accuracy")
+
             if debug['rotation_deg'] != 0 or debug['scale_x'] != 1.0:
                 col5, col6 = st.columns(2)
                 col5.metric("Rotation", f"{debug['rotation_deg']:.4f}°")
@@ -1157,6 +1337,80 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             col1.metric("Total Defects", len(aoi.all_defects))
             col2.metric("Defect Types", len(aoi.defect_types))
             col3.metric("Buildup Layers", len(aoi.buildup_numbers))
+
+    # ---- Cluster Triage Panel ----
+    cluster_summary = st.session_state.get('_cluster_summary')
+    if cluster_summary is not None and not cluster_summary.empty:
+        with st.expander("🔬 Defect Cluster Triage", expanded=False):
+            st.caption("Clusters ranked by defect count. Click 'Inspect' to navigate to VRS stepper for that cluster.")
+            for i, crow in cluster_summary.iterrows():
+                cid = crow['cluster_id']
+                cnt = crow['defect_count']
+                dtype = crow['dominant_type']
+                pct = crow['dominant_pct']
+                bu = crow['buildup_info']
+                cx, cy = crow['centroid_x'], crow['centroid_y']
+                st.markdown(
+                    f"**Cluster {cid}**: {cnt} defects at ({cx}, {cy}) — "
+                    f"{pct:.0f}% {dtype}" + (f" — {bu}" if bu else "")
+                )
+
+    # ---- Job Registration & Trend Analysis ----
+    if aoi and aoi.has_data:
+        with st.expander("📈 Job Registry & Trend Analysis", expanded=False):
+            from job_registry import register_job, list_jobs, get_job_density_summary
+            import hashlib as _hl
+
+            reg_col1, reg_col2, reg_col3, reg_col4 = st.columns([3, 3, 2, 2])
+            job_id = reg_col1.text_input("Job ID", value="", key="reg_job_id", placeholder="e.g. LOT-2026-0327")
+            panel_id = reg_col2.text_input("Panel ID", value="", key="reg_panel_id", placeholder="e.g. Panel-01")
+            date_val = reg_col3.date_input("Date", key="reg_date")
+            if reg_col4.button("Register Job", use_container_width=True) and job_id:
+                _hash = _hl.md5(aoi.all_defects.to_csv().encode()).hexdigest()
+                ok = register_job(job_id, panel_id, str(date_val), _hash, aoi.all_defects)
+                if ok:
+                    st.success(f"Registered job {job_id}/{panel_id}")
+                else:
+                    st.info(f"Job {job_id}/{panel_id} already registered")
+
+            st.divider()
+            st.subheader("Trend Analysis")
+            jobs_df = list_jobs()
+            if jobs_df.empty:
+                st.info("No jobs registered yet. Register the current inspection above to start trending.")
+            else:
+                st.dataframe(jobs_df[['job_id', 'panel_id', 'date']].drop_duplicates(),
+                             use_container_width=True, hide_index=True)
+
+                density = get_job_density_summary()
+                if not density.empty:
+                    # Aggregate: total defects per job
+                    job_totals = density.groupby(['job_id', 'date'])['total_defects'].sum().reset_index()
+                    import plotly.express as px
+                    trend_fig = px.bar(
+                        job_totals, x='date', y='total_defects', color='job_id',
+                        title="Defect Count by Job",
+                        labels={'total_defects': 'Total Defects', 'date': 'Date'},
+                    )
+                    trend_fig.update_layout(
+                        plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                        font=dict(color='#e0e0e0'),
+                    )
+                    st.plotly_chart(trend_fig, use_container_width=True)
+
+                    # Heatmap: defect density per unit position
+                    unit_density = density.groupby(['unit_row', 'unit_col'])['total_defects'].sum().reset_index()
+                    if not unit_density.empty:
+                        heatmap_fig = px.density_heatmap(
+                            unit_density, x='unit_col', y='unit_row', z='total_defects',
+                            title="Defect Density Heatmap (All Jobs)",
+                            labels={'unit_col': 'Unit Column', 'unit_row': 'Unit Row'},
+                        )
+                        heatmap_fig.update_layout(
+                            plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                            font=dict(color='#e0e0e0'),
+                        )
+                        st.plotly_chart(heatmap_fig, use_container_width=True)
 
 else:
     # Landing page

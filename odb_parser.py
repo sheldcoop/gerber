@@ -59,6 +59,7 @@ class ODBLayer:
     polygons: list      # list of Shapely geometry objects
     bounds: tuple       # (xmin, ymin, xmax, ymax) in mm
     polygon_count: int = 0
+    trace_widths: list = field(default_factory=list)  # parallel list: feature width in mm per polygon
     warnings: list = field(default_factory=list)
 
 
@@ -676,9 +677,10 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
     """
     Parse a full ODB++ features file text into Shapely geometries.
 
-    Returns (geometries, warnings, fiducials).
+    Returns (geometries, trace_widths, warnings, fiducials).
     """
     geometries = []
+    trace_widths = []  # parallel list: feature width in mm per geometry
     warnings = []
     fiducials = []
     lines = text.splitlines()
@@ -746,11 +748,19 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
                                          force_positive=(record_type == 'H'))
                 if geom is not None:
                     geometries.append(geom)
+                    # Pad width = max symbol dimension
+                    sym_idx = int(parts[3]) if len(parts) > 3 else -1
+                    sym = symbols.get(sym_idx)
+                    trace_widths.append(max(sym.size_x, sym.size_y) if sym else 0.0)
 
             elif record_type == 'L':
                 geom = _parse_line_record(parts, symbols, uf)
                 if geom is not None:
                     geometries.append(geom)
+                    # Line width = symbol's size_x (trace width)
+                    sym_idx = int(parts[5]) if len(parts) > 5 else -1
+                    sym = symbols.get(sym_idx)
+                    trace_widths.append(sym.size_x if sym else 0.0)
 
             elif record_type == 'S':
                 # Collect lines until SE
@@ -764,6 +774,9 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
                 geom = _parse_surface_block(surface_lines, uf)
                 if geom is not None:
                     geometries.append(geom)
+                    # Surface width = bounding box diagonal as proxy
+                    minx, miny, maxx, maxy = geom.bounds
+                    trace_widths.append(max(maxx - minx, maxy - miny))
 
             # A (arc), T (text), B (barcode) — skip silently
 
@@ -772,7 +785,7 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
             if error_count <= MAX_ERRORS:
                 warnings.append(f"Feature parse error at line {i}: {e}")
 
-    return geometries, warnings, fiducials
+    return geometries, trace_widths, warnings, fiducials
 
 
 # ---------------------------------------------------------------------------
@@ -822,7 +835,7 @@ def _parse_profile_layer(job_root: str, step_name: str, uf: float, unknown_symbo
     if text is None:
         return None
 
-    geoms, warnings, _ = _parse_features_text(text, uf, unknown_symbols)
+    geoms, widths, warnings, _ = _parse_features_text(text, uf, unknown_symbols)
     if not geoms:
         return None
 
@@ -833,6 +846,7 @@ def _parse_profile_layer(job_root: str, step_name: str, uf: float, unknown_symbo
         polygons=geoms,
         bounds=bounds,
         polygon_count=len(geoms),
+        trace_widths=widths,
         warnings=warnings,
     )
 
@@ -918,7 +932,7 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
             layer_uf = (25.4 if file_units == 'inch' else 1.0) if file_units else uf
 
             try:
-                geoms, layer_warnings, fiducials = _parse_features_text(text, layer_uf, unknown_symbols)
+                geoms, widths, layer_warnings, fiducials = _parse_features_text(text, layer_uf, unknown_symbols)
                 all_fiducials.extend(fiducials)
             except Exception as e:
                 global_warnings.append(
@@ -939,6 +953,7 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
                 polygons=geoms,
                 bounds=bounds,
                 polygon_count=len(geoms),
+                trace_widths=widths,
                 warnings=layer_warnings,
             )
 

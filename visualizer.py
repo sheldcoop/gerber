@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 visualizer.py — Plotly figure builder for PCB layer + AOI defect overlay.
 
@@ -41,6 +42,7 @@ class OverlayConfig:
     active_defect_x: float | None = None  # X coordinate for VRS targeting
     active_defect_y: float | None = None  # Y coordinate for VRS targeting
     crop_bounds: tuple[float, float, float, float] | None = None # Explicit viewport bounds for Geometry culling
+    min_feature_size: float | None = None  # LOD: skip features narrower than this (mm)
 
 
 # Engineering-standard colors for PCB layers
@@ -236,7 +238,13 @@ def _add_layer_traces(
 
         # Merge all polygons into coordinate arrays
         all_x, all_y = [], []
-        for poly in layer.polygons:
+        has_widths = hasattr(layer, 'trace_widths') and len(layer.trace_widths) == len(layer.polygons)
+        min_size = config.min_feature_size
+        for poly_idx, poly in enumerate(layer.polygons):
+            # --- LOD FILTERING: skip sub-threshold features at full-panel zoom ---
+            if min_size is not None and has_widths:
+                if layer.trace_widths[poly_idx] < min_size:
+                    continue
             # --- HIGH PERFORMANCE AABB CULLING ENGINE ---
             if cx1 is not None and cx2 is not None:
                 minx, miny, maxx, maxy = poly.bounds

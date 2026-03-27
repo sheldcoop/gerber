@@ -22,12 +22,14 @@ Panel geometry mirrors the faster-aoi GeometryEngine exactly:
   - Unit indices: 0-based, continuous across both quads (0 → 2*N-1)
 """
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +66,8 @@ class AlignmentResult:
     origin_x: float = 0.0
     origin_y: float = 0.0
     flip_y: bool = False
+    confidence: float = 0.0         # 0.0-1.0, alignment quality metric
+    fiducials_used: int = 0         # Number of fiducial pairs used
     warnings: list[str] = field(default_factory=list)
 
 
@@ -491,6 +495,47 @@ def detect_fiducials(df: pd.DataFrame) -> Optional[list[tuple[float, float]]]:
     return points if len(points) >= 2 else None
 
 
+def _pair_fiducials(
+    gerber_fids: list[tuple[float, float]],
+    aoi_fids: list[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]], list[str]]:
+    """Pair fiducial points by sorting both sets by angle from centroid.
+
+    Returns matched (gerber, aoi) lists of equal length plus any warnings.
+    """
+    warnings: list[str] = []
+    n_g, n_a = len(gerber_fids), len(aoi_fids)
+    if n_g != n_a:
+        warnings.append(
+            f"Fiducial count mismatch: {n_g} Gerber vs {n_a} AOI. "
+            f"Using the first {min(n_g, n_a)} pairs sorted by angle."
+        )
+
+    def _sort_by_angle(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not pts:
+            return pts
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        return sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+    sorted_g = _sort_by_angle(gerber_fids)
+    sorted_a = _sort_by_angle(aoi_fids)
+    n = min(len(sorted_g), len(sorted_a))
+    return sorted_g[:n], sorted_a[:n], warnings
+
+
+def _compute_confidence(
+    n_pairs: int,
+    max_residual: float,
+    overlap_pct: float,
+) -> float:
+    """Compute alignment confidence from fiducial metrics (0.0–1.0)."""
+    pair_factor = min(1.0, n_pairs / 3.0)
+    residual_factor = max(0.0, 1.0 - max_residual / 0.5)
+    overlap_factor = min(1.0, overlap_pct / 100.0)
+    return pair_factor * residual_factor * overlap_factor
+
+
 def compute_alignment(
     gerber_bounds: tuple[float, float, float, float],
     aoi_bounds: tuple[float, float, float, float],
@@ -505,44 +550,201 @@ def compute_alignment(
 ) -> AlignmentResult:
     """
     Compute coordinate alignment between Gerber and AOI coordinate spaces.
+
+    Alignment method priority:
+    1. Fiducial-based affine (when both gerber + aoi fiducials available)
+    2. Auto-detected fiducials from AOI DataFrame (when gerber fiducials exist)
+    3. Simple bounding-box offset (fallback)
+
+    Every fallback is surfaced as a user-visible warning — no silent downgrades.
     """
-    # Check for zero-area bounds
     g_width = gerber_bounds[2] - gerber_bounds[0]
     g_height = gerber_bounds[3] - gerber_bounds[1]
     a_width = aoi_bounds[2] - aoi_bounds[0]
     a_height = aoi_bounds[3] - aoi_bounds[1]
 
-    warnings = []
+    warnings: list[str] = []
     if g_width <= 0 or g_height <= 0:
         warnings.append("Gerber bounding box has zero area — no geometry parsed")
     if a_width <= 0 or a_height <= 0:
         warnings.append("AOI bounding box has zero area — no valid coordinates")
 
-    # Try fiducial-based alignment first
+    # --- Path 1: Explicit fiducial pairs provided ---
     if fiducials_gerber and fiducials_aoi:
-        result = _align_affine(fiducials_gerber, fiducials_aoi, gerber_bounds, aoi_bounds)
-        result.warnings = warnings + result.warnings
-        return result
+        paired_g, paired_a, pair_warns = _pair_fiducials(fiducials_gerber, fiducials_aoi)
+        warnings.extend(pair_warns)
+        if len(paired_g) >= 2:
+            result = _align_affine(paired_g, paired_a, gerber_bounds, aoi_bounds)
+            result.fiducials_used = len(paired_g)
+            # Compute residual for confidence
+            max_res = 0.0
+            if result.transform_matrix is not None:
+                for i in range(len(paired_a)):
+                    pt = result.transform_matrix @ [paired_a[i][0], paired_a[i][1], 1]
+                    err = math.sqrt((pt[0] - paired_g[i][0])**2 + (pt[1] - paired_g[i][1])**2)
+                    max_res = max(max_res, err)
+            result.confidence = _compute_confidence(len(paired_g), max_res, result.overlap_pct)
+            result.warnings = warnings + result.warnings
+            result.origin_x = origin_x
+            result.origin_y = origin_y
+            result.flip_y = flip_y
+            return result
 
-    # Auto-detect fiducials from AOI data
-    if aoi_df is not None:
+    # --- Path 2: Auto-detect AOI fiducials from DataFrame ---
+    if aoi_df is not None and fiducials_gerber:
+        aoi_fiducials = detect_fiducials(aoi_df)
+        if aoi_fiducials:
+            paired_g, paired_a, pair_warns = _pair_fiducials(fiducials_gerber, aoi_fiducials)
+            warnings.extend(pair_warns)
+            if len(paired_g) >= 2:
+                result = _align_affine(paired_g, paired_a, gerber_bounds, aoi_bounds)
+                result.fiducials_used = len(paired_g)
+                max_res = 0.0
+                if result.transform_matrix is not None:
+                    for i in range(len(paired_a)):
+                        pt = result.transform_matrix @ [paired_a[i][0], paired_a[i][1], 1]
+                        err = math.sqrt((pt[0] - paired_g[i][0])**2 + (pt[1] - paired_g[i][1])**2)
+                        max_res = max(max_res, err)
+                result.confidence = _compute_confidence(len(paired_g), max_res, result.overlap_pct)
+                if result.confidence < 0.3:
+                    warnings.append(
+                        f"Low fiducial alignment confidence ({result.confidence:.2f}). "
+                        "Auto-detected AOI fiducials may not match Gerber fiducials correctly. "
+                        "Verify alignment visually or provide explicit fiducial pairs."
+                    )
+                result.warnings = warnings + result.warnings
+                result.origin_x = origin_x
+                result.origin_y = origin_y
+                result.flip_y = flip_y
+                return result
+            else:
+                warnings.append(
+                    "Fiducial columns detected in AOI data but fewer than 2 usable pairs. "
+                    "Falling back to bounding-box offset alignment."
+                )
+    elif aoi_df is not None:
         aoi_fiducials = detect_fiducials(aoi_df)
         if aoi_fiducials:
             warnings.append(
                 "Fiducial columns detected in AOI data, but no matching Gerber "
-                "fiducials provided. Using simple offset alignment instead. "
-                "For better accuracy, provide Gerber fiducial coordinates."
+                "fiducials available from ODB++ archive. Falling back to bounding-box "
+                "offset alignment. For fiducial-based alignment, ensure the ODB++ "
+                "archive contains features with .fiducial attributes."
             )
 
-    # Fall back to simple offset alignment (add manual offsets)
+    # --- Path 3: Simple offset alignment (fallback) ---
     result = _align_simple(gerber_bounds, aoi_bounds)
     result.offset_x += manual_offset_x
     result.offset_y += manual_offset_y
+    result.confidence = min(1.0, result.overlap_pct / 100.0) * 0.5  # capped at 0.5 for offset
+    result.fiducials_used = 0
     result.warnings = warnings + result.warnings
     result.origin_x = origin_x
     result.origin_y = origin_y
     result.flip_y = flip_y
     return result
+
+
+def _alignment_result_to_hashable(result: AlignmentResult) -> tuple:
+    """Convert AlignmentResult to a hashable tuple for caching."""
+    matrix_tuple = tuple(map(tuple, result.transform_matrix.tolist())) if result.transform_matrix is not None else None
+    return (
+        result.method, result.offset_x, result.offset_y,
+        result.scale_x, result.scale_y, result.rotation_deg,
+        result.overlap_pct, matrix_tuple,
+        result.gerber_bounds, result.aoi_bounds,
+        result.origin_x, result.origin_y, result.flip_y,
+        result.confidence, result.fiducials_used,
+        tuple(result.warnings),
+    )
+
+
+@st.cache_data(show_spinner="Computing alignment...")
+def compute_alignment_cached(
+    gerber_bounds: tuple,
+    aoi_bounds: tuple,
+    aoi_data_hash: str,
+    fiducials_gerber: Optional[tuple] = None,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
+    flip_y: bool = False,
+    manual_offset_x: float = 0.0,
+    manual_offset_y: float = 0.0,
+    _aoi_df: Optional[pd.DataFrame] = None,
+) -> dict:
+    """Cached wrapper for compute_alignment. Returns dict for serialization safety."""
+    fids_g = list(fiducials_gerber) if fiducials_gerber else None
+    result = compute_alignment(
+        gerber_bounds=gerber_bounds,
+        aoi_bounds=aoi_bounds,
+        aoi_df=_aoi_df,
+        fiducials_gerber=fids_g,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        flip_y=flip_y,
+        manual_offset_x=manual_offset_x,
+        manual_offset_y=manual_offset_y,
+    )
+    # Serialize to dict for cache-safe storage
+    return {
+        'method': result.method,
+        'offset_x': result.offset_x,
+        'offset_y': result.offset_y,
+        'scale_x': result.scale_x,
+        'scale_y': result.scale_y,
+        'rotation_deg': result.rotation_deg,
+        'overlap_pct': result.overlap_pct,
+        'transform_matrix': result.transform_matrix.tolist() if result.transform_matrix is not None else None,
+        'gerber_bounds': result.gerber_bounds,
+        'aoi_bounds': result.aoi_bounds,
+        'origin_x': result.origin_x,
+        'origin_y': result.origin_y,
+        'flip_y': result.flip_y,
+        'confidence': result.confidence,
+        'fiducials_used': result.fiducials_used,
+        'warnings': result.warnings,
+    }
+
+
+def _dict_to_alignment_result(d: dict) -> AlignmentResult:
+    """Reconstruct AlignmentResult from cached dict."""
+    matrix = np.array(d['transform_matrix']) if d['transform_matrix'] is not None else None
+    return AlignmentResult(
+        method=d['method'],
+        offset_x=d['offset_x'],
+        offset_y=d['offset_y'],
+        scale_x=d['scale_x'],
+        scale_y=d['scale_y'],
+        rotation_deg=d['rotation_deg'],
+        overlap_pct=d['overlap_pct'],
+        transform_matrix=matrix,
+        gerber_bounds=tuple(d['gerber_bounds']),
+        aoi_bounds=tuple(d['aoi_bounds']),
+        origin_x=d['origin_x'],
+        origin_y=d['origin_y'],
+        flip_y=d['flip_y'],
+        confidence=d['confidence'],
+        fiducials_used=d['fiducials_used'],
+        warnings=d['warnings'],
+    )
+
+
+@st.cache_data(show_spinner="Applying coordinate transform...")
+def apply_alignment_cached(
+    _df_hash: str,
+    alignment_dict: dict,
+    unit_row: Optional[int] = None,
+    unit_col: Optional[int] = None,
+    _df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Cached wrapper for apply_alignment."""
+    result = _dict_to_alignment_result(alignment_dict)
+    return apply_alignment(_df, result, unit_row=unit_row, unit_col=unit_col)
+
+
+def compute_dataframe_hash(df: pd.DataFrame) -> str:
+    """Compute a fast hash of a DataFrame for caching keys."""
+    return hashlib.md5(pd.util.hash_pandas_object(df).values.tobytes()).hexdigest()
 
 
 def apply_alignment(
@@ -619,6 +821,8 @@ def get_debug_info(result: AlignmentResult) -> dict:
         'scale_y': round(result.scale_y, 6),
         'rotation_deg': round(result.rotation_deg, 4),
         'overlap_pct': round(result.overlap_pct, 1),
+        'confidence': round(result.confidence, 4),
+        'fiducials_used': result.fiducials_used,
         'gerber_bounds': {
             'min_x': round(result.gerber_bounds[0], 3),
             'min_y': round(result.gerber_bounds[1], 3),
