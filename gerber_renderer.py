@@ -9,10 +9,13 @@ SVGs and data URLs are pre-cached to avoid re-rendering on UI interactions.
 """
 
 import base64
+import hashlib
 import math
 import os
+import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from gerbonara import GerberFile
@@ -50,6 +53,81 @@ def _png_to_data_url(png_bytes: bytes) -> str:
     """Convert PNG bytes to base64 data URL."""
     b64 = base64.b64encode(png_bytes).decode('ascii')
     return f"data:image/png;base64,{b64}"
+
+
+# ── Disk cache ────────────────────────────────────────────────────────────────
+_CAM_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs' / 'cam'
+
+
+def _tgz_cache_path(tgz_bytes: bytes) -> Path:
+    digest = hashlib.md5(tgz_bytes).hexdigest()
+    return _CAM_CACHE_DIR / f"{digest}.pkl"
+
+
+def save_render_cache(tgz_bytes: bytes, rendered: 'RenderedODB') -> None:
+    """Persist a RenderedODB to disk, keyed by MD5 of the TGZ content."""
+    try:
+        _CAM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            'layers': {
+                name: {
+                    'name': lyr.name,
+                    'layer_type': lyr.layer_type,
+                    'svg_string': lyr.svg_string,
+                    'svg_data_url': lyr.svg_data_url,
+                    'color_svg_urls': lyr.color_svg_urls,
+                    'bounds': lyr.bounds,
+                    'feature_count': lyr.feature_count,
+                    'panel_png_data_url': lyr.panel_png_data_url,
+                    'stats': lyr.stats,
+                }
+                for name, lyr in rendered.layers.items()
+            },
+            'board_bounds': rendered.board_bounds,
+            'step_name': rendered.step_name,
+            'units': rendered.units,
+            'panel_layout': rendered.panel_layout,
+            'warnings': rendered.warnings,
+        }
+        cache_path = _tgz_cache_path(tgz_bytes)
+        with open(cache_path, 'wb') as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass  # cache write failure is non-fatal
+
+
+def load_render_cache(tgz_bytes: bytes) -> Optional['RenderedODB']:
+    """Return a cached RenderedODB for this TGZ, or None if not cached."""
+    try:
+        cache_path = _tgz_cache_path(tgz_bytes)
+        if not cache_path.exists():
+            return None
+        with open(cache_path, 'rb') as f:
+            payload = pickle.load(f)
+        layers = {}
+        for name, d in payload['layers'].items():
+            layers[name] = RenderedLayer(
+                name=d['name'],
+                layer_type=d['layer_type'],
+                svg_string=d['svg_string'],
+                svg_data_url=d['svg_data_url'],
+                color_svg_urls=d['color_svg_urls'],
+                gerber_file=None,
+                bounds=d['bounds'],
+                feature_count=d['feature_count'],
+                panel_png_data_url=d['panel_png_data_url'],
+                stats=d['stats'],
+            )
+        return RenderedODB(
+            layers=layers,
+            board_bounds=payload['board_bounds'],
+            step_name=payload.get('step_name', ''),
+            units=payload.get('units', ''),
+            panel_layout=payload['panel_layout'],
+            warnings=payload.get('warnings', []),
+        )
+    except Exception:
+        return None
 
 
 def build_panel_png(svg_string: str, panel_layout, unit_px: int = 200) -> str:
@@ -130,7 +208,7 @@ class RenderedLayer:
 @dataclass
 class PanelLayout:
     """Panel tiling layout derived from TGZ STEP-REPEAT data."""
-    unit_positions: list          # [(x_mm, y_mm), ...] absolute positions of each unit
+    unit_positions: list          # [(x_mm, y_mm), ...] centered for panel PNG display
     unit_bounds: tuple            # (width_mm, height_mm) of a single unit
     total_units: int
     rows: int                     # effective total rows across entire panel
@@ -138,6 +216,7 @@ class PanelLayout:
     step_hierarchy: dict          # raw step-repeat data {step: [StepRepeat, ...]}
     panel_width: float = 510.0    # mm (constant)
     panel_height: float = 515.0   # mm (constant)
+    unit_positions_raw: list = field(default_factory=list)  # raw ODB++ coords (pre-centering)
 
 
 @dataclass
@@ -444,6 +523,10 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     else:
         rows, cols = 1, 1
 
+    # Save raw (pre-centering) positions for AOI coordinate normalisation.
+    # AOI X_MM/Y_MM are in the same ODB++ coordinate space as these raw positions.
+    raw_unique = list(unique)
+
     # Center positions within the panel frame (0,0)→(panel_width, panel_height)
     if unique:
         uw, uh = unit_bounds
@@ -460,6 +543,7 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
 
     return PanelLayout(
         unit_positions=unique,
+        unit_positions_raw=raw_unique,
         unit_bounds=unit_bounds,
         total_units=len(unique),
         rows=rows,
@@ -627,7 +711,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         if panel_layout and rendered_layers:
             def _build_panel_png(layer_obj):
                 try:
-                    url = build_panel_png(layer_obj.svg_string, panel_layout)
+                    url = build_panel_png(layer_obj.svg_string, panel_layout, unit_px=500)
                     layer_obj.panel_png_data_url = url
                 except Exception:
                     pass

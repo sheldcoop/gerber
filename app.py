@@ -17,7 +17,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout
+from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side, render_column_mapping_ui,
     AOIDataset, FILENAME_PATTERN,
@@ -30,10 +30,6 @@ from alignment import (
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
 from visualizer import build_overlay_figure, build_defect_only_figure, OverlayConfig, _apply_layout
-from svg_utils import (
-    load_svg_store, parse_svg_keys, get_svg_viewbox_mm,
-    svg_to_data_url, get_rounded_rect_path,
-)
 import plotly.graph_objects as go
 
 
@@ -62,7 +58,6 @@ def _init_state():
         'data_loaded': False,
         'align_args': {},            # Reset on each load to prevent stale offsets
         'needs_manual_side': {},     # filename → True if BU/side not detected
-        'svg_store': {},             # {"BU-01_F": svg_string, ...}
         'rendered_odb': None,        # RenderedODB (Gerbonara CAM SVGs)
     }
     for key, val in defaults.items():
@@ -152,24 +147,6 @@ with st.sidebar:
                 side = st.selectbox(f"Side for {fname}", ['Front', 'Back'], key=f"side_{fname}")
             manual_map[fname] = (bu, 'F' if side == 'Front' else 'B')
 
-    svg_files_upload = st.file_uploader(
-        "SVG Layer Files (.svg)",
-        type=["svg"],
-        accept_multiple_files=True,
-        help="One SVG per buildup/side. Naming: BU-01_F.svg, BU-02_B.svg …",
-    )
-    if svg_files_upload:
-        _new_store = load_svg_store(svg_files_upload)
-        if _new_store:
-            st.session_state['svg_store'] = _new_store
-            _bu_nums_up, _sides_up = parse_svg_keys(_new_store)
-            st.success(f"Loaded {len(_new_store)} SVG(s): BU-{_bu_nums_up} × {_sides_up}")
-            _first_key = next(iter(_new_store))
-            _vb = get_svg_viewbox_mm(_new_store[_first_key])
-            if _vb:
-                st.session_state['svg_cell_w'] = _vb[0]
-                st.session_state['svg_cell_h'] = _vb[1]
-
     st.divider()
 
     # ---- Load & Process Button ----
@@ -195,28 +172,6 @@ with st.sidebar:
                     gerber_file = io.BytesIO(f.read())
                     gerber_file.name = "test_2F.tgz"
 
-            # 2. Auto-load test SVGs from test_svgs/ directory
-            _test_svg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_svgs")
-            if os.path.isdir(_test_svg_dir):
-                _test_svg_store = {}
-                for _svg_fname in os.listdir(_test_svg_dir):
-                    if _svg_fname.lower().endswith(".svg"):
-                        _svg_path = os.path.join(_test_svg_dir, _svg_fname)
-                        with open(_svg_path, "r", encoding="utf-8") as _svg_f:
-                            _svg_content = _svg_f.read()
-                        # Key by stem: BU-01_F, BU-02_B, etc.
-                        _key = os.path.splitext(_svg_fname)[0]
-                        _test_svg_store[_key] = _svg_content
-                if _test_svg_store:
-                    st.session_state['svg_store'] = _test_svg_store
-                    # Auto-detect cell dimensions from first SVG viewBox
-                    _first_svg = next(iter(_test_svg_store.values()))
-                    _vb = get_svg_viewbox_mm(_first_svg)
-                    if _vb:
-                        st.session_state['svg_cell_w'] = _vb[0]
-                        st.session_state['svg_cell_h'] = _vb[1]
-                    st.session_state['bg_source'] = 'SVG'
-                    
             # 2. Native Dynamic Execution of faster-aoi Sample Generator
             faster_dir = "/Users/prince/Desktop/faster-aoi"
             if os.path.exists(faster_dir) and faster_dir not in sys.path:
@@ -278,45 +233,56 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"ODB++ parsing failed: {e}")
 
-            # Render CAM-quality SVGs via Gerbonara
+            # Render CAM-quality SVGs via Gerbonara (with disk cache)
             if gerber_file:
-                with st.spinner("Rendering CAM-quality copper layers..."):
-                    try:
-                        gerber_file.seek(0)
-                        rendered = render_odb_to_cam(
-                            gerber_file.read(), gerber_file.name,
+                try:
+                    gerber_file.seek(0)
+                    _tgz_bytes = gerber_file.read()
+                    gerber_file.seek(0)
+
+                    rendered = load_render_cache(_tgz_bytes)
+                    _from_cache = rendered is not None
+
+                    if not rendered:
+                        with st.spinner("Rendering CAM-quality copper layers..."):
+                            rendered = render_odb_to_cam(_tgz_bytes, gerber_file.name)
+                            save_render_cache(_tgz_bytes, rendered)
+
+                    st.session_state['rendered_odb'] = rendered
+
+                    # Auto-populate panel grid from TGZ step-repeat data
+                    if rendered.panel_layout:
+                        _pl = rendered.panel_layout
+                        _qr = max(1, _pl.rows // 2)
+                        _qc = max(1, _pl.cols // 2)
+                        st.session_state['quad_rows_input'] = _qr
+                        st.session_state['quad_cols_input'] = _qc
+                        st.info(
+                            f"Panel layout from TGZ: {_pl.total_units} units "
+                            f"({_pl.cols}×{_pl.rows} grid, "
+                            f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
                         )
-                        gerber_file.seek(0)
-                        st.session_state['rendered_odb'] = rendered
 
-                        # Auto-populate panel grid from TGZ step-repeat data
-                        if rendered.panel_layout:
-                            _pl = rendered.panel_layout
-                            # Derive rows/cols per quadrant (total / 2 since 2×2 quadrants)
-                            _qr = max(1, _pl.rows // 2)
-                            _qc = max(1, _pl.cols // 2)
-                            st.session_state['quad_rows_input'] = _qr
-                            st.session_state['quad_cols_input'] = _qc
-                            st.info(
-                                f"Panel layout from TGZ: {_pl.total_units} units "
-                                f"({_pl.cols}×{_pl.rows} grid, "
-                                f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
+                    if rendered.layers:
+                        layer_names = list(rendered.layers.keys())
+                        st.session_state['cam_layer_select'] = layer_names[0]
+                        total_features = sum(l.feature_count for l in rendered.layers.values())
+                        if _from_cache:
+                            st.success(
+                                f"Loaded from design cache — {len(rendered.layers)} layers, "
+                                f"{total_features:,} features"
                             )
-
-                        if rendered.layers:
-                            layer_names = list(rendered.layers.keys())
-                            st.session_state['cam_layer_select'] = layer_names[0]
-                            total_features = sum(l.feature_count for l in rendered.layers.values())
+                        else:
                             st.success(
                                 f"CAM render: {len(rendered.layers)} copper layers, "
                                 f"{total_features:,} features "
                                 f"(bounds: {rendered.board_bounds[2]-rendered.board_bounds[0]:.1f} x "
                                 f"{rendered.board_bounds[3]-rendered.board_bounds[1]:.1f} mm)"
                             )
-                        for w in rendered.warnings:
-                            st.warning(w, icon="⚠️")
-                    except Exception as e:
-                        st.warning(f"CAM rendering failed (falling back to Shapely): {e}")
+                    for w in rendered.warnings:
+                        st.warning(w, icon="⚠️")
+                except Exception as e:
+                    st.warning(f"CAM rendering failed (falling back to Shapely): {e}")
 
         # Load AOI data
         if aoi_files:
@@ -357,26 +323,10 @@ with st.sidebar:
             st.divider()
             st.header("Coordinate Alignment")
 
-            # Explicit Grid definition to govern the mathematical unit cell width
-            st.subheader("Physical Panel Layout")
-            _tgz_rows = st.session_state.get('quad_rows_input', 6)
-            _tgz_cols = st.session_state.get('quad_cols_input', 6)
-            col_g1, col_g2 = st.columns(2)
-            with col_g1:
-                quad_rows = st.number_input("Rows per Quadrant", min_value=1, value=int(_tgz_rows), step=1)
-            with col_g2:
-                quad_cols = st.number_input("Cols per Quadrant", min_value=1, value=int(_tgz_cols), step=1)
-
-            # Dynamic inter-quadrant gaps (user-given, per faster-aoi convention)
-            col_g3, col_g4 = st.columns(2)
-            with col_g3:
-                dyn_gap_x = st.number_input("Dyn Gap X (mm)", min_value=0.0, value=5.0, step=0.5,
-                                            key='dyn_gap_x_input',
-                                            help="Dynamic inter-quadrant gap in X. Total gap = 3 + 2×this.")
-            with col_g4:
-                dyn_gap_y = st.number_input("Dyn Gap Y (mm)", min_value=0.0, value=3.5, step=0.5,
-                                            key='dyn_gap_y_input',
-                                            help="Dynamic inter-quadrant gap in Y. Total gap = 3 + 2×this.")
+            # Grid derived from TGZ step-repeat; fallback constants used only when
+            # AOI data lacks UNIT_INDEX_Y/X columns.
+            quad_rows = int(st.session_state.get('quad_rows_input', 6))
+            quad_cols = int(st.session_state.get('quad_cols_input', 6))
 
             flip_y = st.checkbox("Flip Y axis", False, help="Invert Y coordinates based on board height")
             
@@ -436,11 +386,8 @@ with st.sidebar:
             col3, col4 = st.columns(2)
             with col3:
                 unit_row = st.selectbox("Unit Row", unit_row_opts, key='sel_unit_row', on_change=update_offsets)
-                # Link the number input value to session state so the callback sees it
-                st.session_state['quad_rows_input'] = quad_rows
             with col4:
                 unit_col = st.selectbox("Unit Col", unit_col_opts, key='sel_unit_col', on_change=update_offsets)
-                st.session_state['quad_cols_input'] = quad_cols
             
             unit_row_val = None if unit_row == 'All' else unit_row
             unit_col_val = None if unit_col == 'All' else unit_col
@@ -517,22 +464,17 @@ with st.sidebar:
                 key='color_mode_select',
             )
 
-        # ---- SVG Background Source ----
-        _ss = st.session_state.get('svg_store', {})
+        # ---- Background Source ----
         _has_rendered = bool(st.session_state.get('rendered_odb'))
-        if _ss or _has_rendered:
-            _has_odb = bool(st.session_state.get('parsed_odb'))
+        _has_odb = bool(st.session_state.get('parsed_odb'))
+        if _has_rendered or _has_odb:
             if 'bg_source' not in st.session_state:
-                st.session_state['bg_source'] = 'CAM (Gerbonara)' if _has_rendered else ('ODB++ / Shapely' if _has_odb else 'SVG')
+                st.session_state['bg_source'] = 'CAM (Gerbonara)' if _has_rendered else 'ODB++ / Shapely'
             _bg_options = []
             if _has_rendered:
                 _bg_options.append('CAM (Gerbonara)')
             if _has_odb:
                 _bg_options.append('ODB++ / Shapely')
-            if _ss:
-                _bu_loaded, _sides_loaded = parse_svg_keys(_ss)
-                st.caption(f"SVG loaded: BU-{_bu_loaded} × {_sides_loaded}")
-                _bg_options.append('SVG')
             if not _bg_options:
                 _bg_options = ['ODB++ / Shapely']
             st.radio(
@@ -553,8 +495,7 @@ with st.sidebar:
 parsed = st.session_state.get('parsed_odb')
 aoi = st.session_state.get('aoi_dataset')
 
-# Render main visualization if either traditional data is loaded OR SVGs are uploaded
-if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state.get('svg_store'):
+if st.session_state.get('data_loaded') and (parsed or aoi):
     align_args = st.session_state.get('align_args', {})
     
     if parsed and aoi and parsed.layers and aoi.has_data:
@@ -725,54 +666,10 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             panel_config.side_filter   = 'Both' if side_active == 'All' else side_active
 
             panel_fig = build_defect_only_figure(panel_df, panel_config)
-
-            # ── SVG background tiling (when bg_source == 'SVG') ───────────
-            _svg_store = st.session_state.get('svg_store', {})
-            _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
-            if _svg_store and _bg_source == 'SVG':
-                _svg_cell_w = float(st.session_state.get('svg_cell_w', 35.0))
-                _svg_cell_h = float(st.session_state.get('svg_cell_h', 39.0))
-                _q_rows = int(st.session_state.get('quad_rows_input', 6))
-                _q_cols = int(st.session_state.get('quad_cols_input', 6))
-                _d_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
-                _d_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
-                _ctx = calculate_geometry(_q_rows, _q_cols, _d_gap_x, _d_gap_y)
-                _total_units = _q_rows * _q_cols * 4
-                # Pick the first available SVG key that matches current scope filters
-                _scope_bu = st.session_state.get('scope_bu_sel', [])
-                _scope_side = st.session_state.get('scope_side_sel', ['Front'])
-                _side_char = 'F' if 'Front' in _scope_side else 'B'
-                _bu_num = _scope_bu[0] if _scope_bu else 1
-                _svg_key = f"BU-{_bu_num:02d}_{_side_char}"
-                _svg_str = _svg_store.get(_svg_key) or next(iter(_svg_store.values()), None)
-                if _svg_str:
-                    import xml.etree.ElementTree as _ET2
-                    try:
-                        _r2 = _ET2.fromstring(_svg_str)
-                        _inner2 = ''.join(_ET2.tostring(c, encoding='unicode') for c in _r2)
-                    except Exception:
-                        _inner2 = f'<image href="{svg_to_data_url(_svg_str)}" x="0" y="0" width="{_svg_cell_w}" height="{_svg_cell_h}"/>'
-                    _tiles2 = []
-                    for _, (q_ox, q_oy) in _ctx.quadrant_origins.items():
-                        for _r in range(_q_rows):
-                            for _c in range(_q_cols):
-                                ux = q_ox + INTER_UNIT_GAP + _c * _ctx.stride_x
-                                uy = q_oy + INTER_UNIT_GAP + _r * _ctx.stride_y
-                                _tiles2.append(f'<g transform="translate({ux:.3f},{uy:.3f})">{_inner2}</g>')
-                    _comp_svg = (
-                        f'<svg xmlns="http://www.w3.org/2000/svg" '
-                        f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}">'
-                        + ''.join(_tiles2) + '</svg>'
-                    )
-                    panel_fig.update_layout(images=[dict(
-                        source=svg_to_data_url(_comp_svg),
-                        xref="x", yref="y",
-                        x=0, y=FRAME_HEIGHT,
-                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                        sizing="stretch", layer="below", opacity=1.0,
-                    )])
+            panel_fig.update_layout(showlegend=False)
 
             # ── CAM (Gerbonara) background tiling (pre-cached panel PNG) ────
+            _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
             _rendered_panel = st.session_state.get('rendered_odb')
             if _bg_source == 'CAM (Gerbonara)' and _rendered_panel and _rendered_panel.panel_layout:
                 # Pick the first visible layer's pre-cached panel PNG
@@ -808,7 +705,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                                 x=hx, y=hy, mode='lines',
                                 line=dict(color='#00FFCC', width=2, dash='dash'),
                                 name=f"Cluster {crow['cluster_id']} ({crow['defect_count']})",
-                                hoverinfo='name', showlegend=True,
+                                hoverinfo='name', showlegend=False,
                             ))
                     # Store for cluster panel below
                     st.session_state['_cluster_summary'] = cluster_summary
@@ -908,78 +805,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     st.session_state['manual_offset_y'] = float(round(oy, 3))
                     st.rerun()
 
-        elif st.session_state.get('svg_store') and st.session_state.get('bg_source') == 'SVG':
-            # SVG-only mode: no AOI data yet, but SVG is loaded — render tiled panel
-            _svg_store2 = st.session_state['svg_store']
-            _svg_cell_w2 = float(st.session_state.get('svg_cell_w', 35.0))
-            _svg_cell_h2 = float(st.session_state.get('svg_cell_h', 39.0))
-            _q_rows2 = int(st.session_state.get('quad_rows_input', 6))
-            _q_cols2 = int(st.session_state.get('quad_cols_input', 6))
-            _d_gap_x2 = float(st.session_state.get('dyn_gap_x_input', 5.0))
-            _d_gap_y2 = float(st.session_state.get('dyn_gap_y_input', 3.5))
-            _ctx2 = calculate_geometry(_q_rows2, _q_cols2, _d_gap_x2, _d_gap_y2)
-            _qb2 = get_panel_quadrant_bounds(_q_rows2, _q_cols2, _d_gap_x2, _d_gap_y2)
-            _fx1, _fy1, _fx2, _fy2 = _qb2['frame']
-            _svg_fig = go.Figure()
-            _svg_fig.update_layout(
-                xaxis=dict(range=[_fx1 - 10, _fx2 + 10], scaleanchor='y', scaleratio=1,
-                           showgrid=False, zeroline=False, color='#aaa'),
-                yaxis=dict(range=[_fy1 - 10, _fy2 + 10], showgrid=False, zeroline=False, color='#aaa'),
-                plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
-                margin=dict(l=0, r=0, t=24, b=0),
-                height=720,
-            )
-            # Structural grid shapes — same as AOI path
-            _svg_fig.add_shape(type="rect", x0=_fx1-5, y0=_fy1-5, x1=_fx2+5, y1=_fy2+5,
-                               fillcolor="#2B3A2B", line=dict(color="#1a2a1a", width=1), layer="below")
-            _svg_fig.add_shape(type="rect", x0=_fx1, y0=_fy1, x1=_fx2, y1=_fy2,
-                               fillcolor="rgba(184,115,51,0.18)", line=dict(color="#C87533", width=3), layer="below")
-            for _qname2, (_qbx1, _qby1, _qbx2, _qby2) in _qb2.items():
-                if _qname2 == 'frame':
-                    continue
-                _svg_fig.add_shape(type="rect", x0=_qbx1, y0=_qby1, x1=_qbx2, y1=_qby2,
-                                   fillcolor="rgba(0,200,120,0.04)",
-                                   line=dict(color="rgba(0,200,120,0.35)", width=1, dash="dot"), layer="below")
-            for _, (_qox2, _qoy2) in _ctx2.quadrant_origins.items():
-                for _pr2 in range(_q_rows2):
-                    for _pc2 in range(_q_cols2):
-                        _ux2 = _qox2 + INTER_UNIT_GAP + _pc2 * _ctx2.stride_x
-                        _uy2 = _qoy2 + INTER_UNIT_GAP + _pr2 * _ctx2.stride_y
-                        _svg_fig.add_shape(type="rect", x0=_ux2, y0=_uy2,
-                                           x1=_ux2 + _ctx2.cell_width, y1=_uy2 + _ctx2.cell_height,
-                                           fillcolor="rgba(0,180,100,0.07)",
-                                           line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
-            # Tile the SVGs
-            _svg_str2 = next(iter(_svg_store2.values()), None)
-            if _svg_str2:
-                import xml.etree.ElementTree as _ET3
-                try:
-                    _r3 = _ET3.fromstring(_svg_str2)
-                    _inner3 = ''.join(_ET3.tostring(c, encoding='unicode') for c in _r3)
-                except Exception:
-                    _inner3 = f'<image href="{svg_to_data_url(_svg_str2)}" x="0" y="0" width="{_svg_cell_w2}" height="{_svg_cell_h2}"/>'
-                _tiles3 = []
-                for _, (_qox3, _qoy3) in _ctx2.quadrant_origins.items():
-                    for _pr3 in range(_q_rows2):
-                        for _pc3 in range(_q_cols2):
-                            _ux3 = _qox3 + INTER_UNIT_GAP + _pc3 * _ctx2.stride_x
-                            _uy3 = _qoy3 + INTER_UNIT_GAP + _pr3 * _ctx2.stride_y
-                            _tiles3.append(f'<g transform="translate({_ux3:.3f},{_uy3:.3f})">{_inner3}</g>')
-                _comp_svg2 = (
-                    f'<svg xmlns="http://www.w3.org/2000/svg" '
-                    f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}">'
-                    + ''.join(_tiles3) + '</svg>'
-                )
-                _svg_fig.update_layout(images=[dict(
-                    source=svg_to_data_url(_comp_svg2),
-                    xref="x", yref="y",
-                    x=0, y=FRAME_HEIGHT,
-                    sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                    sizing="stretch", layer="below", opacity=1.0,
-                )])
-            st.plotly_chart(_svg_fig, width='stretch',
-                            config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
-
         elif st.session_state.get('rendered_odb') and st.session_state.get('bg_source') == 'CAM (Gerbonara)':
             # CAM-only mode: no AOI data, but TGZ is rendered — show tiled panel PNG
             _rodb = st.session_state['rendered_odb']
@@ -1030,7 +855,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 st.info("Panel layout not found in TGZ. Upload AOI data for panel view.")
 
         else:
-            st.info("Upload AOI defect data or SVG layer files to view the Panel Map.")
+            st.info("Upload AOI defect data to view the Panel Map.")
 
     elif view_mode == "🔬 Single Unit Inspection":
         # Build overlay config from sidebar controls
@@ -1158,13 +983,11 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
 
         # Build and render figure
         _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
-        _svg_store_unit = st.session_state.get('svg_store', {})
-        _use_svg_bg = _svg_store_unit and (_bg_source == 'SVG')
         _use_cam_bg = (_bg_source == 'CAM (Gerbonara)')
         _rendered_odb = st.session_state.get('rendered_odb')
 
         # When using CAM background, don't render Shapely layers (avoid double-render)
-        gerber_layers = parsed.layers if (parsed and not _use_svg_bg and not _use_cam_bg) else {}
+        gerber_layers = parsed.layers if (parsed and not _use_cam_bg) else {}
 
         if gerber_layers:
             fig = build_overlay_figure(
@@ -1225,30 +1048,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 config.board_bounds = (_rbb[0] + ox, _rbb[1] + oy, _rbb[2] + ox, _rbb[3] + oy)
                 _apply_layout(fig, config)
 
-        # ── SVG background for Single Unit view ──────────────────────────
-        if _use_svg_bg and fig is not None:
-            _svg_cell_w = float(st.session_state.get('svg_cell_w', 35.0))
-            _svg_cell_h = float(st.session_state.get('svg_cell_h', 39.0))
-            _bu_sel = st.session_state.get('buildup_filter_select', [1])
-            _side_sel = st.session_state.get('side_filter_select', 'Both')
-            _bu_n = _bu_sel[0] if _bu_sel else 1
-            _side_c = 'F' if _side_sel in ('Front', 'Both') else 'B'
-            _ukey = f"BU-{_bu_n:02d}_{_side_c}"
-            _usvg = _svg_store_unit.get(_ukey) or next(iter(_svg_store_unit.values()), None)
-            if _usvg:
-                _unit_x = config.offset_x
-                _unit_y = config.offset_y
-                _svg_off_x = float(st.session_state.get('svg_off_x', 0.0))
-                _svg_off_y = float(st.session_state.get('svg_off_y', 0.0))
-                fig.add_layout_image(dict(
-                    source=svg_to_data_url(_usvg),
-                    xref="x", yref="y",
-                    x=_unit_x + _svg_off_x,
-                    y=_unit_y + _svg_off_y + _svg_cell_h,
-                    sizex=_svg_cell_w, sizey=_svg_cell_h,
-                    sizing="stretch", layer="below", opacity=1.0,
-                ))
-
         if fig:
             st.plotly_chart(
                 fig,
@@ -1301,18 +1100,33 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             _d_gap_x_cm = float(st.session_state.get('dyn_gap_x_input', 5.0))
             _d_gap_y_cm = float(st.session_state.get('dyn_gap_y_input', 3.5))
 
-            # ── Discover all (row, col) pairs that have defects ───────────────
-            _aup = (
-                aoi.all_defects[['UNIT_INDEX_Y', 'UNIT_INDEX_X']]
-                .dropna()
-                .drop_duplicates()
-                .sort_values(['UNIT_INDEX_Y', 'UNIT_INDEX_X'])
-                .values.tolist()
-            )
-            _all_cm_pairs  = [(int(r), int(c)) for r, c in _aup]
+            # ── Build full unit grid from TGZ (all 144 units), fall back to AOI ─
+            _rodb_cm_pl = st.session_state.get('rendered_odb')
+            if _rodb_cm_pl and _rodb_cm_pl.panel_layout:
+                _pl_cm  = _rodb_cm_pl.panel_layout
+                _rp_cm  = getattr(_pl_cm, 'unit_positions_raw', None) or _pl_cm.unit_positions
+                _uxs_cm = sorted(set(round(x, 2) for x, _ in _rp_cm))
+                _uys_cm = sorted(set(round(y, 2) for _, y in _rp_cm))
+                _all_cm_pairs = [(ri, ci)
+                                 for ri in range(len(_uys_cm))
+                                 for ci in range(len(_uxs_cm))]
+                # Update quad size from TGZ (rows/cols per quadrant = half of total)
+                _q_rows_cm = max(1, len(_uys_cm) // 2)
+                _q_cols_cm = max(1, len(_uxs_cm) // 2)
+            else:
+                # Fallback: only units that appear in AOI data
+                _aup = (
+                    aoi.all_defects[['UNIT_INDEX_Y', 'UNIT_INDEX_X']]
+                    .dropna()
+                    .drop_duplicates()
+                    .sort_values(['UNIT_INDEX_Y', 'UNIT_INDEX_X'])
+                    .values.tolist()
+                )
+                _all_cm_pairs = [(int(r), int(c)) for r, c in _aup]
             _all_cm_labels = [f"({r},{c})" for r, c in _all_cm_pairs]
 
-            # Quadrant assignment (Q1=top-left, Q2=bottom-left, Q3=bottom-right, Q4=top-right)
+            # Quadrant assignment: Q2=lower-left(rows 0-5,cols 0-5), Q1=top-left(rows 6-11,cols 0-5)
+            #                     Q3=lower-right(rows 0-5,cols 6-11), Q4=top-right(rows 6-11,cols 6-11)
             def _cm_quad(r, c):
                 qr, qc = r // _q_rows_cm, c // _q_cols_cm
                 return {(0,0):'Q2',(0,1):'Q3',(1,0):'Q1',(1,1):'Q4'}.get((qr, qc), 'Other')
@@ -1366,16 +1180,60 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             if not _cm_sel_units:
                 st.info("Select at least one unit to display.")
             else:
-                # ── Panel geometry ────────────────────────────────────────────
+                # ── Panel geometry (fallback dimensions only) ─────────────────
                 _ctx_cm = calculate_geometry(_q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm)
 
-                # Pre-compute unit origins (mm from frame corner) for every selected unit
-                _cm_origins = {
-                    (r, c): calculate_physical_unit_origin(
-                        r, c, _q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm
-                    )
-                    for r, c in _cm_sel_units
-                }
+                # ── Derive exact cell size and unit origins from TGZ ──────────
+                # Prefer TGZ step-repeat positions + CAM layer bounds over manual
+                # geometry. Manual geometry is used only when TGZ is not loaded.
+                #
+                # How it works:
+                #   TGZ unit_positions[i] = (x_tgz, y_tgz): where the ODB++ unit
+                #   step's local (0,0) is placed in panel coordinates.
+                #   cam_bounds = (min_x, min_y, max_x, max_y) in ODB++ local coords.
+                #   Effective origin = (x_tgz + min_x, y_tgz + min_y) = bottom-left
+                #   of the copper area in panel coords.
+                #   Normalised defect: x_local = X_MM - effective_origin_x
+                #   This lands in [0, cell_w] and matches the CAM SVG which is also
+                #   shifted to [0, cell_w] × [0, cell_h] in the plot.
+                _rodb_cm    = st.session_state.get('rendered_odb')
+                _cam_cell_w = _ctx_cm.cell_width
+                _cam_cell_h = _ctx_cm.cell_height
+                _cam_min_x  = 0.0
+                _cam_min_y  = 0.0
+
+                if _rodb_cm and _rodb_cm.panel_layout and _rodb_cm.layers:
+                    _first_lyr_cm = next(iter(_rodb_cm.layers.values()))
+                    _cam_min_x  = _first_lyr_cm.bounds[0]
+                    _cam_min_y  = _first_lyr_cm.bounds[1]
+                    _cam_cell_w = _first_lyr_cm.bounds[2] - _first_lyr_cm.bounds[0]
+                    _cam_cell_h = _first_lyr_cm.bounds[3] - _first_lyr_cm.bounds[1]
+
+                    # Sort unique TGZ x/y values to build (row, col) → origin mapping.
+                    # TGZ uses center-origin (panel center = 0,0).
+                    # AOI uses lower-left origin (panel edge = 0,0).
+                    # Conversion: aoi_x = tgz_x + panel_width/2
+                    # Unit lower-left in AOI space = raw_tgz_x + cam_min_x + panel_width/2
+                    _raw_pos   = (getattr(_rodb_cm.panel_layout, 'unit_positions_raw', None)
+                                  or _rodb_cm.panel_layout.unit_positions)
+                    _uniq_x_cm = sorted(set(round(x, 2) for x, _ in _raw_pos))
+                    _uniq_y_cm = sorted(set(round(y, 2) for _, y in _raw_pos))
+                    _pl_w = _rodb_cm.panel_layout.panel_width   # 510mm
+                    _pl_h = _rodb_cm.panel_layout.panel_height  # 515mm
+                    _cm_origins = {
+                        (ri, ci): (_uniq_x_cm[ci] + _cam_min_x + _pl_w / 2,
+                                   _uniq_y_cm[ri] + _cam_min_y + _pl_h / 2)
+                        for ri in range(len(_uniq_y_cm))
+                        for ci in range(len(_uniq_x_cm))
+                    }
+                else:
+                    # Fallback: manual geometry (uses user-set gap / grid params)
+                    _cm_origins = {
+                        (r, c): calculate_physical_unit_origin(
+                            r, c, _q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm
+                        )
+                        for r, c in _cm_sel_units
+                    }
 
                 # ── Scope-filter AOI data ─────────────────────────────────────
                 _cm_src = aoi.all_defects.copy()
@@ -1401,9 +1259,23 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 if _cm_src.empty:
                     st.info("No defects found for the selected units / scope filters.")
                 else:
-                    # ── Coordinate normalisation ──────────────────────────────
-                    # Use raw X_MM / Y_MM (panel-space mm from frame corner).
-                    # Subtract each unit's physical origin → local coords [0…cell_w] × [0…cell_h].
+                    # ── DEBUG: show coordinate diagnostics ────────────────────
+                    with st.expander("🔬 Coord Debug (remove after fix)", expanded=True):
+                        st.write("**cam_min_x/y:**", _cam_min_x, _cam_min_y)
+                        st.write("**cam_cell_w/h:**", _cam_cell_w, _cam_cell_h)
+                        st.write("**_raw_pos (first 3):**", _raw_pos[:3] if _raw_pos else "EMPTY")
+                        st.write("**_uniq_x_cm (first 6):**", _uniq_x_cm[:6])
+                        st.write("**_uniq_y_cm (first 6):**", _uniq_y_cm[:6])
+                        _sample_origins = dict(list(_cm_origins.items())[:4])
+                        st.write("**_cm_origins (first 4):**", _sample_origins)
+                        if not _cm_src.empty:
+                            st.write("**Sample X_MM / Y_MM (first 3):**",
+                                     _cm_src[['X_MM','Y_MM','UNIT_INDEX_Y','UNIT_INDEX_X']].head(3).to_dict('records'))
+
+                    # ── Coordinate normalisation (vectorized) ─────────────────
+                    # Subtract each unit's effective origin (TGZ pos + cam_min)
+                    # so all units fold into local coords [0…cell_w] × [0…cell_h],
+                    # matching the CAM SVG which is also shifted to start at (0, 0).
                     _pairs_cm = list(zip(
                         _cm_src['UNIT_INDEX_Y'].astype(int),
                         _cm_src['UNIT_INDEX_X'].astype(int),
@@ -1411,23 +1283,16 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
                     _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
 
-                    _x_local = _cm_src['X_MM'].values - _ox_arr
-                    _y_raw_cm = _cm_src['Y_MM'].values.copy()
-                    if align_args.get('flip_y', False):
-                        _bh_cm = (parsed.board_bounds[3] - parsed.board_bounds[1]) if parsed else FRAME_HEIGHT
-                        _y_raw_cm = _bh_cm - _y_raw_cm
-                    _y_local = _y_raw_cm - _oy_arr
-
                     _cm_plot = _cm_src.copy()
-                    _cm_plot['ALIGNED_X'] = _x_local
-                    _cm_plot['ALIGNED_Y'] = _y_local
+                    _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr
+                    _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr
 
                     # ── Build figure ──────────────────────────────────────────
                     _cm_cfg = OverlayConfig()
                     _cm_cfg.board_bounds = (
                         -1.0, -1.0,
-                        _ctx_cm.cell_width  + 1.0,
-                        _ctx_cm.cell_height + 1.0,
+                        _cam_cell_w + 1.0,
+                        _cam_cell_h + 1.0,
                     )
                     _cm_cfg.color_mode    = st.session_state.get('color_mode_select', 'by_type')
                     _cm_cfg.marker_style  = st.session_state.get('marker_style_select', 'dot')
@@ -1438,7 +1303,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
 
                     # ── Background: CAM (Gerbonara) ──────────────────────────
-                    _svg_store_cm = st.session_state.get('svg_store', {})
                     _bg_src_cm    = st.session_state.get('bg_source', 'ODB++ / Shapely')
                     _rendered_cm  = st.session_state.get('rendered_odb')
 
@@ -1490,28 +1354,11 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         from visualizer import _apply_layout as _cm_apply_layout
                         _cm_apply_layout(_cm_fig, _cm_cfg)
 
-                    # ── Background: SVG (single unit placed at local origin 0,0) ─
-                    elif _svg_store_cm and _bg_src_cm == 'SVG':
-                        _svg_w_cm  = float(st.session_state.get('svg_cell_w', _ctx_cm.cell_width))
-                        _svg_h_cm  = float(st.session_state.get('svg_cell_h', _ctx_cm.cell_height))
-                        _bu_n_cm   = _bu_cm[0] if _bu_cm else 1
-                        _side_c_cm = 'F' if 'Front' in _side_cm else 'B'
-                        _svgkey_cm = f"BU-{_bu_n_cm:02d}_{_side_c_cm}"
-                        _svgstr_cm = _svg_store_cm.get(_svgkey_cm) or next(iter(_svg_store_cm.values()), None)
-                        if _svgstr_cm:
-                            _cm_fig.add_layout_image(dict(
-                                source=svg_to_data_url(_svgstr_cm),
-                                xref="x", yref="y",
-                                x=0.0, y=_svg_h_cm,
-                                sizex=_svg_w_cm, sizey=_svg_h_cm,
-                                sizing="stretch", layer="below", opacity=1.0,
-                            ))
-
                     # Unit bounding rectangle
                     _cm_fig.add_shape(
                         type="rect",
                         x0=0, y0=0,
-                        x1=_ctx_cm.cell_width, y1=_ctx_cm.cell_height,
+                        x1=_cam_cell_w, y1=_cam_cell_h,
                         line=dict(color="rgba(0,220,130,0.9)", width=2),
                         fillcolor="rgba(0,0,0,0)",
                         layer="above",
