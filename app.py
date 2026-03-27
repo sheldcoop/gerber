@@ -274,6 +274,17 @@ with st.sidebar:
             with col_g2:
                 quad_cols = st.number_input("Cols per Quadrant", min_value=1, value=6, step=1)
 
+            # Dynamic inter-quadrant gaps (user-given, per faster-aoi convention)
+            col_g3, col_g4 = st.columns(2)
+            with col_g3:
+                dyn_gap_x = st.number_input("Dyn Gap X (mm)", min_value=0.0, value=5.0, step=0.5,
+                                            key='dyn_gap_x_input',
+                                            help="Dynamic inter-quadrant gap in X. Total gap = 3 + 2×this.")
+            with col_g4:
+                dyn_gap_y = st.number_input("Dyn Gap Y (mm)", min_value=0.0, value=3.5, step=0.5,
+                                            key='dyn_gap_y_input',
+                                            help="Dynamic inter-quadrant gap in Y. Total gap = 3 + 2×this.")
+
             flip_y = st.checkbox("Flip Y axis", False, help="Invert Y coordinates based on board height")
             
             aoi_data = st.session_state.get('aoi_dataset')
@@ -310,7 +321,9 @@ with st.sidebar:
                     ox, oy = calculate_physical_unit_origin(
                         int(row_val), int(col_val),
                         panel_rows_per_quad=st.session_state.get('quad_rows_input', 6),
-                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6)
+                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6),
+                        dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
+                        dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
                     )
                     st.session_state['manual_offset_x'] = float(round(ox, 3))
                     st.session_state['manual_offset_y'] = float(round(oy, 3))
@@ -460,19 +473,35 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         st.warning(f"⚠️ Unknown symbol types skipped: {', '.join(parsed.unknown_symbols)} — geometry may be incomplete")
 
 
+    # ── View Mode Tab Bar (very top of canvas) ───────────────────────────────
+    if '_view_mode' not in st.session_state:
+        st.session_state['_view_mode'] = "🔭 Panel Overview"
+    if st.session_state.get('_pending_view'):
+        st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
+
+    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection"]
+    _tab_cols = st.columns(len(_tabs), gap="small")
+    for _i, _label in enumerate(_tabs):
+        _is_active = (st.session_state['_view_mode'] == _label)
+        def _switch_view(_l=_label):
+            st.session_state['_view_mode'] = _l
+        _tab_cols[_i].button(
+            _label,
+            key=f"view_tab_{_i}",
+            type="primary" if _is_active else "secondary",
+            width="stretch",
+            on_click=_switch_view,
+        )
     st.divider()
 
     # --- Analysis Scope: Capsule Toggle Buttons (AOI Excel data only) ---
-    # Ported from faster-aoi/src/views/analysis_controls.py — exact same pattern
     if aoi and aoi.has_data:
-        # Initialise selection state once
         if 'scope_bu_sel' not in st.session_state:
             st.session_state['scope_bu_sel'] = list(aoi.buildup_numbers)
         if 'scope_side_sel' not in st.session_state:
             st.session_state['scope_side_sel'] = ['Front', 'Back']
 
         with st.expander("🔬 Analysis Scope", expanded=True):
-            # ── Row 1: Buildup layer capsules ──────────────────────────────
             bu_labels = [f"BU-{int(b):02d}" for b in aoi.buildup_numbers]
             if bu_labels:
                 bu_cols = st.columns(len(bu_labels), gap="small")
@@ -481,7 +510,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     def cb():
                         current = list(st.session_state.get('scope_bu_sel', list(aoi.buildup_numbers)))
                         if num in current:
-                            if len(current) > 1:   # always keep at least one
+                            if len(current) > 1:
                                 current.remove(num)
                         else:
                             current.append(num)
@@ -498,7 +527,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         on_click=_toggle_bu(bu_num),
                     )
 
-            # ── Row 2: Side capsules ───────────────────────────────────────
             s_cols = st.columns(2, gap="small")
 
             def _toggle_side(side):
@@ -519,7 +547,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             s_cols[1].button("Back",  key="scope_side_b", type="primary" if is_back  else "secondary",
                              width="stretch", on_click=_toggle_side("Back"))
 
-        # Write resolved values to shared filter keys for downstream use
         st.session_state['buildup_filter_select'] = st.session_state.get('scope_bu_sel', aoi.buildup_numbers)
         active_sides = st.session_state.get('scope_side_sel', ['Front', 'Back'])
         if set(active_sides) == {'Front', 'Back'}:
@@ -530,14 +557,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             st.session_state['side_cap_select'] = 'Back'
         st.divider()
 
+    view_mode = st.session_state['_view_mode']
 
-    view_mode = st.radio(
-        "Inspection Mode", 
-        ["🔭 Panel Overview", "🔬 Single Unit Inspection"], 
-        horizontal=True, 
-        label_visibility="collapsed",
-        key="main_view_mode"
-    )
 
     if view_mode == "🔭 Panel Overview":
         st.markdown("### Panel Defect Map")
@@ -558,7 +579,9 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             # Full-panel bounds for the substrate background grid
             quad_bounds = get_panel_quadrant_bounds(
                 st.session_state.get('quad_rows_input', 6),
-                st.session_state.get('quad_cols_input', 6)
+                st.session_state.get('quad_cols_input', 6),
+                dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
+                dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
             )
             ax1, ay1, ax2, ay2 = quad_bounds['frame']
             panel_config.board_bounds = (ax1 - 10, ay1 - 10, ax2 + 10, ay2 + 10)
@@ -612,13 +635,16 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.session_state['_pending_row'] = int(uy)
                     st.session_state['_pending_col'] = int(ux)
                     st.session_state['_pending_nav'] = True
-                    st.session_state['main_view_mode'] = "🔬 Single Unit Inspection"
+                    # _pending_view is consumed BEFORE the radio renders on next rerun
+                    st.session_state['_pending_view'] = "🔬 Single Unit Inspection"
 
                     # Pre-compute and store the physical offset
                     ox, oy = calculate_physical_unit_origin(
                         int(uy), int(ux),
                         panel_rows_per_quad=st.session_state.get('quad_rows_input', 6),
-                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6)
+                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6),
+                        dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
+                        dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
                     )
                     st.session_state['manual_offset_x'] = float(round(ox, 3))
                     st.session_state['manual_offset_y'] = float(round(oy, 3))
