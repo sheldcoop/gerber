@@ -13,7 +13,9 @@ Key design decisions:
 - Aspect ratio is locked to real board dimensions via scaleanchor='y'.
 """
 
+import base64
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Optional
 
 import numpy as np
@@ -182,6 +184,102 @@ _RENDER_PRIORITY = {
 }
 
 
+_RASTER_THRESHOLD = 8_000  # polygon count above which we rasterize to PNG
+
+
+def _rasterize_layer(layer, bounds: tuple, color_dict: dict,
+                      opacity: float, px: int = 2048) -> str | None:
+    """
+    Render a dense layer (>_RASTER_THRESHOLD polygons) to a transparent PNG
+    and return a base64 data URL.  PIL/Pillow is used for speed.
+
+    Returns None if Pillow is unavailable or rendering fails.
+    """
+    minx, miny, maxx, maxy = bounds
+    bw, bh = maxx - minx, maxy - miny
+    if bw <= 0 or bh <= 0:
+        return None
+
+    r_v, g_v, b_v = color_dict['r'] / 255.0, color_dict['g'] / 255.0, color_dict['b'] / 255.0
+
+    # Collect polygon vertices for matplotlib PolyCollection (fast C-level batch render)
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import PolyCollection
+
+        aspect = bh / bw
+        fig_w = px / 100.0
+        fig_h = max(1.0, fig_w * aspect)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=100)
+        ax.set_xlim(minx, maxx)
+        ax.set_ylim(miny, maxy)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        fig.patch.set_alpha(0.0)
+        ax.patch.set_alpha(0.0)
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+        verts = []
+        for poly in layer.polygons:
+            try:
+                if hasattr(poly, 'exterior'):
+                    verts.append(np.array(poly.exterior.coords))
+            except Exception:
+                continue
+
+        if verts:
+            coll = PolyCollection(
+                verts,
+                facecolor=(r_v, g_v, b_v, opacity),
+                edgecolor='none',
+            )
+            ax.add_collection(coll)
+
+        buf = BytesIO()
+        fig.savefig(buf, format='PNG', dpi=100, transparent=True,
+                    bbox_inches=None, pad_inches=0)
+        plt.close(fig)
+        buf.seek(0)
+        return "data:image/png;base64," + base64.b64encode(buf.read()).decode()
+
+    except Exception:
+        pass
+
+    # Fallback: PIL per-polygon (slower but no matplotlib dependency)
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
+    except ImportError:
+        return None
+
+    aspect = bh / bw
+    py_px = max(1, int(px * aspect))
+    img = Image.new('RGBA', (px, py_px), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    fill = (int(r_v * 255), int(g_v * 255), int(b_v * 255), int(opacity * 255))
+
+    def to_px(x: float, y: float) -> tuple:
+        xi = int((x - minx) / bw * (px - 1))
+        yi = int((maxy - y) / bh * (py_px - 1))
+        return xi, yi
+
+    for poly in layer.polygons:
+        try:
+            coords = list(poly.exterior.coords)
+            if len(coords) < 3:
+                continue
+            pts = [to_px(cx, cy) for cx, cy in coords]
+            draw.polygon(pts, fill=fill)
+        except Exception:
+            continue
+
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return "data:image/png;base64," + base64.b64encode(buf.read()).decode()
+
+
 def _add_layer_traces(
     fig: go.Figure,
     layers: dict,
@@ -236,6 +334,46 @@ def _add_layer_traces(
 
         line_color = _rgba(color_dict, min(1.0, opacity + 0.3))
 
+        # ── RASTERIZATION PATH ─────────────────────────────────────────────
+        # Dense layers (>8k polygons) are rasterized to PNG for instant
+        # browser rendering. Sending 50k+ SVG paths freezes any browser.
+        poly_count = len(layer.polygons)
+        _is_outline = (layer.layer_type == 'outline')
+        if poly_count > _RASTER_THRESHOLD and not _is_outline:
+            render_bounds = config.board_bounds
+            if render_bounds and render_bounds != (0, 0, 0, 0):
+                rbnds = render_bounds
+            else:
+                rbnds = layer.bounds if layer.bounds else (0, 0, 1, 1)
+            # Shift bounds by offset
+            ox, oy = config.offset_x, config.offset_y
+            rb = (rbnds[0] + ox, rbnds[1] + oy, rbnds[2] + ox, rbnds[3] + oy)
+            data_url = _rasterize_layer(layer, rb, color_dict, opacity)
+            if data_url:
+                fig.add_layout_image(dict(
+                    source=data_url,
+                    xref='x', yref='y',
+                    x=rb[0], y=rb[3],          # top-left in Plotly coords
+                    sizex=rb[2] - rb[0],
+                    sizey=rb[3] - rb[1],
+                    sizing='stretch',
+                    layer='below',
+                    opacity=1.0,               # opacity already baked into PNG
+                    name=layer_name,
+                ))
+                # Add a dummy invisible trace so the layer appears in legend
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None],
+                    mode='markers',
+                    marker=dict(color=_rgba(color_dict, opacity), size=10, symbol='square'),
+                    name=f"{layer_name} ({poly_count:,} features — rasterized)",
+                    legendgroup=layer_name,
+                    showlegend=True,
+                ))
+                continue  # skip vector path below
+
+        # ── VECTOR PATH (< 8k polygons) ────────────────────────────────────
+        is_outline = _is_outline
         # Merge all polygons into coordinate arrays
         all_x, all_y = [], []
         has_widths = hasattr(layer, 'trace_widths') and len(layer.trace_widths) == len(layer.polygons)

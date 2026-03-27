@@ -17,6 +17,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
+from gerber_renderer import render_odb_to_cam, RenderedODB
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side, render_column_mapping_ui,
     AOIDataset, FILENAME_PATTERN,
@@ -62,6 +63,9 @@ def _init_state():
         'align_args': {},            # Reset on each load to prevent stale offsets
         'needs_manual_side': {},     # filename → True if BU/side not detected
         'svg_store': {},             # {"BU-01_F": svg_string, ...}
+        'rendered_odb': None,        # RenderedODB (Gerbonara CAM SVGs)
+        'cam_layer_select': None,    # selected CAM layer name
+        'cam_stack_mode': False,     # stack multiple layers
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -276,6 +280,29 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"ODB++ parsing failed: {e}")
 
+            # Render CAM-quality SVGs via Gerbonara
+            if gerber_file:
+                with st.spinner("Rendering CAM-quality copper layers..."):
+                    try:
+                        gerber_file.seek(0)
+                        rendered = render_odb_to_cam(gerber_file.read(), gerber_file.name)
+                        gerber_file.seek(0)
+                        st.session_state['rendered_odb'] = rendered
+                        if rendered.layers:
+                            layer_names = list(rendered.layers.keys())
+                            st.session_state['cam_layer_select'] = layer_names[0]
+                            total_features = sum(l.feature_count for l in rendered.layers.values())
+                            st.success(
+                                f"CAM render: {len(rendered.layers)} copper layers, "
+                                f"{total_features:,} features "
+                                f"(bounds: {rendered.board_bounds[2]-rendered.board_bounds[0]:.1f} x "
+                                f"{rendered.board_bounds[3]-rendered.board_bounds[1]:.1f} mm)"
+                            )
+                        for w in rendered.warnings:
+                            st.warning(w, icon="⚠️")
+                    except Exception as e:
+                        st.warning(f"CAM rendering failed (falling back to Shapely): {e}")
+
         # Load AOI data
         if aoi_files:
             with st.spinner("Loading AOI defect data..."):
@@ -473,20 +500,49 @@ with st.sidebar:
                 key='color_mode_select',
             )
 
+        # ---- CAM View Layer Selector ----
+        _rendered = st.session_state.get('rendered_odb')
+        if _rendered and _rendered.layers:
+            st.header("CAM View")
+            _cam_names = list(_rendered.layers.keys())
+            _cam_sel = st.selectbox(
+                "Copper Layer",
+                _cam_names,
+                key='cam_layer_select',
+                help="Select which copper layer to render in CAM quality",
+            )
+            st.session_state['cam_stack_mode'] = st.toggle(
+                "Stack all copper layers",
+                value=False,
+                help="Overlay all copper layers with different colors",
+            )
+            for _ln, _lyr in _rendered.layers.items():
+                st.caption(f"{_ln}: {_lyr.feature_count:,} features ({_lyr.stats})")
+
         # ---- SVG Background Source ----
         _ss = st.session_state.get('svg_store', {})
-        if _ss:
+        _has_rendered = bool(st.session_state.get('rendered_odb'))
+        if _ss or _has_rendered:
             _has_odb = bool(st.session_state.get('parsed_odb'))
             if 'bg_source' not in st.session_state:
-                st.session_state['bg_source'] = 'ODB++ / Shapely' if _has_odb else 'SVG'
-            _bu_loaded, _sides_loaded = parse_svg_keys(_ss)
-            st.caption(f"SVG loaded: BU-{_bu_loaded} × {_sides_loaded}")
+                st.session_state['bg_source'] = 'CAM (Gerbonara)' if _has_rendered else ('ODB++ / Shapely' if _has_odb else 'SVG')
+            _bg_options = []
+            if _has_rendered:
+                _bg_options.append('CAM (Gerbonara)')
+            if _has_odb:
+                _bg_options.append('ODB++ / Shapely')
+            if _ss:
+                _bu_loaded, _sides_loaded = parse_svg_keys(_ss)
+                st.caption(f"SVG loaded: BU-{_bu_loaded} × {_sides_loaded}")
+                _bg_options.append('SVG')
+            if not _bg_options:
+                _bg_options = ['ODB++ / Shapely']
             st.radio(
                 "Background source",
-                ['ODB++ / Shapely', 'SVG'],
+                _bg_options,
                 key='bg_source',
                 horizontal=True,
-                help="'SVG' renders the uploaded PCB layer images behind defect markers",
+                help="Select rendering backend for PCB layer background",
             )
         else:
             st.session_state['bg_source'] = 'ODB++ / Shapely'
@@ -833,8 +889,79 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     st.session_state['manual_offset_y'] = float(round(oy, 3))
                     st.rerun()
 
+        elif st.session_state.get('svg_store') and st.session_state.get('bg_source') == 'SVG':
+            # SVG-only mode: no AOI data yet, but SVG is loaded — render tiled panel
+            _svg_store2 = st.session_state['svg_store']
+            _svg_cell_w2 = float(st.session_state.get('svg_cell_w', 35.0))
+            _svg_cell_h2 = float(st.session_state.get('svg_cell_h', 39.0))
+            _q_rows2 = int(st.session_state.get('quad_rows_input', 6))
+            _q_cols2 = int(st.session_state.get('quad_cols_input', 6))
+            _d_gap_x2 = float(st.session_state.get('dyn_gap_x_input', 5.0))
+            _d_gap_y2 = float(st.session_state.get('dyn_gap_y_input', 3.5))
+            _ctx2 = calculate_geometry(_q_rows2, _q_cols2, _d_gap_x2, _d_gap_y2)
+            _qb2 = get_panel_quadrant_bounds(_q_rows2, _q_cols2, _d_gap_x2, _d_gap_y2)
+            _fx1, _fy1, _fx2, _fy2 = _qb2['frame']
+            _svg_fig = go.Figure()
+            _svg_fig.update_layout(
+                xaxis=dict(range=[_fx1 - 10, _fx2 + 10], scaleanchor='y', scaleratio=1,
+                           showgrid=False, zeroline=False, color='#aaa'),
+                yaxis=dict(range=[_fy1 - 10, _fy2 + 10], showgrid=False, zeroline=False, color='#aaa'),
+                plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
+                margin=dict(l=0, r=0, t=24, b=0),
+                height=720,
+            )
+            # Structural grid shapes — same as AOI path
+            _svg_fig.add_shape(type="rect", x0=_fx1-5, y0=_fy1-5, x1=_fx2+5, y1=_fy2+5,
+                               fillcolor="#2B3A2B", line=dict(color="#1a2a1a", width=1), layer="below")
+            _svg_fig.add_shape(type="rect", x0=_fx1, y0=_fy1, x1=_fx2, y1=_fy2,
+                               fillcolor="rgba(184,115,51,0.18)", line=dict(color="#C87533", width=3), layer="below")
+            for _qname2, (_qbx1, _qby1, _qbx2, _qby2) in _qb2.items():
+                if _qname2 == 'frame':
+                    continue
+                _svg_fig.add_shape(type="rect", x0=_qbx1, y0=_qby1, x1=_qbx2, y1=_qby2,
+                                   fillcolor="rgba(0,200,120,0.04)",
+                                   line=dict(color="rgba(0,200,120,0.35)", width=1, dash="dot"), layer="below")
+            for _, (_qox2, _qoy2) in _ctx2.quadrant_origins.items():
+                for _pr2 in range(_q_rows2):
+                    for _pc2 in range(_q_cols2):
+                        _ux2 = _qox2 + INTER_UNIT_GAP + _pc2 * _ctx2.stride_x
+                        _uy2 = _qoy2 + INTER_UNIT_GAP + _pr2 * _ctx2.stride_y
+                        _svg_fig.add_shape(type="rect", x0=_ux2, y0=_uy2,
+                                           x1=_ux2 + _ctx2.cell_width, y1=_uy2 + _ctx2.cell_height,
+                                           fillcolor="rgba(0,180,100,0.07)",
+                                           line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
+            # Tile the SVGs
+            _svg_str2 = next(iter(_svg_store2.values()), None)
+            if _svg_str2:
+                import xml.etree.ElementTree as _ET3
+                try:
+                    _r3 = _ET3.fromstring(_svg_str2)
+                    _inner3 = ''.join(_ET3.tostring(c, encoding='unicode') for c in _r3)
+                except Exception:
+                    _inner3 = f'<image href="{svg_to_data_url(_svg_str2)}" x="0" y="0" width="{_svg_cell_w2}" height="{_svg_cell_h2}"/>'
+                _tiles3 = []
+                for _, (_qox3, _qoy3) in _ctx2.quadrant_origins.items():
+                    for _pr3 in range(_q_rows2):
+                        for _pc3 in range(_q_cols2):
+                            _ux3 = _qox3 + INTER_UNIT_GAP + _pc3 * _ctx2.stride_x
+                            _uy3 = _qoy3 + INTER_UNIT_GAP + _pr3 * _ctx2.stride_y
+                            _tiles3.append(f'<g transform="translate({_ux3:.3f},{_uy3:.3f})">{_inner3}</g>')
+                _comp_svg2 = (
+                    f'<svg xmlns="http://www.w3.org/2000/svg" '
+                    f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}">'
+                    + ''.join(_tiles3) + '</svg>'
+                )
+                _svg_fig.update_layout(images=[dict(
+                    source=svg_to_data_url(_comp_svg2),
+                    xref="x", yref="y",
+                    x=0, y=FRAME_HEIGHT,
+                    sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
+                    sizing="stretch", layer="below", opacity=1.0,
+                )])
+            st.plotly_chart(_svg_fig, width='stretch',
+                            config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
         else:
-            st.info("Upload AOI defect data to view the Panel Defect Map.")
+            st.info("Upload AOI defect data or SVG layer files to view the Panel Map.")
 
     elif view_mode == "🔬 Single Unit Inspection":
         # Build overlay config from sidebar controls
@@ -938,11 +1065,17 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 config.active_defect_x + 3.0,
                 config.active_defect_y + 3.0
             )
+        elif _rendered_odb_bounds := st.session_state.get('rendered_odb'):
+            # Use CAM bounds (Gerbonara — more accurate than Shapely)
+            ox = config.offset_x
+            oy = config.offset_y
+            bb = _rendered_odb_bounds.board_bounds
+            config.board_bounds = (bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy)
         elif parsed and parsed.layers:
             # Shift the bounding box camera so it follows the physically offset board
             ox = config.offset_x
             oy = config.offset_y
-            
+
             # If bounded directly to a Single Unit, aggressively cull all neighboring Panel trace arrays!
             if align_args.get('unit_row') is not None and align_args.get('unit_col') is not None:
                 config.crop_bounds = (ox - 2.0, oy - 2.0, ox + 50.0, oy + 50.0)
@@ -950,7 +1083,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             else:
                 bb = parsed.board_bounds
                 config.board_bounds = (bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy)
-                
+
         elif aoi and aoi.has_data:
             config.board_bounds = aoi.coord_bounds
 
@@ -958,7 +1091,11 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
         _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
         _svg_store_unit = st.session_state.get('svg_store', {})
         _use_svg_bg = _svg_store_unit and (_bg_source == 'SVG')
-        gerber_layers = parsed.layers if (parsed and not _use_svg_bg) else {}
+        _use_cam_bg = (_bg_source == 'CAM (Gerbonara)')
+        _rendered_odb = st.session_state.get('rendered_odb')
+
+        # When using CAM background, don't render Shapely layers (avoid double-render)
+        gerber_layers = parsed.layers if (parsed and not _use_svg_bg and not _use_cam_bg) else {}
 
         if gerber_layers:
             fig = build_overlay_figure(
@@ -972,11 +1109,61 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             fig = go.Figure()
             _apply_layout(fig, config)
 
+        # ── CAM (Gerbonara) SVG background ───────────────────────────────
+        if _use_cam_bg and _rendered_odb and _rendered_odb.layers and fig is not None:
+            _cam_sel = st.session_state.get('cam_layer_select')
+            _cam_stack = st.session_state.get('cam_stack_mode', False)
+
+            # Determine which layers to render
+            if _cam_stack:
+                _cam_layers_to_show = list(_rendered_odb.layers.keys())
+            else:
+                _cam_layers_to_show = [_cam_sel] if _cam_sel and _cam_sel in _rendered_odb.layers else list(_rendered_odb.layers.keys())[:1]
+
+            # Color palette for stacked layers
+            _cam_colors = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644', '#44ccaa']
+
+            for _ci, _cam_ln in enumerate(_cam_layers_to_show):
+                _cam_lyr = _rendered_odb.layers.get(_cam_ln)
+                if not _cam_lyr:
+                    continue
+
+                # Re-render SVG with per-layer color if stacking
+                if _cam_stack and len(_cam_layers_to_show) > 1:
+                    _fg = _cam_colors[_ci % len(_cam_colors)]
+                    _cam_svg = str(_cam_lyr.gerber_file.to_svg(fg=_fg, bg='#060A06'))
+                else:
+                    _cam_svg = _cam_lyr.svg_string
+
+                # Place SVG as Plotly background image
+                _cb = _cam_lyr.bounds
+                _cam_w = _cb[2] - _cb[0]
+                _cam_h = _cb[3] - _cb[1]
+                ox = config.offset_x
+                oy = config.offset_y
+
+                fig.add_layout_image(dict(
+                    source=svg_to_data_url(_cam_svg),
+                    xref="x", yref="y",
+                    x=_cb[0] + ox,
+                    y=_cb[3] + oy,  # Plotly images anchor at top-left
+                    sizex=_cam_w,
+                    sizey=_cam_h,
+                    sizing="stretch",
+                    layer="below",
+                    opacity=0.95 if not _cam_stack else 0.7,
+                ))
+
+            # Update board bounds from CAM data if not already set by alignment
+            if not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
+                _rbb = _rendered_odb.board_bounds
+                config.board_bounds = (_rbb[0] + ox, _rbb[1] + oy, _rbb[2] + ox, _rbb[3] + oy)
+                _apply_layout(fig, config)
+
         # ── SVG background for Single Unit view ──────────────────────────
         if _use_svg_bg and fig is not None:
             _svg_cell_w = float(st.session_state.get('svg_cell_w', 35.0))
             _svg_cell_h = float(st.session_state.get('svg_cell_h', 39.0))
-            # Determine which SVG key to use from align_args / sidebar filters
             _bu_sel = st.session_state.get('buildup_filter_select', [1])
             _side_sel = st.session_state.get('side_filter_select', 'Both')
             _bu_n = _bu_sel[0] if _bu_sel else 1

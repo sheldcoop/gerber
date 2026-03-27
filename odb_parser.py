@@ -462,6 +462,97 @@ def _parse_symbol_table_from_text(text: str) -> dict:
     return _parse_symbol_table(text.splitlines())
 
 
+def _detect_symbol_scale(features_text: str, uf: float) -> float:
+    """
+    Detect whether symbol sizes are in mils while coordinates are in mm.
+
+    InCAM Pro stores symbol tables in mils regardless of the job's native unit.
+    Heuristic: if the largest symbol is bigger than 2× the coordinate range of
+    the first 50 pad records, the symbols must be in a different (smaller) unit
+    and need a 0.0254 (mils→mm) correction factor.
+
+    Returns 0.0254 if correction is needed, else 1.0.
+    """
+    lines = features_text.splitlines()
+    symbols = _parse_symbol_table(lines)
+    if not symbols:
+        return 1.0
+
+    max_sym = max(max(s.size_x, s.size_y) for s in symbols.values()
+                  if s.shape not in ('unknown', 'skip'))
+    if max_sym <= 0:
+        return 1.0
+
+    # Sample first pad coordinates to estimate coordinate scale
+    coords_abs: list[float] = []
+    for line in lines:
+        if line.startswith('P ') or line.startswith('L '):
+            try:
+                parts = line.split()
+                coords_abs.append(abs(float(parts[1]) * uf))
+                coords_abs.append(abs(float(parts[2]) * uf))
+            except (IndexError, ValueError):
+                pass
+            if len(coords_abs) >= 100:
+                break
+
+    if not coords_abs:
+        return 1.0
+
+    max_coord = max(coords_abs)
+    if max_coord < 1e-6:
+        return 1.0
+
+    # If symbols are unreasonably large vs the coordinate range, they're in mils
+    if max_sym > max_coord * 2.0:
+        return 0.0254  # mils → mm
+
+    return 1.0
+
+
+def _load_user_symbols(job_root: str, uf: float) -> dict:
+    """
+    Load user-defined (complex) symbols from the job's symbols/ directory.
+
+    ODB++ stores custom pad shapes as mini features files under:
+        <job_root>/symbols/<symbol_name>/features[.Z]
+
+    Each such file defines the geometry for one named symbol. We resolve them
+    to a bounding-box Shapely polygon so they render as a reasonable approximation.
+
+    Returns: {symbol_name_lower: _ODBSymbol} with shape='user_defined' and
+             size_x/size_y set to the bounding box dimensions.
+    """
+    result: dict = {}
+    sym_dir = os.path.join(job_root, 'symbols')
+    if not os.path.isdir(sym_dir):
+        return result
+
+    for sym_name in os.listdir(sym_dir):
+        sym_path = os.path.join(sym_dir, sym_name)
+        if not os.path.isdir(sym_path):
+            continue
+        feat_path = os.path.join(sym_path, 'features')
+        text = _read_features_text(feat_path)
+        if text is None:
+            text = _read_features_text(feat_path + '.Z')
+        if text is None:
+            continue
+        try:
+            # Parse inner geometries to get bounding box
+            inner_geoms, _, _, _, _ = _parse_features_text(text, uf, set())
+            if not inner_geoms:
+                continue
+            bounds = _compute_bounds(inner_geoms)
+            w = bounds[2] - bounds[0]
+            h = bounds[3] - bounds[1]
+            # Store as a small rectangular symbol; the actual shape is approximated
+            result[sym_name.lower()] = _ODBSymbol('rect', max(w, 0.01), max(h, 0.01), sym_name)
+        except Exception:
+            continue
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Geometry builders
 # ---------------------------------------------------------------------------
@@ -481,7 +572,9 @@ def _symbol_to_geometry(x: float, y: float, sym: _ODBSymbol, rotation_deg: float
             radius = sym.size_x / 2.0
             if radius <= 0:
                 return None
-            res = 8 if radius < 0.1 else 16
+            # Keep resolution low — dense boards rasterize layers to PNG anyway,
+            # and even for vector rendering 6 segments is indistinguishable at zoom.
+            res = 4 if radius < 0.5 else 6
             return Point(x, y).buffer(radius, resolution=res)
 
         elif sym.shape == 'square':
@@ -572,11 +665,23 @@ def _parse_pad_record(parts: list, symbols: dict, uf: float,
     Returns (geometry, polarity_char) tuple.
     """
     try:
-        x   = float(parts[1]) * uf
-        y   = float(parts[2]) * uf
+        x       = float(parts[1]) * uf
+        y       = float(parts[2]) * uf
         sym_idx = int(parts[3])
-        rot = float(parts[4]) if len(parts) > 4 else 0.0
-        polarity = parts[6].upper() if len(parts) > 6 else 'P'
+
+        # ODB++ P record field order varies by exporter:
+        #   Format A (standard):  P x y sym  rot  mirror  polarity  [;attrs]
+        #   Format B (InCAM Pro): P x y sym  polarity  rot  mirror  [;attrs]
+        # Detect by checking whether parts[4] is a polarity token (P/N) or a number.
+        p4 = parts[4].split(';')[0].strip().upper() if len(parts) > 4 else ''
+        if p4 in ('P', 'N'):
+            # Format B — polarity before rotation
+            polarity = p4
+            rot = float(parts[5].split(';')[0]) if len(parts) > 5 else 0.0
+        else:
+            # Format A — rotation before polarity
+            rot      = float(p4) if p4 else 0.0
+            polarity = parts[6].split(';')[0].strip().upper() if len(parts) > 6 else 'P'
     except (IndexError, ValueError):
         return None, 'P'
 
@@ -704,12 +809,15 @@ def _parse_surface_block(surface_lines: list, uf: float):
 # Full features file parser
 # ---------------------------------------------------------------------------
 
-def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
+def _parse_features_text(text: str, uf: float, unknown_symbols: set,
+                          user_symbols: Optional[dict] = None,
+                          sym_scale: float = 1.0) -> tuple:
     """
     Parse a full ODB++ features file text into Shapely geometries.
 
     Returns (geometries, trace_widths, warnings, fiducials, drill_hits).
     drill_hits is a list of (x, y, diameter_mm) tuples from H records.
+    user_symbols: optional {name_lower: _ODBSymbol} for user-defined complex symbols.
     """
     pos_geoms = []     # positive-polarity geometries (add copper)
     neg_geoms = []     # negative-polarity geometries (clearances to subtract)
@@ -722,6 +830,12 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
     # Parse symbol table first (all $ lines before first feature)
     symbols = _parse_symbol_table(lines)
 
+    # Resolve user-defined symbols (named descriptors like 'triangle_sm4_300u_board1')
+    if user_symbols:
+        for idx, sym in symbols.items():
+            if sym.shape == 'unknown' and sym.raw_desc.lower() in user_symbols:
+                symbols[idx] = user_symbols[sym.raw_desc.lower()]
+
     for sym in symbols.values():
         if sym.shape == 'unknown' or sym.shape == 'skip':
             unknown_symbols.add(sym.raw_desc)
@@ -730,10 +844,12 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
     # Symbol descriptors like '$0 r0.050' store sizes in the job's native unit
     # (inches here), while we multiply coordinates by uf below.  Both must be
     # in the same unit or pads/traces will be microscopic / gigantic.
-    if uf != 1.0:
+    # sym_scale handles the InCAM Pro case where symbols are in mils for mm jobs.
+    combined_sym_scale = uf * sym_scale if uf != 1.0 else sym_scale
+    if combined_sym_scale != 1.0:
         for sym in symbols.values():
-            sym.size_x *= uf
-            sym.size_y *= uf
+            sym.size_x *= combined_sym_scale
+            sym.size_y *= combined_sym_scale
 
     # Find where feature records start (first non-comment, non-$, non-blank line)
     feature_start = 0
@@ -1088,6 +1204,9 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
             re.IGNORECASE,
         )
 
+        # Pre-load user-defined symbols from job's symbols/ directory
+        user_sym_map = _load_user_symbols(job_root, uf)
+
         for layer_name, layer_type in matrix_layers:
             # Skip non-renderable layers early to save time
             if layer_type == 'other':
@@ -1110,8 +1229,18 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
             file_units = _units_from_text(text)
             layer_uf = (25.4 if file_units == 'inch' else 1.0) if file_units else uf
 
+            # InCAM Pro stores symbol table in mils even for metric jobs.
+            # Detect and correct: if symbols are far larger than the coordinate
+            # range, apply a mils→mm scale to symbols only (not coordinates).
+            sym_scale = _detect_symbol_scale(text, layer_uf)
+            if sym_scale != 1.0:
+                global_warnings.append(
+                    f"Layer '{layer_name}': symbol sizes appear to be in mils "
+                    f"(max coord {layer_uf:.3f}× scale). Applying ×{sym_scale} correction."
+                )
+
             try:
-                geoms, widths, layer_warnings, fiducials, layer_drill_hits = _parse_features_text(text, layer_uf, unknown_symbols)
+                geoms, widths, layer_warnings, fiducials, layer_drill_hits = _parse_features_text(text, layer_uf, unknown_symbols, user_sym_map, sym_scale)
                 all_fiducials.extend(fiducials)
                 if layer_type == 'drill':
                     for hx, hy, diam in layer_drill_hits:
