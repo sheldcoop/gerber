@@ -501,6 +501,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             _df=aoi.all_defects,
         )
         st.session_state['alignment_result'] = alignment
+        st.session_state['last_alignment_result'] = alignment
     elif aoi and aoi.has_data:
         defect_df = aoi.all_defects.copy()
         if 'X_MM' not in defect_df.columns and 'X' in defect_df.columns:
@@ -845,7 +846,11 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
         gerber_layers = parsed.layers if parsed else {}
 
         if gerber_layers:
-            fig = build_overlay_figure(gerber_layers, defect_df, config)
+            fig = build_overlay_figure(
+                gerber_layers, defect_df, config,
+                drill_hits=parsed.drill_hits if parsed else None,
+                components=parsed.components if parsed else None,
+            )
         elif not defect_df.empty:
             fig = build_defect_only_figure(defect_df, config)
         else:
@@ -945,6 +950,52 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
                     )
 
+                # ── Alignment confidence & manual SVG origin offset ──────────
+                _align_result = st.session_state.get('last_alignment_result')
+                _conf = getattr(_align_result, 'confidence', None) if _align_result else None
+                _fids_used = getattr(_align_result, 'fiducials_used', 0) if _align_result else 0
+
+                _svg_conf_cols = st.columns([1, 1, 1, 2])
+                with _svg_conf_cols[0]:
+                    if _conf is not None:
+                        _conf_pct = int(_conf * 100)
+                        _conf_color = "green" if _conf >= 0.7 else ("orange" if _conf >= 0.4 else "red")
+                        st.markdown(
+                            f"**Alignment confidence**<br>"
+                            f"<span style='color:{_conf_color};font-size:1.3em'>{_conf_pct}%</span> "
+                            f"({_fids_used} fiducials)",
+                            unsafe_allow_html=True,
+                        )
+                        if _conf < 0.4:
+                            st.warning("Low confidence — defect overlay may be misaligned. Use the offset controls or run Calibration Wizard.")
+                    else:
+                        st.markdown("**Alignment confidence**<br><span style='color:gray'>No AOI loaded</span>", unsafe_allow_html=True)
+                with _svg_conf_cols[1]:
+                    svg_off_x = st.number_input(
+                        "SVG offset X (mm)", min_value=-50.0, max_value=50.0,
+                        value=float(st.session_state.get('svg_off_x', 0.0)),
+                        step=0.1, key='svg_off_x', format="%.2f",
+                        help="Shift SVG image horizontally relative to defect coordinates",
+                    )
+                with _svg_conf_cols[2]:
+                    svg_off_y = st.number_input(
+                        "SVG offset Y (mm)", min_value=-50.0, max_value=50.0,
+                        value=float(st.session_state.get('svg_off_y', 0.0)),
+                        step=0.1, key='svg_off_y', format="%.2f",
+                        help="Shift SVG image vertically relative to defect coordinates",
+                    )
+                with _svg_conf_cols[3]:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    if st.button("Reset SVG offsets", key="svg_off_reset"):
+                        st.session_state['svg_off_x'] = 0.0
+                        st.session_state['svg_off_y'] = 0.0
+                        st.rerun()
+
+                svg_off_x = float(st.session_state.get('svg_off_x', 0.0))
+                svg_off_y = float(st.session_state.get('svg_off_y', 0.0))
+                img_x = unit_x + svg_off_x
+                img_y = unit_y + svg_off_y
+
                 data_url = svg_to_data_url(svg_str)
 
                 fig_svg = go.Figure()
@@ -952,7 +1003,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 fig_svg.add_layout_image(
                     source=data_url,
                     xref="x", yref="y",
-                    x=unit_x, y=unit_y + cell_h,
+                    x=img_x, y=img_y + cell_h,
                     sizex=cell_w, sizey=cell_h,
                     sizing="stretch",
                     layer="below",
@@ -975,9 +1026,18 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                             hovertext=unit_df.get('DEFECT_TYPE', pd.Series()),
                         ))
 
+                # Show SVG bounding box so user can see where the image lands
+                _bx = [img_x, img_x + cell_w, img_x + cell_w, img_x, img_x]
+                _by = [img_y, img_y, img_y + cell_h, img_y + cell_h, img_y]
+                fig_svg.add_trace(go.Scatter(
+                    x=_bx, y=_by, mode='lines',
+                    line=dict(color='cyan', width=1, dash='dot'),
+                    name='SVG bounds', hoverinfo='skip',
+                ))
+
                 fig_svg.update_layout(
-                    xaxis=dict(range=[unit_x - 1, unit_x + cell_w + 1], scaleanchor="y", scaleratio=1, title="X (mm)"),
-                    yaxis=dict(range=[unit_y - 1, unit_y + cell_h + 1], title="Y (mm)"),
+                    xaxis=dict(range=[unit_x - 2, unit_x + cell_w + 2], scaleanchor="y", scaleratio=1, title="X (mm)"),
+                    yaxis=dict(range=[unit_y - 2, unit_y + cell_h + 2], title="Y (mm)"),
                     margin=dict(l=0, r=0, t=30, b=0),
                     height=600,
                     title=f"SVG Unit View — {svg_key} | Row {row_val}, Col {col_val}",
@@ -1142,7 +1202,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     )
 
                 ctx = calculate_geometry(q_rows, q_cols, d_gap_x, d_gap_y)
-                data_url = svg_to_data_url(svg_str)
 
                 fig_pan = go.Figure()
 
@@ -1154,21 +1213,64 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     layer="below"
                 )
 
-                # 2. Tile SVG for every unit in all 4 quadrants
-                images = []
-                for _q_label, (q_ox, q_oy) in ctx.quadrant_origins.items():
-                    for _r in range(q_rows):
-                        for _c in range(q_cols):
-                            ux = q_ox + INTER_UNIT_GAP + _c * ctx.stride_x
-                            uy = q_oy + INTER_UNIT_GAP + _r * ctx.stride_y
-                            images.append(dict(
-                                source=data_url,
-                                xref="x", yref="y",
-                                x=ux, y=uy + ctx.cell_height,
-                                sizex=ctx.cell_width, sizey=ctx.cell_height,
-                                sizing="stretch", layer="below", opacity=1.0,
-                            ))
-                fig_pan.update_layout(images=images)
+                # 2. Tile units — composited SVG for large panels, per-tile for small
+                _USE_COMPOSITE = total_units > 36
+                if _USE_COMPOSITE:
+                    # Build one big SVG with all unit cells placed at their mm positions
+                    # using <use> or direct <g transform="translate(x,y)"> embedding.
+                    # We embed the original SVG content via <g> transform, not <use>,
+                    # for maximum browser compatibility.
+                    import xml.etree.ElementTree as _ET
+                    try:
+                        _root = _ET.fromstring(svg_str)
+                        # Extract inner content (everything except the <svg> tag itself)
+                        _inner = ''.join(_ET.tostring(child, encoding='unicode') for child in _root)
+                    except Exception:
+                        _inner = f'<image href="{svg_to_data_url(svg_str)}" x="0" y="0" width="{ctx.cell_width}" height="{ctx.cell_height}"/>'
+
+                    _tiles = []
+                    for _q_label, (q_ox, q_oy) in ctx.quadrant_origins.items():
+                        for _r in range(q_rows):
+                            for _c in range(q_cols):
+                                ux = q_ox + INTER_UNIT_GAP + _c * ctx.stride_x
+                                uy = q_oy + INTER_UNIT_GAP + _r * ctx.stride_y
+                                # SVG Y is top-down; Plotly Y is bottom-up.
+                                # Composite SVG is rendered as a single image so both axes top-down.
+                                _tiles.append(
+                                    f'<g transform="translate({ux:.3f},{uy:.3f})">{_inner}</g>'
+                                )
+
+                    _composite_svg = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" '
+                        f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}" '
+                        f'width="{FRAME_WIDTH}mm" height="{FRAME_HEIGHT}mm">'
+                        + ''.join(_tiles)
+                        + '</svg>'
+                    )
+                    _composite_url = svg_to_data_url(_composite_svg)
+                    fig_pan.update_layout(images=[dict(
+                        source=_composite_url,
+                        xref="x", yref="y",
+                        x=0, y=FRAME_HEIGHT,
+                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
+                        sizing="stretch", layer="below", opacity=1.0,
+                    )])
+                else:
+                    data_url = svg_to_data_url(svg_str)
+                    images = []
+                    for _q_label, (q_ox, q_oy) in ctx.quadrant_origins.items():
+                        for _r in range(q_rows):
+                            for _c in range(q_cols):
+                                ux = q_ox + INTER_UNIT_GAP + _c * ctx.stride_x
+                                uy = q_oy + INTER_UNIT_GAP + _r * ctx.stride_y
+                                images.append(dict(
+                                    source=data_url,
+                                    xref="x", yref="y",
+                                    x=ux, y=uy + ctx.cell_height,
+                                    sizex=ctx.cell_width, sizey=ctx.cell_height,
+                                    sizing="stretch", layer="below", opacity=1.0,
+                                ))
+                    fig_pan.update_layout(images=images)
 
                 # 3. Overlay ALL defect dots
                 if not defect_df.empty and 'ALIGNED_X' in defect_df.columns:

@@ -546,6 +546,8 @@ def build_overlay_figure(
     gerber_layers: dict,
     defect_df: pd.DataFrame,
     config: OverlayConfig,
+    drill_hits: list | None = None,
+    components: list | None = None,
 ) -> go.Figure:
     """
     Build the complete Plotly overlay figure with Gerber layers and AOI defects.
@@ -554,6 +556,8 @@ def build_overlay_figure(
         gerber_layers: dict of layer_name → GerberLayer from the parser
         defect_df: AOI defect DataFrame with ALIGNED_X, ALIGNED_Y columns
         config: OverlayConfig controlling visibility, filters, and styling
+        drill_hits: Optional list of DrillHit objects from the ODB++ parser
+        components: Optional list of ComponentPlacement objects from the ODB++ parser
 
     Returns:
         go.Figure ready for st.plotly_chart()
@@ -564,14 +568,110 @@ def build_overlay_figure(
     if gerber_layers:
         _add_layer_traces(fig, gerber_layers, config)
 
-    # 2. Add AOI defect markers (top of z-order)
+    # 2. Add drill hits (rendered as hollow circles — dark drill through copper)
+    if drill_hits:
+        _add_drill_hit_traces(fig, drill_hits, config)
+
+    # 3. Add component outlines and refdes
+    if components:
+        _add_component_traces(fig, components, config)
+
+    # 4. Add AOI defect markers (top of z-order)
     if defect_df is not None and not defect_df.empty:
         _add_defect_traces(fig, defect_df, config)
 
-    # 3. Apply layout
+    # 5. Apply layout
     _apply_layout(fig, config)
 
     return fig
+
+
+def _add_drill_hit_traces(fig: go.Figure, drill_hits: list, config: OverlayConfig) -> None:
+    """Render drill holes as dark-filled circle markers on top of copper."""
+    if not drill_hits:
+        return
+
+    ox, oy = config.offset_x, config.offset_y
+    xs, ys, sizes, texts = [], [], [], []
+
+    for hit in drill_hits:
+        x, y = hit.x + ox, hit.y + oy
+        # Apply viewport culling
+        if config.crop_bounds:
+            cb = config.crop_bounds
+            if x < cb[0] or x > cb[2] or y < cb[1] or y > cb[3]:
+                continue
+        # Convert mm diameter to approx pixel size (Plotly marker size is in px)
+        # 1mm ≈ 3.78px at 96dpi, but we work in mm-space so use a visual scale
+        px_size = max(4, min(20, int(hit.diameter * 4)))
+        xs.append(x)
+        ys.append(y)
+        sizes.append(px_size)
+        texts.append(f"Drill: ⌀{hit.diameter:.3f}mm ({hit.layer_name})")
+
+    if not xs:
+        return
+
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys,
+        mode='markers',
+        marker=dict(
+            symbol='circle',
+            size=sizes,
+            color='#111111',
+            line=dict(color='#555555', width=1),
+        ),
+        name='Drill holes',
+        hovertext=texts,
+        hoverinfo='text',
+        showlegend=True,
+    ))
+
+
+def _add_component_traces(fig: go.Figure, components: list, config: OverlayConfig) -> None:
+    """Render component centroids and reference designators."""
+    if not components:
+        return
+
+    ox, oy = config.offset_x, config.offset_y
+    top_x, top_y, top_text = [], [], []
+    bot_x, bot_y, bot_text = [], [], []
+
+    for comp in components:
+        x, y = comp.x + ox, comp.y + oy
+        if config.crop_bounds:
+            cb = config.crop_bounds
+            if x < cb[0] or x > cb[2] or y < cb[1] or y > cb[3]:
+                continue
+        label = f"{comp.refdes}<br>{comp.part_type}<br>({comp.side}) rot={comp.rotation:.0f}°"
+        if comp.side == 'T':
+            top_x.append(x); top_y.append(y); top_text.append(label)
+        else:
+            bot_x.append(x); bot_y.append(y); bot_text.append(label)
+
+    if top_x:
+        fig.add_trace(go.Scatter(
+            x=top_x, y=top_y, mode='markers+text',
+            marker=dict(symbol='square', size=6, color='rgba(255,200,0,0.7)',
+                        line=dict(color='#FFCC00', width=1)),
+            text=[t.split('<br>')[0] for t in top_text],  # refdes only as label
+            textposition='top center',
+            textfont=dict(size=7, color='#FFCC00'),
+            hovertext=top_text, hoverinfo='text',
+            name='Components (Top)', showlegend=True,
+        ))
+
+    if bot_x:
+        fig.add_trace(go.Scatter(
+            x=bot_x, y=bot_y, mode='markers+text',
+            marker=dict(symbol='square', size=6, color='rgba(0,200,255,0.7)',
+                        line=dict(color='#00CCFF', width=1)),
+            text=[t.split('<br>')[0] for t in bot_text],
+            textposition='top center',
+            textfont=dict(size=7, color='#00CCFF'),
+            hovertext=bot_text, hoverinfo='text',
+            name='Components (Bot)', showlegend=True,
+        ))
 
 
 def build_defect_only_figure(

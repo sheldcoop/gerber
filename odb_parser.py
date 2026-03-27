@@ -64,6 +64,27 @@ class ODBLayer:
 
 
 @dataclass
+class DrillHit:
+    """Single drill hit extracted from a drill layer."""
+    x: float
+    y: float
+    diameter: float  # mm
+    layer_name: str = ''
+
+
+@dataclass
+class ComponentPlacement:
+    """Single component placement record from ODB++ components file."""
+    refdes: str
+    part_type: str
+    x: float          # center X in mm
+    y: float          # center Y in mm
+    rotation: float   # degrees
+    mirror: bool      # True = bottom side
+    side: str         # 'T' or 'B'
+
+
+@dataclass
 class ParsedODB:
     """
     Result of parsing an ODB++ archive.
@@ -76,6 +97,8 @@ class ParsedODB:
     origin_y: float = 0.0
     unknown_symbols: set = field(default_factory=set)
     fiducials: list = field(default_factory=list)
+    drill_hits: list = field(default_factory=list)        # list[DrillHit]
+    components: list = field(default_factory=list)        # list[ComponentPlacement]
     warnings: list = field(default_factory=list)
 
 
@@ -677,12 +700,14 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
     """
     Parse a full ODB++ features file text into Shapely geometries.
 
-    Returns (geometries, trace_widths, warnings, fiducials).
+    Returns (geometries, trace_widths, warnings, fiducials, drill_hits).
+    drill_hits is a list of (x, y, diameter_mm) tuples from H records.
     """
     geometries = []
     trace_widths = []  # parallel list: feature width in mm per geometry
     warnings = []
     fiducials = []
+    drill_hits = []   # list of (x, y, diameter_mm) from H (drill hole) records
     lines = text.splitlines()
 
     # Parse symbol table first (all $ lines before first feature)
@@ -743,7 +768,18 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
                         fiducials.append((fx, fy))
                     except ValueError: pass
 
-                # H = drill hole — same layout as P but always positive polarity
+                # H = drill hole — capture position + diameter, always positive
+                if record_type == 'H' and len(parts) >= 4:
+                    try:
+                        hx = float(parts[1]) * uf
+                        hy = float(parts[2]) * uf
+                        sym_idx = int(parts[3])
+                        sym = symbols.get(sym_idx)
+                        diam = max(sym.size_x, sym.size_y) if sym else 0.1
+                        drill_hits.append((hx, hy, diam))
+                    except (ValueError, IndexError):
+                        pass
+
                 geom = _parse_pad_record(parts, symbols, uf,
                                          force_positive=(record_type == 'H'))
                 if geom is not None:
@@ -785,7 +821,7 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
             if error_count <= MAX_ERRORS:
                 warnings.append(f"Feature parse error at line {i}: {e}")
 
-    return geometries, trace_widths, warnings, fiducials
+    return geometries, trace_widths, warnings, fiducials, drill_hits
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +871,7 @@ def _parse_profile_layer(job_root: str, step_name: str, uf: float, unknown_symbo
     if text is None:
         return None
 
-    geoms, widths, warnings, _ = _parse_features_text(text, uf, unknown_symbols)
+    geoms, widths, warnings, _, _drill = _parse_features_text(text, uf, unknown_symbols)
     if not geoms:
         return None
 
@@ -849,6 +885,102 @@ def _parse_profile_layer(job_root: str, step_name: str, uf: float, unknown_symbo
         trace_widths=widths,
         warnings=warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Component placement parser
+# ---------------------------------------------------------------------------
+
+def _parse_components(job_root: str, step_name: str, uf: float) -> list:
+    """
+    Parse component placement data from ODB++ steps/<step>/components file.
+
+    ODB++ component file format:
+        TOP
+        CMP <idx> <x> <y> <rotation> <mirror> <refdes> <part_type> [;attrs]
+        ...
+        BOT
+        CMP ...
+
+    Returns list of ComponentPlacement.
+    Mirror field: 'N' = top (not mirrored), 'M' or 'Y' = bottom (mirrored).
+    The 'TOP'/'BOT' section header also sets current_side.
+    """
+    placements = []
+
+    # ODB++ components can be at two locations:
+    candidates = [
+        os.path.join(job_root, 'steps', step_name, 'components'),
+        os.path.join(job_root, 'steps', step_name, 'comp+top'),
+        os.path.join(job_root, 'steps', step_name, 'comp+bot'),
+    ]
+    # Also check for component-type layers inside steps/<step>/layers/
+    layers_dir = os.path.join(job_root, 'steps', step_name, 'layers')
+    if os.path.isdir(layers_dir):
+        for entry in os.listdir(layers_dir):
+            if re.search(r'comp|component', entry, re.I):
+                comp_path = os.path.join(layers_dir, entry, 'components')
+                if os.path.isfile(comp_path):
+                    candidates.append(comp_path)
+
+    for comp_path in candidates:
+        if not os.path.isfile(comp_path):
+            continue
+        try:
+            with open(comp_path, 'r', errors='ignore') as f:
+                content = f.read()
+        except (OSError, IOError):
+            continue
+
+        current_side = 'T'
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            upper = line.upper()
+            if upper == 'TOP':
+                current_side = 'T'
+                continue
+            elif upper == 'BOT':
+                current_side = 'B'
+                continue
+
+            # Strip attribute section
+            line = line.split(';')[0].strip()
+            parts = line.split()
+
+            if not parts or parts[0].upper() != 'CMP':
+                continue
+            # CMP <idx> <x> <y> <rotation> <mirror> <refdes> <part_type>
+            if len(parts) < 7:
+                continue
+
+            try:
+                x = float(parts[2]) * uf
+                y = float(parts[3]) * uf
+                rotation = float(parts[4])
+                mirror = parts[5].upper() in ('M', 'Y', '1')
+                refdes = parts[6]
+                part_type = parts[7] if len(parts) > 7 else ''
+                side = 'B' if mirror else current_side
+
+                placements.append(ComponentPlacement(
+                    refdes=refdes,
+                    part_type=part_type,
+                    x=x, y=y,
+                    rotation=rotation,
+                    mirror=mirror,
+                    side=side,
+                ))
+            except (ValueError, IndexError):
+                continue
+
+        # Stop after first successfully parsed file
+        if placements:
+            break
+
+    return placements
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +1019,7 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
         origin_x, origin_y = _read_design_origin(job_root, uf)
         unknown_symbols = set()
         all_fiducials = []
+        all_drill_hits = []
 
         # 3. Find step directory (step names are custom — don't assume 'pcb')
         step_name = _find_step(job_root)
@@ -932,8 +1065,11 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
             layer_uf = (25.4 if file_units == 'inch' else 1.0) if file_units else uf
 
             try:
-                geoms, widths, layer_warnings, fiducials = _parse_features_text(text, layer_uf, unknown_symbols)
+                geoms, widths, layer_warnings, fiducials, layer_drill_hits = _parse_features_text(text, layer_uf, unknown_symbols)
                 all_fiducials.extend(fiducials)
+                if layer_type == 'drill':
+                    for hx, hy, diam in layer_drill_hits:
+                        all_drill_hits.append(DrillHit(x=hx, y=hy, diameter=diam, layer_name=layer_name))
             except Exception as e:
                 global_warnings.append(
                     f"Layer '{layer_name}': parse error — {e}, skipping"
@@ -964,7 +1100,10 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
         else:
             global_warnings.append("Board profile not found — outline layer unavailable")
 
-        # 7. Compute aggregate board bounds
+        # 7. Parse component placements
+        all_components = _parse_components(job_root, step_name, uf)
+
+        # 8. Compute aggregate board bounds
         board_bounds = _aggregate_bounds(layers)
 
         return ParsedODB(
@@ -976,6 +1115,8 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
             origin_y=origin_y,
             unknown_symbols=unknown_symbols,
             fiducials=all_fiducials,
+            drill_hits=all_drill_hits,
+            components=all_components,
             warnings=global_warnings,
         )
 
