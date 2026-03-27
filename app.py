@@ -1011,11 +1011,21 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         side_full = "Front" if sel_side == "F" else "Back"
                         pan_df = pan_df[pan_df['SIDE'] == side_full]
                     if not pan_df.empty:
+                        # Ensure safety for missing unit indices
+                        if 'UNIT_INDEX_X' not in pan_df.columns:
+                            pan_df['UNIT_INDEX_X'] = 0.0
+                        if 'UNIT_INDEX_Y' not in pan_df.columns:
+                            pan_df['UNIT_INDEX_Y'] = 0.0
+
+                        custom_data = pan_df[['UNIT_INDEX_Y', 'UNIT_INDEX_X']].values
+
                         fig_pan.add_trace(go.Scatter(
                             x=pan_df['ALIGNED_X'], y=pan_df['ALIGNED_Y'],
                             mode='markers',
                             marker=dict(size=5, color='red', symbol='circle-open', line=dict(width=1.5)),
                             name='Defects',
+                            customdata=custom_data,
+                            hovertext=pan_df.get('DEFECT_TYPE', pd.Series()),
                         ))
 
                 fig_pan.update_layout(
@@ -1027,8 +1037,30 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     plot_bgcolor='#1a1a2e',
                     paper_bgcolor='#1a1a2e',
                     font_color='white',
+                    clickmode='event+select',
                 )
-                st.plotly_chart(fig_pan, width='stretch', config={'scrollZoom': True, 'displaylogo': False})
+
+                # Capture clicks on defects to jump to SVG Unit View
+                selection = st.plotly_chart(
+                    fig_pan,
+                    width='stretch',
+                    config={'scrollZoom': True, 'displaylogo': False},
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="svg_panel_overview_chart",
+                )
+
+                if selection and "selection" in selection:
+                    pts = selection["selection"].get("points", [])
+                    if pts:
+                        cd = pts[0].get("customdata", [])
+                        if len(cd) >= 2:
+                            uy, ux = cd[0], cd[1]
+                            st.session_state['_pending_row'] = int(uy)
+                            st.session_state['_pending_col'] = int(ux)
+                            st.session_state['_pending_nav'] = True
+                            st.session_state['_pending_view'] = "🧪 SVG Unit View"
+                            st.rerun()
 
 
 
