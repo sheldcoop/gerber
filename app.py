@@ -17,7 +17,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, RenderedODB
+from gerber_renderer import render_odb_to_cam, scan_available_layers, RenderedODB
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side, render_column_mapping_ui,
     AOIDataset, FILENAME_PATTERN,
@@ -170,6 +170,40 @@ with st.sidebar:
                 st.session_state['svg_cell_w'] = _vb[0]
                 st.session_state['svg_cell_h'] = _vb[1]
 
+    # ---- Layer picker (instant scan on upload) ----
+    # Rescan if file changed (compare name)
+    if gerber_file:
+        _prev_name = st.session_state.get('_cam_scan_file')
+        if _prev_name != gerber_file.name:
+            st.session_state.pop('available_cam_layers', None)
+            st.session_state['_cam_scan_file'] = gerber_file.name
+
+    if gerber_file and 'available_cam_layers' not in st.session_state:
+        try:
+            gerber_file.seek(0)
+            _avail = scan_available_layers(gerber_file.read())
+            gerber_file.seek(0)
+            st.session_state['available_cam_layers'] = _avail
+        except Exception:
+            st.session_state['available_cam_layers'] = []
+
+    if st.session_state.get('available_cam_layers'):
+        _avail = st.session_state['available_cam_layers']
+        _names = [f"{n} ({t})" for n, t in _avail]
+        _defaults = [f"{n} ({t})" for n, t in _avail if t in ('copper', 'signal', 'power', 'mixed')]
+        _selected_display = st.multiselect(
+            "Layers to render (CAM)",
+            _names,
+            default=_defaults,
+            help="Select which layers to process via Gerbonara. Fewer = faster.",
+        )
+        # Extract just the layer names from "3F (copper)" format
+        st.session_state['cam_layer_filter'] = [s.split(' (')[0] for s in _selected_display]
+    elif not gerber_file:
+        # Clear stale scan when file is removed
+        st.session_state.pop('available_cam_layers', None)
+        st.session_state.pop('cam_layer_filter', None)
+
     st.divider()
 
     # ---- Load & Process Button ----
@@ -283,7 +317,11 @@ with st.sidebar:
                 with st.spinner("Rendering CAM-quality copper layers..."):
                     try:
                         gerber_file.seek(0)
-                        rendered = render_odb_to_cam(gerber_file.read(), gerber_file.name)
+                        _layer_filter = st.session_state.get('cam_layer_filter')
+                        rendered = render_odb_to_cam(
+                            gerber_file.read(), gerber_file.name,
+                            layer_filter=_layer_filter if _layer_filter else None,
+                        )
                         gerber_file.seek(0)
                         st.session_state['rendered_odb'] = rendered
                         if rendered.layers:

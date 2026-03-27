@@ -423,6 +423,31 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def scan_available_layers(data: bytes) -> list[tuple[str, str]]:
+    """
+    Quick scan of ODB++ archive — returns [(name, type), ...] for renderable layers.
+    No geometry parsing, just reads the matrix file. Takes ~0.1s.
+    """
+    import re
+    import shutil
+    _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
+    renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask'}
+
+    tmp_dir, job_root = _extract_odb_tgz(data)
+    try:
+        matrix_layers = _parse_matrix(job_root)
+        if not matrix_layers:
+            steps_dir = os.path.join(job_root, 'steps')
+            step_name = 'unit' if os.path.isdir(os.path.join(steps_dir, 'unit')) else _find_step(job_root)
+            matrix_layers = _scan_layers_dir(os.path.join(job_root, 'steps', step_name, 'layers'))
+        return [
+            (n, t) for n, t in matrix_layers
+            if t in renderable_types and not _IMPEDANCE_RE.match(n)
+        ]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def render_layer_svg(data: bytes, layer_name: str,
                      fg_color: str = '#b87333', bg_color: str = '#060A06') -> Optional[str]:
     """Convenience: render a single layer and return SVG string."""
