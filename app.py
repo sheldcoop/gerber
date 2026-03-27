@@ -609,7 +609,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection", "🎯 Calibration Wizard"]
+    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection", "🗺️ Commonality", "🎯 Calibration Wizard"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -1285,6 +1285,255 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     mime="text/csv",
                     use_container_width=True,
                 )
+
+    # ── Commonality / Superposition View ────────────────────────────────────
+    elif view_mode == "🗺️ Commonality":
+        st.markdown("### 🗺️ Commonality — Defect Superposition")
+        st.caption("Normalise each selected unit's defects into local coordinates and overlay on a single reference unit.")
+
+        if not (aoi and aoi.has_data):
+            st.info("Upload AOI defect data to use the Commonality view.")
+        elif 'UNIT_INDEX_X' not in aoi.all_defects.columns or 'UNIT_INDEX_Y' not in aoi.all_defects.columns:
+            st.warning("⚠️ UNIT_INDEX_X / UNIT_INDEX_Y columns not found. Commonality view requires unit index data.")
+        else:
+            _q_rows_cm  = int(st.session_state.get('quad_rows_input', 6))
+            _q_cols_cm  = int(st.session_state.get('quad_cols_input', 6))
+            _d_gap_x_cm = float(st.session_state.get('dyn_gap_x_input', 5.0))
+            _d_gap_y_cm = float(st.session_state.get('dyn_gap_y_input', 3.5))
+
+            # ── Discover all (row, col) pairs that have defects ───────────────
+            _aup = (
+                aoi.all_defects[['UNIT_INDEX_Y', 'UNIT_INDEX_X']]
+                .dropna()
+                .drop_duplicates()
+                .sort_values(['UNIT_INDEX_Y', 'UNIT_INDEX_X'])
+                .values.tolist()
+            )
+            _all_cm_pairs  = [(int(r), int(c)) for r, c in _aup]
+            _all_cm_labels = [f"({r},{c})" for r, c in _all_cm_pairs]
+
+            # Quadrant assignment (Q1=top-left, Q2=bottom-left, Q3=bottom-right, Q4=top-right)
+            def _cm_quad(r, c):
+                qr, qc = r // _q_rows_cm, c // _q_cols_cm
+                return {(0,0):'Q2',(0,1):'Q3',(1,0):'Q1',(1,1):'Q4'}.get((qr, qc), 'Other')
+
+            _q1_cm_lbl = [l for (r,c),l in zip(_all_cm_pairs,_all_cm_labels) if _cm_quad(r,c)=='Q1']
+            _q2_cm_lbl = [l for (r,c),l in zip(_all_cm_pairs,_all_cm_labels) if _cm_quad(r,c)=='Q2']
+            _q3_cm_lbl = [l for (r,c),l in zip(_all_cm_pairs,_all_cm_labels) if _cm_quad(r,c)=='Q3']
+            _q4_cm_lbl = [l for (r,c),l in zip(_all_cm_pairs,_all_cm_labels) if _cm_quad(r,c)=='Q4']
+
+            # ── Initialise multiselect state (default = ALL) ──────────────────
+            if 'cm_multiselect' not in st.session_state:
+                st.session_state['cm_multiselect'] = _all_cm_labels
+
+            def _cm_set(labels):
+                def cb():
+                    st.session_state['cm_multiselect'] = [l for l in labels if l in _all_cm_labels]
+                return cb
+
+            # ── Quick-select buttons ──────────────────────────────────────────
+            _qs_cm = st.columns(6, gap="small")
+            _qs_cm[0].button("ALL",   key="cm_all",   on_click=_cm_set(_all_cm_labels), use_container_width=True, type="primary")
+            _qs_cm[1].button("Q1",    key="cm_q1",    on_click=_cm_set(_q1_cm_lbl),     use_container_width=True)
+            _qs_cm[2].button("Q2",    key="cm_q2",    on_click=_cm_set(_q2_cm_lbl),     use_container_width=True)
+            _qs_cm[3].button("Q3",    key="cm_q3",    on_click=_cm_set(_q3_cm_lbl),     use_container_width=True)
+            _qs_cm[4].button("Q4",    key="cm_q4",    on_click=_cm_set(_q4_cm_lbl),     use_container_width=True)
+            _qs_cm[5].button("Clear", key="cm_clear", on_click=_cm_set([]),             use_container_width=True)
+
+            # Sanitise stale labels (units may no longer exist in current data)
+            _cur_cm_lbl = [l for l in st.session_state.get('cm_multiselect', []) if l in _all_cm_labels]
+            if _cur_cm_lbl != st.session_state.get('cm_multiselect'):
+                st.session_state['cm_multiselect'] = _cur_cm_lbl
+
+            _sel_cm_labels = st.multiselect(
+                "Selected units (row, col)",
+                options=_all_cm_labels,
+                key='cm_multiselect',
+                help="Choose which units' defects to superimpose. Use the quick-select buttons above for bulk selection.",
+            )
+
+            _cm_sel_units = []
+            for _lbl in _sel_cm_labels:
+                try:
+                    _r2, _c2 = _lbl.strip('()').split(',')
+                    _cm_sel_units.append((int(_r2.strip()), int(_c2.strip())))
+                except Exception:
+                    pass
+
+            st.caption(f"**{len(_cm_sel_units)}** / {len(_all_cm_pairs)} units selected")
+            st.divider()
+
+            if not _cm_sel_units:
+                st.info("Select at least one unit to display.")
+            else:
+                # ── Panel geometry ────────────────────────────────────────────
+                _ctx_cm = calculate_geometry(_q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm)
+
+                # Pre-compute unit origins (mm from frame corner) for every selected unit
+                _cm_origins = {
+                    (r, c): calculate_physical_unit_origin(
+                        r, c, _q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm
+                    )
+                    for r, c in _cm_sel_units
+                }
+
+                # ── Scope-filter AOI data ─────────────────────────────────────
+                _cm_src = aoi.all_defects.copy()
+                _bu_cm   = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
+                _side_cm = st.session_state.get('scope_side_sel', ['Front', 'Back'])
+                if _bu_cm and 'BUILDUP' in _cm_src.columns:
+                    _cm_src = _cm_src[_cm_src['BUILDUP'].isin(_bu_cm)]
+                if 'SIDE' in _cm_src.columns:
+                    if 'Front' in _side_cm and 'Back' not in _side_cm:
+                        _cm_src = _cm_src[_cm_src['SIDE'] == 'F']
+                    elif 'Back' in _side_cm and 'Front' not in _side_cm:
+                        _cm_src = _cm_src[_cm_src['SIDE'] == 'B']
+
+                # Filter to selected units only
+                _cm_src = _cm_src.copy()
+                _cm_src['_ukey'] = list(zip(
+                    _cm_src['UNIT_INDEX_Y'].astype(int),
+                    _cm_src['UNIT_INDEX_X'].astype(int),
+                ))
+                _cm_src = _cm_src[_cm_src['_ukey'].isin(set(_cm_sel_units))].copy()
+                _cm_src.drop(columns=['_ukey'], inplace=True)
+
+                if _cm_src.empty:
+                    st.info("No defects found for the selected units / scope filters.")
+                else:
+                    # ── Coordinate normalisation ──────────────────────────────
+                    # Use raw X_MM / Y_MM (panel-space mm from frame corner).
+                    # Subtract each unit's physical origin → local coords [0…cell_w] × [0…cell_h].
+                    _pairs_cm = list(zip(
+                        _cm_src['UNIT_INDEX_Y'].astype(int),
+                        _cm_src['UNIT_INDEX_X'].astype(int),
+                    ))
+                    _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
+                    _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
+
+                    _x_local = _cm_src['X_MM'].values - _ox_arr
+                    _y_raw_cm = _cm_src['Y_MM'].values.copy()
+                    if align_args.get('flip_y', False):
+                        _bh_cm = (parsed.board_bounds[3] - parsed.board_bounds[1]) if parsed else FRAME_HEIGHT
+                        _y_raw_cm = _bh_cm - _y_raw_cm
+                    _y_local = _y_raw_cm - _oy_arr
+
+                    _cm_plot = _cm_src.copy()
+                    _cm_plot['ALIGNED_X'] = _x_local
+                    _cm_plot['ALIGNED_Y'] = _y_local
+
+                    # ── Build figure ──────────────────────────────────────────
+                    _cm_cfg = OverlayConfig()
+                    _cm_cfg.board_bounds = (
+                        -1.0, -1.0,
+                        _ctx_cm.cell_width  + 1.0,
+                        _ctx_cm.cell_height + 1.0,
+                    )
+                    _cm_cfg.color_mode    = st.session_state.get('color_mode_select', 'by_type')
+                    _cm_cfg.marker_style  = st.session_state.get('marker_style_select', 'dot')
+                    _cm_cfg.buildup_filter = _bu_cm
+                    _cm_cfg.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
+                    _cm_cfg.side_filter   = 'Both'
+
+                    _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
+
+                    # ── Background: CAM (Gerbonara) ──────────────────────────
+                    _svg_store_cm = st.session_state.get('svg_store', {})
+                    _bg_src_cm    = st.session_state.get('bg_source', 'ODB++ / Shapely')
+                    _rendered_cm  = st.session_state.get('rendered_odb')
+
+                    if _bg_src_cm == 'CAM (Gerbonara)' and _rendered_cm and _rendered_cm.layers:
+                        # Pick checked layers (same as Single Unit view logic)
+                        _cm_cam_layers = [
+                            n for n in _rendered_cm.layers
+                            if st.session_state.get(f"vis_{n}", False)
+                        ]
+                        if not _cm_cam_layers:
+                            _cm_cam_layers = list(_rendered_cm.layers.keys())[:1]
+
+                        _is_multi_cm = len(_cm_cam_layers) > 1
+                        for _cm_cam_ln in _cm_cam_layers:
+                            _cm_cam_lyr = _rendered_cm.layers.get(_cm_cam_ln)
+                            if not _cm_cam_lyr:
+                                continue
+                            # Pick pre-cached data URL
+                            if _is_multi_cm and _cm_cam_lyr.color_svg_urls:
+                                _cm_data_url = next(iter(_cm_cam_lyr.color_svg_urls.values()))
+                            else:
+                                _cm_data_url = _cm_cam_lyr.svg_data_url
+
+                            # The CAM SVG covers the single-unit design.
+                            # Shift its bounds so the unit's lower-left aligns with local (0, 0).
+                            _cb_cm = _cm_cam_lyr.bounds   # (x0, y0, x1, y1) in board mm
+                            _shift_x = -_cb_cm[0]
+                            _shift_y = -_cb_cm[1]
+                            _im_x    = _cb_cm[0] + _shift_x          # = 0
+                            _im_y    = _cb_cm[3] + _shift_y           # = height of unit
+                            _im_w    = _cb_cm[2] - _cb_cm[0]
+                            _im_h    = _cb_cm[3] - _cb_cm[1]
+                            _cm_fig.add_layout_image(dict(
+                                source=_cm_data_url,
+                                xref="x", yref="y",
+                                x=_im_x, y=_im_y,
+                                sizex=_im_w, sizey=_im_h,
+                                sizing="stretch", layer="below",
+                                opacity=0.95 if not _is_multi_cm else 0.7,
+                            ))
+                        # Tighten viewport to the actual CAM bounds
+                        _cb0 = next(iter(_rendered_cm.layers.values())).bounds
+                        _cm_cfg.board_bounds = (
+                            _cb0[0] + _shift_x - 1.0,
+                            _cb0[1] + _shift_y - 1.0,
+                            _cb0[2] + _shift_x + 1.0,
+                            _cb0[3] + _shift_y + 1.0,
+                        )
+                        from visualizer import _apply_layout as _cm_apply_layout
+                        _cm_apply_layout(_cm_fig, _cm_cfg)
+
+                    # ── Background: SVG (single unit placed at local origin 0,0) ─
+                    elif _svg_store_cm and _bg_src_cm == 'SVG':
+                        _svg_w_cm  = float(st.session_state.get('svg_cell_w', _ctx_cm.cell_width))
+                        _svg_h_cm  = float(st.session_state.get('svg_cell_h', _ctx_cm.cell_height))
+                        _bu_n_cm   = _bu_cm[0] if _bu_cm else 1
+                        _side_c_cm = 'F' if 'Front' in _side_cm else 'B'
+                        _svgkey_cm = f"BU-{_bu_n_cm:02d}_{_side_c_cm}"
+                        _svgstr_cm = _svg_store_cm.get(_svgkey_cm) or next(iter(_svg_store_cm.values()), None)
+                        if _svgstr_cm:
+                            _cm_fig.add_layout_image(dict(
+                                source=svg_to_data_url(_svgstr_cm),
+                                xref="x", yref="y",
+                                x=0.0, y=_svg_h_cm,
+                                sizex=_svg_w_cm, sizey=_svg_h_cm,
+                                sizing="stretch", layer="below", opacity=1.0,
+                            ))
+
+                    # Unit bounding rectangle
+                    _cm_fig.add_shape(
+                        type="rect",
+                        x0=0, y0=0,
+                        x1=_ctx_cm.cell_width, y1=_ctx_cm.cell_height,
+                        line=dict(color="rgba(0,220,130,0.9)", width=2),
+                        fillcolor="rgba(0,0,0,0)",
+                        layer="above",
+                    )
+
+                    st.plotly_chart(
+                        _cm_fig,
+                        width='stretch',
+                        config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
+                    )
+
+                    # ── Stats ─────────────────────────────────────────────────
+                    _cm_s1, _cm_s2, _cm_s3, _cm_s4 = st.columns(4)
+                    _cm_s1.metric("Units Selected", len(_cm_sel_units))
+                    _cm_s2.metric("Defects Shown",  len(_cm_plot))
+                    _cm_s3.metric("Avg / Unit",     f"{len(_cm_plot)/len(_cm_sel_units):.1f}")
+                    _top_cm = (
+                        str(_cm_plot['DEFECT_TYPE'].value_counts().index[0])
+                        if 'DEFECT_TYPE' in _cm_plot.columns and not _cm_plot.empty
+                        else '—'
+                    )
+                    _cm_s4.metric("Top Defect Type", _top_cm)
 
     # ── Calibration Wizard ──────────────────────────────────────────────────
     elif view_mode == "🎯 Calibration Wizard":
