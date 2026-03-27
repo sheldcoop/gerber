@@ -1,0 +1,17 @@
+MATRIX {
+  STEP {
+    NAME=test_step
+  }
+  LAYER {
+    ROW=1
+    TYPE=SIGNAL
+    NAME=2F
+    POLARITY=POSITIVE
+  }
+  LAYER {
+    ROW=2
+    TYPE=SIGNAL
+    NAME=2B
+    POLARITY=POSITIVE
+  }
+}
