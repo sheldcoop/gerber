@@ -35,6 +35,8 @@ from odb_parser import (
     _units_from_text,
     _ODBSymbol,
     _odb_arc_to_points,
+    _parse_step_repeat,
+    StepRepeat,
 )
 
 
@@ -42,6 +44,67 @@ def _svg_to_data_url_fast(svg_str: str) -> str:
     """Convert SVG string to base64 data URL (cached-friendly)."""
     b64 = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
     return f"data:image/svg+xml;base64,{b64}"
+
+
+def _png_to_data_url(png_bytes: bytes) -> str:
+    """Convert PNG bytes to base64 data URL."""
+    b64 = base64.b64encode(png_bytes).decode('ascii')
+    return f"data:image/png;base64,{b64}"
+
+
+def build_panel_png(svg_string: str, panel_layout, unit_px: int = 200) -> str:
+    """Rasterize unit SVG and tile it across the panel into a single PNG.
+
+    Args:
+        svg_string: SVG string for one unit.
+        panel_layout: PanelLayout with unit_positions and bounds.
+        unit_px: Width of each unit tile in pixels (height scales proportionally).
+
+    Returns:
+        Base64 data URL of the panel PNG.
+    """
+    import cairosvg
+    from PIL import Image
+    import io
+
+    uw, uh = panel_layout.unit_bounds
+    if uw <= 0 or uh <= 0:
+        return ''
+
+    # Rasterize unit SVG to PNG bytes
+    unit_h_px = int(unit_px * (uh / uw))
+    try:
+        unit_png_bytes = cairosvg.svg2png(
+            bytestring=svg_string.encode('utf-8'),
+            output_width=unit_px,
+            output_height=unit_h_px,
+        )
+    except Exception:
+        return ''
+
+    unit_img = Image.open(io.BytesIO(unit_png_bytes)).convert('RGBA')
+
+    # Scale factor: mm → pixels
+    pw, ph = panel_layout.panel_width, panel_layout.panel_height
+    scale = unit_px / uw  # pixels per mm
+    panel_w_px = int(pw * scale)
+    panel_h_px = int(ph * scale)
+
+    # Create panel canvas (dark background)
+    panel_img = Image.new('RGBA', (panel_w_px, panel_h_px), (6, 10, 6, 255))
+
+    # Paste unit at each position
+    for x_mm, y_mm in panel_layout.unit_positions:
+        px = int(x_mm * scale)
+        # SVG/Plotly Y=0 is bottom, PIL Y=0 is top → flip
+        py = panel_h_px - int((y_mm + uh) * scale)
+        if 0 <= px < panel_w_px and 0 <= py < panel_h_px:
+            panel_img.paste(unit_img, (px, py), unit_img)
+
+    # Encode to PNG bytes
+    buf = io.BytesIO()
+    panel_img.save(buf, format='PNG', optimize=True)
+    return _png_to_data_url(buf.getvalue())
 
 
 # Pre-defined color palette for stacking
@@ -60,7 +123,21 @@ class RenderedLayer:
     gerber_file: GerberFile
     bounds: tuple                # (min_x, min_y, max_x, max_y) in mm
     feature_count: int
+    panel_png_data_url: str = '' # pre-rendered panel tile PNG (144 units, rasterized)
     stats: dict = field(default_factory=dict)
+
+
+@dataclass
+class PanelLayout:
+    """Panel tiling layout derived from TGZ STEP-REPEAT data."""
+    unit_positions: list          # [(x_mm, y_mm), ...] absolute positions of each unit
+    unit_bounds: tuple            # (width_mm, height_mm) of a single unit
+    total_units: int
+    rows: int                     # effective total rows across entire panel
+    cols: int                     # effective total cols across entire panel
+    step_hierarchy: dict          # raw step-repeat data {step: [StepRepeat, ...]}
+    panel_width: float = 510.0    # mm (constant)
+    panel_height: float = 515.0   # mm (constant)
 
 
 @dataclass
@@ -70,6 +147,7 @@ class RenderedODB:
     board_bounds: tuple  # aggregate (min_x, min_y, max_x, max_y) in mm
     step_name: str = ''
     units: str = ''
+    panel_layout: Optional[PanelLayout] = None
     warnings: list = field(default_factory=list)
 
 
@@ -285,6 +363,113 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
     return gf, stats
 
 
+def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
+                           panel_width: float = 510.0,
+                           panel_height: float = 515.0) -> PanelLayout:
+    """Walk the STEP-REPEAT hierarchy and compute absolute (x, y) for every unit.
+
+    Recursively multiplies out NX×NY at each level from the top step (panel)
+    down to the leaf step (unit).
+
+    Args:
+        step_hierarchy: Dict from _parse_step_repeat() — {step_name: [StepRepeat, ...]}.
+        unit_bounds: (width_mm, height_mm) of a single unit.
+        panel_width: Panel frame width in mm (always 510).
+        panel_height: Panel frame height in mm (always 515).
+
+    Returns:
+        PanelLayout with all unit positions and derived grid info.
+    """
+    # Find the top-level step (the one not referenced as a child by anyone)
+    all_children = set()
+    all_parents = set()
+    for parent, repeats in step_hierarchy.items():
+        all_parents.add(parent)
+        for sr in repeats:
+            all_children.add(sr.child_step.lower())
+
+    # Top step = parent that is not a child of anyone else
+    top_steps = all_parents - all_children
+    # If no clear top, try 'panel', then pick the one with most hierarchy depth
+    if not top_steps:
+        top_step = 'panel' if 'panel' in step_hierarchy else next(iter(step_hierarchy), None)
+    elif len(top_steps) == 1:
+        top_step = top_steps.pop()
+    else:
+        # Prefer 'panel' if available
+        top_step = 'panel' if 'panel' in top_steps else sorted(top_steps)[0]
+
+    if top_step is None:
+        return PanelLayout(
+            unit_positions=[(0, 0)], unit_bounds=unit_bounds,
+            total_units=1, rows=1, cols=1,
+            step_hierarchy=step_hierarchy,
+            panel_width=panel_width, panel_height=panel_height,
+        )
+
+    def _expand(step_name: str, offset_x: float, offset_y: float) -> list:
+        """Recursively expand step-repeat placements, returning leaf (unit) positions."""
+        repeats = step_hierarchy.get(step_name.lower(), [])
+        if not repeats:
+            # Leaf step (unit) — return this position
+            return [(offset_x, offset_y)]
+
+        positions = []
+        for sr in repeats:
+            for iy in range(sr.ny):
+                for ix in range(sr.nx):
+                    child_x = offset_x + sr.x + ix * sr.dx
+                    child_y = offset_y + sr.y + iy * sr.dy
+                    positions.extend(_expand(sr.child_step, child_x, child_y))
+        return positions
+
+    # Start expansion from top step at origin
+    positions = _expand(top_step, 0.0, 0.0)
+
+    # Deduplicate (floating point tolerance)
+    seen = set()
+    unique = []
+    for px, py in positions:
+        key = (round(px, 3), round(py, 3))
+        if key not in seen:
+            seen.add(key)
+            unique.append((px, py))
+
+    # Derive rows/cols from unique Y/X values
+    if unique:
+        xs = sorted(set(round(p[0], 2) for p in unique))
+        ys = sorted(set(round(p[1], 2) for p in unique))
+        cols = len(xs)
+        rows = len(ys)
+    else:
+        rows, cols = 1, 1
+
+    # Center positions within the panel frame (0,0)→(panel_width, panel_height)
+    if unique:
+        uw, uh = unit_bounds
+        raw_min_x = min(p[0] for p in unique)
+        raw_max_x = max(p[0] for p in unique) + uw
+        raw_min_y = min(p[1] for p in unique)
+        raw_max_y = max(p[1] for p in unique) + uh
+        content_w = raw_max_x - raw_min_x
+        content_h = raw_max_y - raw_min_y
+        # Center within panel frame
+        shift_x = (panel_width - content_w) / 2.0 - raw_min_x
+        shift_y = (panel_height - content_h) / 2.0 - raw_min_y
+        unique = [(px + shift_x, py + shift_y) for px, py in unique]
+
+    return PanelLayout(
+        unit_positions=unique,
+        unit_bounds=unit_bounds,
+        total_units=len(unique),
+        rows=rows,
+        cols=cols,
+        step_hierarchy=step_hierarchy,
+        panel_width=panel_width,
+        panel_height=panel_height,
+    )
+
+
 def render_odb_to_cam(data: bytes, filename: str = '',
                       layer_filter: list = None) -> RenderedODB:
     """
@@ -309,6 +494,9 @@ def render_odb_to_cam(data: bytes, filename: str = '',
 
         steps_dir = os.path.join(job_root, 'steps')
         step_name = 'unit' if os.path.isdir(os.path.join(steps_dir, 'unit')) else _find_step(job_root)
+
+        # Parse step-repeat hierarchy for panel tiling
+        step_hierarchy = _parse_step_repeat(job_root, uf)
 
         user_sym_map = _load_user_symbols(job_root, uf)
         matrix_layers = _parse_matrix(job_root)
@@ -411,11 +599,48 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         else:
             board_bounds = (0, 0, 1, 1)
 
+        # Compute panel layout from step-repeat hierarchy + board bounds
+        panel_layout = None
+        if step_hierarchy:
+            unit_w = board_bounds[2] - board_bounds[0]
+            unit_h = board_bounds[3] - board_bounds[1]
+
+            # Detect InCAM Pro inches quirk: if the smallest DX/DY in the hierarchy
+            # is much smaller than the unit width, coordinates are likely in inches
+            _all_spacings = []
+            for _sr_list in step_hierarchy.values():
+                for _sr in _sr_list:
+                    if _sr.dx > 0:
+                        _all_spacings.append(_sr.dx)
+                    if _sr.dy > 0:
+                        _all_spacings.append(_sr.dy)
+            if _all_spacings and unit_w > 10:
+                _min_spacing = min(_all_spacings)
+                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
+                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+
+            panel_layout = compute_unit_positions(
+                step_hierarchy, (unit_w, unit_h),
+            )
+
+        # Pre-render panel PNGs (one per layer, parallelized)
+        if panel_layout and rendered_layers:
+            def _build_panel_png(layer_obj):
+                try:
+                    url = build_panel_png(layer_obj.svg_string, panel_layout)
+                    layer_obj.panel_png_data_url = url
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=min(4, len(rendered_layers))) as executor:
+                list(executor.map(_build_panel_png, rendered_layers.values()))
+
         return RenderedODB(
             layers=rendered_layers,
             board_bounds=board_bounds,
             step_name=step_name,
             units=units,
+            panel_layout=panel_layout,
             warnings=warnings,
         )
 

@@ -102,6 +102,19 @@ class ParsedODB:
     warnings: list = field(default_factory=list)
 
 
+@dataclass
+class StepRepeat:
+    """A single STEP-REPEAT entry from an ODB++ stephdr file."""
+    child_step: str   # name of the child step being placed
+    x: float          # origin offset X (mm)
+    y: float          # origin offset Y (mm)
+    dx: float         # repeat spacing X (mm)
+    dy: float         # repeat spacing Y (mm)
+    nx: int           # number of repeats in X
+    ny: int           # number of repeats in Y
+    angle: float = 0.0
+
+
 # ---------------------------------------------------------------------------
 # ODB++ matrix TYPE → internal layer_type mapping
 # ---------------------------------------------------------------------------
@@ -311,6 +324,108 @@ def _find_step(job_root: str) -> str:
         return 'pcb'
 
     return entries[0]
+
+
+def _parse_step_repeat(job_root: str, uf: float = 1.0) -> dict:
+    """Parse STEP-REPEAT data from all stephdr files in the ODB++ archive.
+
+    Args:
+        job_root: Path to the extracted ODB++ job root directory.
+        uf: Unit factor to convert coordinates to mm (25.4 for inches, 1.0 for mm).
+
+    Returns:
+        Dict mapping step name → list of StepRepeat entries.
+        Example: {'cluster': [StepRepeat(child_step='unit', ...)], ...}
+    """
+    steps_dir = os.path.join(job_root, 'steps')
+    result = {}
+    try:
+        step_names = [
+            e for e in os.listdir(steps_dir)
+            if os.path.isdir(os.path.join(steps_dir, e))
+        ]
+    except OSError:
+        return result
+
+    for step_name in step_names:
+        stephdr_path = os.path.join(steps_dir, step_name, 'stephdr')
+        if not os.path.isfile(stephdr_path):
+            continue
+        try:
+            with open(stephdr_path, 'r', errors='replace') as f:
+                text = f.read()
+        except OSError:
+            continue
+
+        repeats = []
+        in_sr = False
+        sr_fields = {}
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            upper = stripped.upper()
+
+            if upper.startswith('STEP-REPEAT'):
+                in_sr = True
+                sr_fields = {}
+                continue
+
+            if in_sr:
+                if stripped == '' or stripped == '}' or upper.startswith('STEP-REPEAT'):
+                    # Flush current entry if we have one
+                    if sr_fields.get('NAME'):
+                        repeats.append(StepRepeat(
+                            child_step=sr_fields['NAME'],
+                            x=sr_fields.get('X', 0.0) * uf,
+                            y=sr_fields.get('Y', 0.0) * uf,
+                            dx=sr_fields.get('DX', 0.0) * uf,
+                            dy=sr_fields.get('DY', 0.0) * uf,
+                            nx=int(sr_fields.get('NX', 1)),
+                            ny=int(sr_fields.get('NY', 1)),
+                            angle=sr_fields.get('ANGLE', 0.0),
+                        ))
+                    sr_fields = {}
+                    if upper.startswith('STEP-REPEAT'):
+                        continue
+                    else:
+                        in_sr = bool(sr_fields)
+                        continue
+
+                # Parse key=value pairs
+                if '=' in stripped:
+                    key, _, val = stripped.partition('=')
+                    key = key.strip().upper()
+                    val = val.strip().rstrip(';').strip()
+                    if key == 'NAME':
+                        sr_fields['NAME'] = val
+                    elif key in ('X', 'Y', 'DX', 'DY', 'ANGLE'):
+                        try:
+                            sr_fields[key] = float(val)
+                        except ValueError:
+                            pass
+                    elif key in ('NX', 'NY'):
+                        try:
+                            sr_fields[key] = int(val)
+                        except ValueError:
+                            pass
+
+        # Flush last entry
+        if sr_fields.get('NAME'):
+            repeats.append(StepRepeat(
+                child_step=sr_fields['NAME'],
+                x=sr_fields.get('X', 0.0) * uf,
+                y=sr_fields.get('Y', 0.0) * uf,
+                dx=sr_fields.get('DX', 0.0) * uf,
+                dy=sr_fields.get('DY', 0.0) * uf,
+                nx=int(sr_fields.get('NX', 1)),
+                ny=int(sr_fields.get('NY', 1)),
+                angle=sr_fields.get('ANGLE', 0.0),
+            ))
+
+        if repeats:
+            result[step_name.lower()] = repeats
+
+    return result
 
 
 # ---------------------------------------------------------------------------

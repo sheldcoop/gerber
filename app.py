@@ -17,7 +17,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, scan_available_layers, RenderedODB
+from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side, render_column_mapping_ui,
     AOIDataset, FILENAME_PATTERN,
@@ -170,40 +170,6 @@ with st.sidebar:
                 st.session_state['svg_cell_w'] = _vb[0]
                 st.session_state['svg_cell_h'] = _vb[1]
 
-    # ---- Layer picker (instant scan on upload) ----
-    # Rescan if file changed (compare name)
-    if gerber_file:
-        _prev_name = st.session_state.get('_cam_scan_file')
-        if _prev_name != gerber_file.name:
-            st.session_state.pop('available_cam_layers', None)
-            st.session_state['_cam_scan_file'] = gerber_file.name
-
-    if gerber_file and 'available_cam_layers' not in st.session_state:
-        try:
-            gerber_file.seek(0)
-            _avail = scan_available_layers(gerber_file.read())
-            gerber_file.seek(0)
-            st.session_state['available_cam_layers'] = _avail
-        except Exception:
-            st.session_state['available_cam_layers'] = []
-
-    if st.session_state.get('available_cam_layers'):
-        _avail = st.session_state['available_cam_layers']
-        _names = [f"{n} ({t})" for n, t in _avail]
-        _defaults = [f"{n} ({t})" for n, t in _avail if t in ('copper', 'signal', 'power', 'mixed')]
-        _selected_display = st.multiselect(
-            "Layers to render (CAM)",
-            _names,
-            default=_defaults,
-            help="Select which layers to process via Gerbonara. Fewer = faster.",
-        )
-        # Extract just the layer names from "3F (copper)" format
-        st.session_state['cam_layer_filter'] = [s.split(' (')[0] for s in _selected_display]
-    elif not gerber_file:
-        # Clear stale scan when file is removed
-        st.session_state.pop('available_cam_layers', None)
-        st.session_state.pop('cam_layer_filter', None)
-
     st.divider()
 
     # ---- Load & Process Button ----
@@ -317,13 +283,26 @@ with st.sidebar:
                 with st.spinner("Rendering CAM-quality copper layers..."):
                     try:
                         gerber_file.seek(0)
-                        _layer_filter = st.session_state.get('cam_layer_filter')
                         rendered = render_odb_to_cam(
                             gerber_file.read(), gerber_file.name,
-                            layer_filter=_layer_filter if _layer_filter else None,
                         )
                         gerber_file.seek(0)
                         st.session_state['rendered_odb'] = rendered
+
+                        # Auto-populate panel grid from TGZ step-repeat data
+                        if rendered.panel_layout:
+                            _pl = rendered.panel_layout
+                            # Derive rows/cols per quadrant (total / 2 since 2×2 quadrants)
+                            _qr = max(1, _pl.rows // 2)
+                            _qc = max(1, _pl.cols // 2)
+                            st.session_state['quad_rows_input'] = _qr
+                            st.session_state['quad_cols_input'] = _qc
+                            st.info(
+                                f"Panel layout from TGZ: {_pl.total_units} units "
+                                f"({_pl.cols}×{_pl.rows} grid, "
+                                f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
+                            )
+
                         if rendered.layers:
                             layer_names = list(rendered.layers.keys())
                             st.session_state['cam_layer_select'] = layer_names[0]
@@ -380,11 +359,13 @@ with st.sidebar:
 
             # Explicit Grid definition to govern the mathematical unit cell width
             st.subheader("Physical Panel Layout")
+            _tgz_rows = st.session_state.get('quad_rows_input', 6)
+            _tgz_cols = st.session_state.get('quad_cols_input', 6)
             col_g1, col_g2 = st.columns(2)
             with col_g1:
-                quad_rows = st.number_input("Rows per Quadrant", min_value=1, value=6, step=1)
+                quad_rows = st.number_input("Rows per Quadrant", min_value=1, value=int(_tgz_rows), step=1)
             with col_g2:
-                quad_cols = st.number_input("Cols per Quadrant", min_value=1, value=6, step=1)
+                quad_cols = st.number_input("Cols per Quadrant", min_value=1, value=int(_tgz_cols), step=1)
 
             # Dynamic inter-quadrant gaps (user-given, per faster-aoi convention)
             col_g3, col_g4 = st.columns(2)
@@ -791,6 +772,27 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         sizing="stretch", layer="below", opacity=1.0,
                     )])
 
+            # ── CAM (Gerbonara) background tiling (pre-cached panel PNG) ────
+            _rendered_panel = st.session_state.get('rendered_odb')
+            if _bg_source == 'CAM (Gerbonara)' and _rendered_panel and _rendered_panel.panel_layout:
+                # Pick the first visible layer's pre-cached panel PNG
+                _panel_png_url = None
+                for _ln in _rendered_panel.layers:
+                    if st.session_state.get(f"vis_{_ln}", False):
+                        _panel_png_url = _rendered_panel.layers[_ln].panel_png_data_url
+                        break
+                if not _panel_png_url and _rendered_panel.layers:
+                    _panel_png_url = next(iter(_rendered_panel.layers.values())).panel_png_data_url
+
+                if _panel_png_url:
+                    panel_fig.update_layout(images=[dict(
+                        source=_panel_png_url,
+                        xref="x", yref="y",
+                        x=0, y=FRAME_HEIGHT,
+                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
+                        sizing="stretch", layer="below", opacity=1.0,
+                    )])
+
             # ── Cluster Intelligence Overlay ──────────────────────────────
             from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
             if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
@@ -977,6 +979,56 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 )])
             st.plotly_chart(_svg_fig, width='stretch',
                             config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
+
+        elif st.session_state.get('rendered_odb') and st.session_state.get('bg_source') == 'CAM (Gerbonara)':
+            # CAM-only mode: no AOI data, but TGZ is rendered — show tiled panel PNG
+            _rodb = st.session_state['rendered_odb']
+            _pl_cam = _rodb.panel_layout
+            if _pl_cam and _rodb.layers:
+                _cam_fig = go.Figure()
+                _cam_fig.update_layout(
+                    xaxis=dict(range=[-10, FRAME_WIDTH + 10], scaleanchor='y', scaleratio=1,
+                               showgrid=False, zeroline=False, color='#aaa'),
+                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False, color='#aaa'),
+                    plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
+                    margin=dict(l=0, r=0, t=24, b=0),
+                    height=720,
+                )
+                # Panel frame shapes
+                _cam_fig.add_shape(type="rect", x0=-5, y0=-5, x1=FRAME_WIDTH+5, y1=FRAME_HEIGHT+5,
+                                   fillcolor="#2B3A2B", line=dict(color="#1a2a1a", width=1), layer="below")
+                _cam_fig.add_shape(type="rect", x0=0, y0=0, x1=FRAME_WIDTH, y1=FRAME_HEIGHT,
+                                   fillcolor="rgba(184,115,51,0.18)", line=dict(color="#C87533", width=3), layer="below")
+                # Unit cell outlines from TGZ positions
+                _uw_cam = _pl_cam.unit_bounds[0]
+                _uh_cam = _pl_cam.unit_bounds[1]
+                for _px, _py in _pl_cam.unit_positions:
+                    _cam_fig.add_shape(type="rect", x0=_px, y0=_py,
+                                       x1=_px + _uw_cam, y1=_py + _uh_cam,
+                                       fillcolor="rgba(0,180,100,0.07)",
+                                       line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
+                # Use pre-cached panel PNG (instant layer switching)
+                _panel_png = None
+                for _ln2 in _rodb.layers:
+                    if st.session_state.get(f"vis_{_ln2}", False):
+                        _panel_png = _rodb.layers[_ln2].panel_png_data_url
+                        break
+                if not _panel_png:
+                    _panel_png = next(iter(_rodb.layers.values())).panel_png_data_url
+
+                if _panel_png:
+                    _cam_fig.update_layout(images=[dict(
+                        source=_panel_png,
+                        xref="x", yref="y",
+                        x=0, y=FRAME_HEIGHT,
+                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
+                        sizing="stretch", layer="below", opacity=1.0,
+                    )])
+                st.plotly_chart(_cam_fig, width='stretch',
+                                config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
+            else:
+                st.info("Panel layout not found in TGZ. Upload AOI data for panel view.")
+
         else:
             st.info("Upload AOI defect data or SVG layer files to view the Panel Map.")
 
