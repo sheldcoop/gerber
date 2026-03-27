@@ -479,18 +479,22 @@ def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
     margin_y = height * margin_pct if height > 0 else 1
 
     fig.update_layout(
-        # Dark PCB-inspection theme
-        plot_bgcolor='#1a1a2e',
-        paper_bgcolor='#16213e',
-        font=dict(color='#e0e0e0', size=12),
+        # Neutral dark theme — no blue tint
+        plot_bgcolor='#111111',
+        paper_bgcolor='#1a1a1a',
+        font=dict(color='#cccccc', size=12),
 
         # Axis configuration with locked aspect ratio
         xaxis=dict(
             title='X (mm)',
             range=[bounds[0] - margin_x, bounds[2] + margin_x],
             showgrid=True,
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor='rgba(255,255,255,0.06)',
+            gridwidth=1,
             zeroline=False,
+            zerolinecolor='rgba(255,255,255,0.15)',
+            tickcolor='#555555',
+            linecolor='#333333',
             dtick=_smart_tick(width),
         ),
         yaxis=dict(
@@ -499,15 +503,19 @@ def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
             scaleanchor='x',
             scaleratio=1,
             showgrid=True,
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor='rgba(255,255,255,0.06)',
+            gridwidth=1,
             zeroline=False,
+            zerolinecolor='rgba(255,255,255,0.15)',
+            tickcolor='#555555',
+            linecolor='#333333',
             dtick=_smart_tick(height),
         ),
 
         # Legend
         legend=dict(
-            bgcolor='rgba(22, 33, 62, 0.9)',
-            bordercolor='rgba(255,255,255,0.3)',
+            bgcolor='rgba(20,20,20,0.92)',
+            bordercolor='rgba(255,255,255,0.18)',
             borderwidth=1,
             font=dict(size=11),
             itemclick='toggle',

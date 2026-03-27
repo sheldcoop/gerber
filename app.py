@@ -1036,13 +1036,21 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                 ))
 
                 fig_svg.update_layout(
-                    xaxis=dict(range=[unit_x - 2, unit_x + cell_w + 2], scaleanchor="y", scaleratio=1, title="X (mm)"),
-                    yaxis=dict(range=[unit_y - 2, unit_y + cell_h + 2], title="Y (mm)"),
+                    xaxis=dict(
+                        range=[unit_x - 2, unit_x + cell_w + 2], scaleanchor="y", scaleratio=1,
+                        title="X (mm)", showgrid=True, gridcolor='rgba(255,255,255,0.06)',
+                        zeroline=False, tickcolor='#555555', linecolor='#333333',
+                    ),
+                    yaxis=dict(
+                        range=[unit_y - 2, unit_y + cell_h + 2], title="Y (mm)",
+                        showgrid=True, gridcolor='rgba(255,255,255,0.06)',
+                        zeroline=False, tickcolor='#555555', linecolor='#333333',
+                    ),
                     margin=dict(l=0, r=0, t=30, b=0),
                     height=600,
                     title=f"SVG Unit View — {svg_key} | Row {row_val}, Col {col_val}",
-                    plot_bgcolor='#1a1a2e',
-                    paper_bgcolor='#1a1a2e',
+                    plot_bgcolor='#111111',
+                    paper_bgcolor='#1a1a1a',
                     font_color='white',
                 )
                 st.plotly_chart(fig_svg, width='stretch', config={'scrollZoom': True, 'displaylogo': False})
@@ -1083,7 +1091,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
 
             bb = parsed.board_bounds
             calib_fig.update_layout(
-                plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
                 font=dict(color='#e0e0e0'),
                 xaxis=dict(title='X (mm)', range=[bb[0]-5, bb[2]+5], scaleanchor='y'),
                 yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
@@ -1300,13 +1308,21 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         ))
 
                 fig_pan.update_layout(
-                    xaxis=dict(range=[-10, FRAME_WIDTH + 10], scaleanchor="y", scaleratio=1, title="X (mm)"),
-                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], title="Y (mm)"),
+                    xaxis=dict(
+                        range=[-10, FRAME_WIDTH + 10], scaleanchor="y", scaleratio=1,
+                        title="X (mm)", showgrid=True, gridcolor='rgba(255,255,255,0.06)',
+                        zeroline=False, tickcolor='#555555', linecolor='#333333',
+                    ),
+                    yaxis=dict(
+                        range=[-10, FRAME_HEIGHT + 10], title="Y (mm)",
+                        showgrid=True, gridcolor='rgba(255,255,255,0.06)',
+                        zeroline=False, tickcolor='#555555', linecolor='#333333',
+                    ),
                     margin=dict(l=0, r=0, t=30, b=0),
                     height=750,
                     title=f"SVG Panel View — {svg_key} | {q_rows}×{q_cols} per quad | {total_units} units",
-                    plot_bgcolor='#1a1a2e',
-                    paper_bgcolor='#1a1a2e',
+                    plot_bgcolor='#111111',
+                    paper_bgcolor='#1a1a1a',
                     font_color='white',
                     clickmode='event+select',
                 )
@@ -1495,7 +1511,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                         labels={'total_defects': 'Total Defects', 'date': 'Date'},
                     )
                     trend_fig.update_layout(
-                        plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                        plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
                         font=dict(color='#e0e0e0'),
                     )
                     st.plotly_chart(trend_fig, use_container_width=True)
@@ -1509,7 +1525,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                             labels={'unit_col': 'Unit Column', 'unit_row': 'Unit Row'},
                         )
                         heatmap_fig.update_layout(
-                            plot_bgcolor='#1a1a2e', paper_bgcolor='#16213e',
+                            plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
                             font=dict(color='#e0e0e0'),
                         )
                         st.plotly_chart(heatmap_fig, use_container_width=True)
