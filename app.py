@@ -64,8 +64,6 @@ def _init_state():
         'needs_manual_side': {},     # filename → True if BU/side not detected
         'svg_store': {},             # {"BU-01_F": svg_string, ...}
         'rendered_odb': None,        # RenderedODB (Gerbonara CAM SVGs)
-        'cam_layer_select': None,    # selected CAM layer name
-        'cam_stack_mode': False,     # stack multiple layers
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -499,25 +497,6 @@ with st.sidebar:
                 format_func=lambda x: x.replace('_', ' ').title(),
                 key='color_mode_select',
             )
-
-        # ---- CAM View Layer Selector ----
-        _rendered = st.session_state.get('rendered_odb')
-        if _rendered and _rendered.layers:
-            st.header("CAM View")
-            _cam_names = list(_rendered.layers.keys())
-            _cam_sel = st.selectbox(
-                "Copper Layer",
-                _cam_names,
-                key='cam_layer_select',
-                help="Select which copper layer to render in CAM quality",
-            )
-            st.session_state['cam_stack_mode'] = st.toggle(
-                "Stack all copper layers",
-                value=False,
-                help="Overlay all copper layers with different colors",
-            )
-            for _ln, _lyr in _rendered.layers.items():
-                st.caption(f"{_ln}: {_lyr.feature_count:,} features ({_lyr.stats})")
 
         # ---- SVG Background Source ----
         _ss = st.session_state.get('svg_store', {})
@@ -1111,50 +1090,46 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
 
         # ── CAM (Gerbonara) SVG background ───────────────────────────────
         if _use_cam_bg and _rendered_odb and _rendered_odb.layers and fig is not None:
-            _cam_sel = st.session_state.get('cam_layer_select')
-            _cam_stack = st.session_state.get('cam_stack_mode', False)
+            # Use Layer Controls checkboxes to determine which CAM layers to show
+            _cam_layers_to_show = [
+                name for name in _rendered_odb.layers
+                if st.session_state.get(f"vis_{name}", False)
+            ]
+            # Fallback: if no layers selected, show first available
+            if not _cam_layers_to_show:
+                _cam_layers_to_show = list(_rendered_odb.layers.keys())[:1]
 
-            # Determine which layers to render
-            if _cam_stack:
-                _cam_layers_to_show = list(_rendered_odb.layers.keys())
-            else:
-                _cam_layers_to_show = [_cam_sel] if _cam_sel and _cam_sel in _rendered_odb.layers else list(_rendered_odb.layers.keys())[:1]
-
-            # Color palette for stacked layers
-            _cam_colors = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644', '#44ccaa']
+            # Use pre-cached data URLs — zero re-rendering on toggle
+            _is_multi = len(_cam_layers_to_show) > 1
 
             for _ci, _cam_ln in enumerate(_cam_layers_to_show):
                 _cam_lyr = _rendered_odb.layers.get(_cam_ln)
                 if not _cam_lyr:
                     continue
 
-                # Re-render SVG with per-layer color if stacking
-                if _cam_stack and len(_cam_layers_to_show) > 1:
-                    _fg = _cam_colors[_ci % len(_cam_colors)]
-                    _cam_svg = str(_cam_lyr.gerber_file.to_svg(fg=_fg, bg='#060A06'))
+                # Instant: just pick the right pre-cached data URL
+                if _is_multi and _cam_lyr.color_svg_urls:
+                    _data_url = next(iter(_cam_lyr.color_svg_urls.values()))
                 else:
-                    _cam_svg = _cam_lyr.svg_string
+                    _data_url = _cam_lyr.svg_data_url
 
-                # Place SVG as Plotly background image
                 _cb = _cam_lyr.bounds
-                _cam_w = _cb[2] - _cb[0]
-                _cam_h = _cb[3] - _cb[1]
                 ox = config.offset_x
                 oy = config.offset_y
 
                 fig.add_layout_image(dict(
-                    source=svg_to_data_url(_cam_svg),
+                    source=_data_url,
                     xref="x", yref="y",
                     x=_cb[0] + ox,
-                    y=_cb[3] + oy,  # Plotly images anchor at top-left
-                    sizex=_cam_w,
-                    sizey=_cam_h,
+                    y=_cb[3] + oy,
+                    sizex=_cb[2] - _cb[0],
+                    sizey=_cb[3] - _cb[1],
                     sizing="stretch",
                     layer="below",
-                    opacity=0.95 if not _cam_stack else 0.7,
+                    opacity=0.95 if not _is_multi else 0.7,
                 ))
 
-            # Update board bounds from CAM data if not already set by alignment
+            # Update board bounds from CAM data if not already set
             if not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
                 _rbb = _rendered_odb.board_bounds
                 config.board_bounds = (_rbb[0] + ox, _rbb[1] + oy, _rbb[2] + ox, _rbb[3] + oy)

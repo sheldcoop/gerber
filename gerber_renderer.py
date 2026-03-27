@@ -3,10 +3,15 @@ gerber_renderer.py — ODB++ to Gerbonara CAM-quality SVG renderer.
 
 Parses ODB++ features → Gerbonara Flash/Line/Region objects → SVG.
 Each pad, trace, and surface retains its identity for CAM-quality rendering.
+
+Performance: layers are parsed in parallel via ThreadPoolExecutor.
+SVGs and data URLs are pre-cached to avoid re-rendering on UI interactions.
 """
 
+import base64
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -33,14 +38,27 @@ from odb_parser import (
 )
 
 
+def _svg_to_data_url_fast(svg_str: str) -> str:
+    """Convert SVG string to base64 data URL (cached-friendly)."""
+    b64 = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
+    return f"data:image/svg+xml;base64,{b64}"
+
+
+# Pre-defined color palette for stacking
+LAYER_COLORS = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644',
+                '#44ccaa', '#cc4466', '#44cccc']
+
+
 @dataclass
 class RenderedLayer:
-    """A single rendered copper layer."""
+    """A single rendered copper layer with pre-cached SVG variants."""
     name: str
     layer_type: str
-    svg_string: str
+    svg_string: str              # default copper color SVG
+    svg_data_url: str            # pre-encoded base64 data URL (default color)
+    color_svg_urls: dict         # {color_hex: data_url} for stacking
     gerber_file: GerberFile
-    bounds: tuple  # (min_x, min_y, max_x, max_y) in mm
+    bounds: tuple                # (min_x, min_y, max_x, max_y) in mm
     feature_count: int
     stats: dict = field(default_factory=dict)
 
@@ -297,46 +315,90 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         if not matrix_layers:
             matrix_layers = _scan_layers_dir(os.path.join(job_root, 'steps', step_name, 'layers'))
 
-        copper_types = {'copper', 'signal', 'power', 'mixed'}
+        # Render copper + soldermask layers; skip impedance test coupons (L0x_*)
+        import re
+        _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
+        renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask'}
 
         if layer_filter:
             selected = [(n, t) for n, t in matrix_layers if n.lower() in [l.lower() for l in layer_filter]]
         else:
-            selected = [(n, t) for n, t in matrix_layers if t in copper_types]
+            selected = [
+                (n, t) for n, t in matrix_layers
+                if t in renderable_types and not _IMPEDANCE_RE.match(n)
+            ]
 
         rendered_layers = {}
         all_bounds = []
 
-        for name, ltype in selected:
+        # ── Parallel layer parsing ────────────────────────────────────────
+        def _process_layer(args):
+            name, ltype = args
             result = _parse_layer_to_gerbonara(job_root, step_name, name, uf, user_sym_map)
             if result is None:
-                warnings.append(f"Layer '{name}': no features found")
-                continue
-
+                return name, ltype, None, None, f"Layer '{name}': no features found"
             gf, stats = result
             if not gf.objects:
-                warnings.append(f"Layer '{name}': 0 objects parsed")
-                continue
+                return name, ltype, None, None, f"Layer '{name}': 0 objects parsed"
+            return name, ltype, gf, stats, None
 
-            # Render SVG
-            svg_tag = gf.to_svg(fg='#b87333', bg='#060A06')
-            svg_str = str(svg_tag)
+        parse_results = []
+        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as executor:
+            futures = {executor.submit(_process_layer, item): item for item in selected}
+            for future in as_completed(futures):
+                parse_results.append(future.result())
 
-            # Get bounds
+        # ── Pre-render SVGs + data URLs (also parallelized) ───────────────
+        # Filter successful parses
+        valid_results = []
+        for name, ltype, gf, stats, warn in parse_results:
+            if warn:
+                warnings.append(warn)
+            elif gf is not None:
+                valid_results.append((name, ltype, gf, stats))
+
+        # Assign each layer a stacking color by index
+        layer_color_map = {
+            name: LAYER_COLORS[i % len(LAYER_COLORS)]
+            for i, (name, _, _, _) in enumerate(valid_results)
+        }
+
+        def _render_layer(name, ltype, gf, stats):
+            # Default SVG (copper color)
+            svg_str = str(gf.to_svg(fg='#b87333', bg='#060A06'))
+            svg_data_url = _svg_to_data_url_fast(svg_str)
+
+            # One stacking color (assigned by index) — not all 8
+            stack_color = layer_color_map[name]
+            stack_svg = str(gf.to_svg(fg=stack_color, bg='#060A06'))
+            color_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
+
             bb = gf.bounding_box(MM)
             bounds = (bb[0][0], bb[0][1], bb[1][0], bb[1][1])
-            all_bounds.append(bounds)
-
             total = stats['flash'] + stats['line'] + stats['region'] + stats['clear']
-            rendered_layers[name] = RenderedLayer(
+
+            return name, RenderedLayer(
                 name=name,
                 layer_type=ltype,
                 svg_string=svg_str,
+                svg_data_url=svg_data_url,
+                color_svg_urls=color_urls,
                 gerber_file=gf,
                 bounds=bounds,
                 feature_count=total,
                 stats=stats,
-            )
+            ), bounds
+
+        # Render SVGs in parallel (2 per layer: default + stack color)
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(valid_results)))) as executor:
+            render_futures = {
+                executor.submit(_render_layer, name, ltype, gf, stats): name
+                for name, ltype, gf, stats in valid_results
+            }
+            for future in as_completed(render_futures):
+                name, layer_obj, bounds = future.result()
+                rendered_layers[name] = layer_obj
+                all_bounds.append(bounds)
 
         # Aggregate bounds
         if all_bounds:
