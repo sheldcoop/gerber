@@ -28,7 +28,7 @@ from alignment import (
     calculate_physical_unit_origin, get_panel_quadrant_bounds,
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
-from visualizer import build_overlay_figure, build_defect_only_figure, OverlayConfig
+from visualizer import build_overlay_figure, build_defect_only_figure, OverlayConfig, _apply_layout
 from svg_utils import (
     load_svg_store, parse_svg_keys, get_svg_viewbox_mm,
     svg_to_data_url, get_rounded_rect_path,
@@ -150,6 +150,24 @@ with st.sidebar:
                 side = st.selectbox(f"Side for {fname}", ['Front', 'Back'], key=f"side_{fname}")
             manual_map[fname] = (bu, 'F' if side == 'Front' else 'B')
 
+    svg_files_upload = st.file_uploader(
+        "SVG Layer Files (.svg)",
+        type=["svg"],
+        accept_multiple_files=True,
+        help="One SVG per buildup/side. Naming: BU-01_F.svg, BU-02_B.svg …",
+    )
+    if svg_files_upload:
+        _new_store = load_svg_store(svg_files_upload)
+        if _new_store:
+            st.session_state['svg_store'] = _new_store
+            _bu_nums_up, _sides_up = parse_svg_keys(_new_store)
+            st.success(f"Loaded {len(_new_store)} SVG(s): BU-{_bu_nums_up} × {_sides_up}")
+            _first_key = next(iter(_new_store))
+            _vb = get_svg_viewbox_mm(_new_store[_first_key])
+            if _vb:
+                st.session_state['svg_cell_w'] = _vb[0]
+                st.session_state['svg_cell_h'] = _vb[1]
+
     st.divider()
 
     # ---- Load & Process Button ----
@@ -168,12 +186,34 @@ with st.sidebar:
             import os
             import sys
             import pandas as pd
-            
+
             # 1. Load Dummy ODB++ Board
             if os.path.exists("test_2F.tgz"):
                 with open("test_2F.tgz", "rb") as f:
                     gerber_file = io.BytesIO(f.read())
                     gerber_file.name = "test_2F.tgz"
+
+            # 2. Auto-load test SVGs from test_svgs/ directory
+            _test_svg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_svgs")
+            if os.path.isdir(_test_svg_dir):
+                _test_svg_store = {}
+                for _svg_fname in os.listdir(_test_svg_dir):
+                    if _svg_fname.lower().endswith(".svg"):
+                        _svg_path = os.path.join(_test_svg_dir, _svg_fname)
+                        with open(_svg_path, "r", encoding="utf-8") as _svg_f:
+                            _svg_content = _svg_f.read()
+                        # Key by stem: BU-01_F, BU-02_B, etc.
+                        _key = os.path.splitext(_svg_fname)[0]
+                        _test_svg_store[_key] = _svg_content
+                if _test_svg_store:
+                    st.session_state['svg_store'] = _test_svg_store
+                    # Auto-detect cell dimensions from first SVG viewBox
+                    _first_svg = next(iter(_test_svg_store.values()))
+                    _vb = get_svg_viewbox_mm(_first_svg)
+                    if _vb:
+                        st.session_state['svg_cell_w'] = _vb[0]
+                        st.session_state['svg_cell_h'] = _vb[1]
+                    st.session_state['bg_source'] = 'SVG'
                     
             # 2. Native Dynamic Execution of faster-aoi Sample Generator
             faster_dir = "/Users/prince/Desktop/faster-aoi"
@@ -433,34 +473,23 @@ with st.sidebar:
                 key='color_mode_select',
             )
 
-        # ---- SVG Upload (Experimental) ----
-        with st.expander("🧪 SVG Layers (Experimental)", expanded=False):
-            st.caption("Upload one SVG per buildup per side. Naming: `BU-01_F.svg`, `BU-02_B.svg` …")
-            svg_uploads = st.file_uploader(
-                "SVG files",
-                type=["svg"],
-                accept_multiple_files=True,
-                key="svg_uploads",
-                label_visibility="collapsed",
+        # ---- SVG Background Source ----
+        _ss = st.session_state.get('svg_store', {})
+        if _ss:
+            _has_odb = bool(st.session_state.get('parsed_odb'))
+            if 'bg_source' not in st.session_state:
+                st.session_state['bg_source'] = 'ODB++ / Shapely' if _has_odb else 'SVG'
+            _bu_loaded, _sides_loaded = parse_svg_keys(_ss)
+            st.caption(f"SVG loaded: BU-{_bu_loaded} × {_sides_loaded}")
+            st.radio(
+                "Background source",
+                ['ODB++ / Shapely', 'SVG'],
+                key='bg_source',
+                horizontal=True,
+                help="'SVG' renders the uploaded PCB layer images behind defect markers",
             )
-            if svg_uploads:
-                new_store = load_svg_store(svg_uploads)
-                if new_store:
-                    st.session_state['svg_store'] = new_store
-                    bu_nums, sides = parse_svg_keys(new_store)
-                    st.success(f"Loaded {len(new_store)} SVG(s): BU-{bu_nums} × {sides}")
-                    # Try to read viewBox dims; show calibration input if not found
-                    first_key = next(iter(new_store))
-                    vb = get_svg_viewbox_mm(new_store[first_key])
-                    if vb:
-                        st.session_state['svg_cell_w'] = vb[0]
-                        st.session_state['svg_cell_h'] = vb[1]
-                        st.caption(f"viewBox: {vb[0]:.3f} × {vb[1]:.3f} mm (auto-detected)")
-                    else:
-                        st.warning("⚠️ Could not read viewBox in mm — enter unit dimensions manually.")
-                        vc1, vc2 = st.columns(2)
-                        w_mm = vc1.number_input("Unit width (mm)", min_value=0.1, value=35.0, step=0.1, key='svg_cell_w')
-                        h_mm = vc2.number_input("Unit height (mm)", min_value=0.1, value=39.0, step=0.1, key='svg_cell_h')
+        else:
+            st.session_state['bg_source'] = 'ODB++ / Shapely'
 
 
 # ---------------------------------------------------------------------------
@@ -526,10 +555,7 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _svg_store = st.session_state.get('svg_store', {})
     _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection", "🎯 Calibration Wizard"]
-    if _svg_store:
-        _tabs += ["🧪 SVG Unit View", "🗺️ SVG Panel View"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -646,6 +672,52 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
 
             panel_fig = build_defect_only_figure(panel_df, panel_config)
 
+            # ── SVG background tiling (when bg_source == 'SVG') ───────────
+            _svg_store = st.session_state.get('svg_store', {})
+            _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
+            if _svg_store and _bg_source == 'SVG':
+                _svg_cell_w = float(st.session_state.get('svg_cell_w', 35.0))
+                _svg_cell_h = float(st.session_state.get('svg_cell_h', 39.0))
+                _q_rows = int(st.session_state.get('quad_rows_input', 6))
+                _q_cols = int(st.session_state.get('quad_cols_input', 6))
+                _d_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
+                _d_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
+                _ctx = calculate_geometry(_q_rows, _q_cols, _d_gap_x, _d_gap_y)
+                _total_units = _q_rows * _q_cols * 4
+                # Pick the first available SVG key that matches current scope filters
+                _scope_bu = st.session_state.get('scope_bu_sel', [])
+                _scope_side = st.session_state.get('scope_side_sel', ['Front'])
+                _side_char = 'F' if 'Front' in _scope_side else 'B'
+                _bu_num = _scope_bu[0] if _scope_bu else 1
+                _svg_key = f"BU-{_bu_num:02d}_{_side_char}"
+                _svg_str = _svg_store.get(_svg_key) or next(iter(_svg_store.values()), None)
+                if _svg_str:
+                    import xml.etree.ElementTree as _ET2
+                    try:
+                        _r2 = _ET2.fromstring(_svg_str)
+                        _inner2 = ''.join(_ET2.tostring(c, encoding='unicode') for c in _r2)
+                    except Exception:
+                        _inner2 = f'<image href="{svg_to_data_url(_svg_str)}" x="0" y="0" width="{_svg_cell_w}" height="{_svg_cell_h}"/>'
+                    _tiles2 = []
+                    for _, (q_ox, q_oy) in _ctx.quadrant_origins.items():
+                        for _r in range(_q_rows):
+                            for _c in range(_q_cols):
+                                ux = q_ox + INTER_UNIT_GAP + _c * _ctx.stride_x
+                                uy = q_oy + INTER_UNIT_GAP + _r * _ctx.stride_y
+                                _tiles2.append(f'<g transform="translate({ux:.3f},{uy:.3f})">{_inner2}</g>')
+                    _comp_svg = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" '
+                        f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}">'
+                        + ''.join(_tiles2) + '</svg>'
+                    )
+                    panel_fig.update_layout(images=[dict(
+                        source=svg_to_data_url(_comp_svg),
+                        xref="x", yref="y",
+                        x=0, y=FRAME_HEIGHT,
+                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
+                        sizing="stretch", layer="below", opacity=1.0,
+                    )])
+
             # ── Cluster Intelligence Overlay ──────────────────────────────
             from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
             if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
@@ -667,19 +739,59 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     st.session_state['_cluster_summary'] = cluster_summary
                     st.session_state['_clustered_df'] = clustered_df
 
-            # Draw Substrate Structural Lines (Phase 5)
+            # ── Professional PCB substrate panel background ───────────────
+            # Dark green solder-mask base for the whole frame
+            frame_bx1, frame_by1, frame_bx2, frame_by2 = quad_bounds['frame']
+            panel_fig.add_shape(
+                type="rect",
+                x0=frame_bx1 - 8, y0=frame_by1 - 8,
+                x1=frame_bx2 + 8, y1=frame_by2 + 8,
+                fillcolor="#2B3A2B",          # PCB panel carrier (dark green)
+                line=dict(color="#1a2a1a", width=1),
+                layer="below",
+            )
+            # Copper FR4 frame band
+            panel_fig.add_shape(
+                type="rect",
+                x0=frame_bx1, y0=frame_by1,
+                x1=frame_bx2, y1=frame_by2,
+                fillcolor="rgba(184,115,51,0.18)",   # warm copper tint
+                line=dict(color="#C87533", width=3),
+                layer="below",
+            )
+
+            # Unit cell grid — subtle outlines for each individual PCB
             for name, (bx1, by1, bx2, by2) in quad_bounds.items():
-                is_frame = name == 'frame'
-                shape_kwargs = dict(
+                if name == 'frame':
+                    continue
+                # quadrant zone shading
+                panel_fig.add_shape(
                     type="rect",
                     x0=bx1, y0=by1, x1=bx2, y1=by2,
-                    line=dict(color="rgba(184, 115, 51, 0.8)", width=4 if is_frame else 2),
-                    layer="below"
+                    fillcolor="rgba(0,200,120,0.04)",
+                    line=dict(color="rgba(0,200,120,0.35)", width=1, dash="dot"),
+                    layer="below",
                 )
-                if is_frame:
-                    # Fix: passing fillcolor=None causes a Plotly deprecation warning
-                    shape_kwargs['fillcolor'] = "rgba(184, 115, 51, 0.05)"
-                panel_fig.add_shape(**shape_kwargs)
+
+            # Draw individual unit cells within each quadrant
+            _pq_rows = int(st.session_state.get('quad_rows_input', 6))
+            _pq_cols = int(st.session_state.get('quad_cols_input', 6))
+            _pd_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
+            _pd_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
+            _pctx = calculate_geometry(_pq_rows, _pq_cols, _pd_gap_x, _pd_gap_y)
+            for _, (q_ox, q_oy) in _pctx.quadrant_origins.items():
+                for _pr in range(_pq_rows):
+                    for _pc in range(_pq_cols):
+                        _ux = q_ox + INTER_UNIT_GAP + _pc * _pctx.stride_x
+                        _uy = q_oy + INTER_UNIT_GAP + _pr * _pctx.stride_y
+                        panel_fig.add_shape(
+                            type="rect",
+                            x0=_ux, y0=_uy,
+                            x1=_ux + _pctx.cell_width, y1=_uy + _pctx.cell_height,
+                            fillcolor="rgba(0,180,100,0.07)",
+                            line=dict(color="rgba(0,220,130,0.5)", width=0.8),
+                            layer="below",
+                        )
 
             event = st.plotly_chart(
                 panel_fig,
@@ -843,7 +955,10 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
             config.board_bounds = aoi.coord_bounds
 
         # Build and render figure
-        gerber_layers = parsed.layers if parsed else {}
+        _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
+        _svg_store_unit = st.session_state.get('svg_store', {})
+        _use_svg_bg = _svg_store_unit and (_bg_source == 'SVG')
+        gerber_layers = parsed.layers if (parsed and not _use_svg_bg) else {}
 
         if gerber_layers:
             fig = build_overlay_figure(
@@ -854,7 +969,33 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
         elif not defect_df.empty:
             fig = build_defect_only_figure(defect_df, config)
         else:
-            fig = None
+            fig = go.Figure()
+            _apply_layout(fig, config)
+
+        # ── SVG background for Single Unit view ──────────────────────────
+        if _use_svg_bg and fig is not None:
+            _svg_cell_w = float(st.session_state.get('svg_cell_w', 35.0))
+            _svg_cell_h = float(st.session_state.get('svg_cell_h', 39.0))
+            # Determine which SVG key to use from align_args / sidebar filters
+            _bu_sel = st.session_state.get('buildup_filter_select', [1])
+            _side_sel = st.session_state.get('side_filter_select', 'Both')
+            _bu_n = _bu_sel[0] if _bu_sel else 1
+            _side_c = 'F' if _side_sel in ('Front', 'Both') else 'B'
+            _ukey = f"BU-{_bu_n:02d}_{_side_c}"
+            _usvg = _svg_store_unit.get(_ukey) or next(iter(_svg_store_unit.values()), None)
+            if _usvg:
+                _unit_x = config.offset_x
+                _unit_y = config.offset_y
+                _svg_off_x = float(st.session_state.get('svg_off_x', 0.0))
+                _svg_off_y = float(st.session_state.get('svg_off_y', 0.0))
+                fig.add_layout_image(dict(
+                    source=svg_to_data_url(_usvg),
+                    xref="x", yref="y",
+                    x=_unit_x + _svg_off_x,
+                    y=_unit_y + _svg_off_y + _svg_cell_h,
+                    sizex=_svg_cell_w, sizey=_svg_cell_h,
+                    sizing="stretch", layer="below", opacity=1.0,
+                ))
 
         if fig:
             st.plotly_chart(
@@ -892,168 +1033,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
                     mime="text/csv",
                     use_container_width=True,
                 )
-
-    # ── SVG Unit View ─────────────────────────────────────────────────────────
-    elif view_mode == "🧪 SVG Unit View":
-        svg_store = st.session_state.get('svg_store', {})
-        if not svg_store:
-            st.info("Upload SVG files in the '🧪 SVG Layers (Experimental)' sidebar section first.")
-        else:
-            bu_nums, sides_avail = parse_svg_keys(svg_store)
-            cell_w = float(st.session_state.get('svg_cell_w', 35.0))
-            cell_h = float(st.session_state.get('svg_cell_h', 39.0))
-
-            # BU capsule selector
-            if 'svg_sel_bu' not in st.session_state:
-                st.session_state['svg_sel_bu'] = bu_nums[0] if bu_nums else 1
-            bu_c = st.columns(len(bu_nums), gap="small")
-            for _i, _bn in enumerate(bu_nums):
-                _act = st.session_state['svg_sel_bu'] == _bn
-                def _sel_bu(_b=_bn): st.session_state['svg_sel_bu'] = _b
-                bu_c[_i].button(f"BU-{_bn:02d}", key=f"svg_bu_{_bn}",
-                                type="primary" if _act else "secondary",
-                                width="stretch", on_click=_sel_bu)
-
-            # Side capsule selector
-            if 'svg_sel_side' not in st.session_state:
-                st.session_state['svg_sel_side'] = sides_avail[0] if sides_avail else 'F'
-            s_cols = st.columns(len(sides_avail), gap="small")
-            for _i, _s in enumerate(sides_avail):
-                _act = st.session_state['svg_sel_side'] == _s
-                def _sel_side(_s2=_s): st.session_state['svg_sel_side'] = _s2
-                _lbl = "Front" if _s == "F" else "Back"
-                s_cols[_i].button(_lbl, key=f"svg_side_{_s}",
-                                  type="primary" if _act else "secondary",
-                                  width="stretch", on_click=_sel_side)
-
-            sel_bu = st.session_state['svg_sel_bu']
-            sel_side = st.session_state['svg_sel_side']
-            svg_key = f"BU-{sel_bu:02d}_{sel_side}"
-            svg_str = svg_store.get(svg_key)
-
-            if not svg_str:
-                st.warning(f"SVG not found for {svg_key}.svg — check uploaded files.")
-            else:
-                st.divider()
-                # Unit position (reuse sidebar selectors)
-                row_val = st.session_state.get('sel_unit_row', 'All')
-                col_val = st.session_state.get('sel_unit_col', 'All')
-                if row_val == 'All' or col_val == 'All':
-                    st.info("Select a specific Unit Row and Unit Col in the sidebar to position the SVG overlay.")
-                    unit_x, unit_y = 0.0, 0.0
-                else:
-                    unit_x, unit_y = calculate_physical_unit_origin(
-                        int(row_val), int(col_val),
-                        panel_rows_per_quad=st.session_state.get('quad_rows_input', 6),
-                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6),
-                        dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
-                        dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
-                    )
-
-                # ── Alignment confidence & manual SVG origin offset ──────────
-                _align_result = st.session_state.get('last_alignment_result')
-                _conf = getattr(_align_result, 'confidence', None) if _align_result else None
-                _fids_used = getattr(_align_result, 'fiducials_used', 0) if _align_result else 0
-
-                _svg_conf_cols = st.columns([1, 1, 1, 2])
-                with _svg_conf_cols[0]:
-                    if _conf is not None:
-                        _conf_pct = int(_conf * 100)
-                        _conf_color = "green" if _conf >= 0.7 else ("orange" if _conf >= 0.4 else "red")
-                        st.markdown(
-                            f"**Alignment confidence**<br>"
-                            f"<span style='color:{_conf_color};font-size:1.3em'>{_conf_pct}%</span> "
-                            f"({_fids_used} fiducials)",
-                            unsafe_allow_html=True,
-                        )
-                        if _conf < 0.4:
-                            st.warning("Low confidence — defect overlay may be misaligned. Use the offset controls or run Calibration Wizard.")
-                    else:
-                        st.markdown("**Alignment confidence**<br><span style='color:gray'>No AOI loaded</span>", unsafe_allow_html=True)
-                with _svg_conf_cols[1]:
-                    svg_off_x = st.number_input(
-                        "SVG offset X (mm)", min_value=-50.0, max_value=50.0,
-                        value=float(st.session_state.get('svg_off_x', 0.0)),
-                        step=0.1, key='svg_off_x', format="%.2f",
-                        help="Shift SVG image horizontally relative to defect coordinates",
-                    )
-                with _svg_conf_cols[2]:
-                    svg_off_y = st.number_input(
-                        "SVG offset Y (mm)", min_value=-50.0, max_value=50.0,
-                        value=float(st.session_state.get('svg_off_y', 0.0)),
-                        step=0.1, key='svg_off_y', format="%.2f",
-                        help="Shift SVG image vertically relative to defect coordinates",
-                    )
-                with _svg_conf_cols[3]:
-                    st.markdown("&nbsp;", unsafe_allow_html=True)
-                    if st.button("Reset SVG offsets", key="svg_off_reset"):
-                        st.session_state['svg_off_x'] = 0.0
-                        st.session_state['svg_off_y'] = 0.0
-                        st.rerun()
-
-                svg_off_x = float(st.session_state.get('svg_off_x', 0.0))
-                svg_off_y = float(st.session_state.get('svg_off_y', 0.0))
-                img_x = unit_x + svg_off_x
-                img_y = unit_y + svg_off_y
-
-                data_url = svg_to_data_url(svg_str)
-
-                fig_svg = go.Figure()
-                # SVG as background (Y-up: top-left corner = x, y+height)
-                fig_svg.add_layout_image(
-                    source=data_url,
-                    xref="x", yref="y",
-                    x=img_x, y=img_y + cell_h,
-                    sizex=cell_w, sizey=cell_h,
-                    sizing="stretch",
-                    layer="below",
-                    opacity=1.0,
-                )
-
-                # Overlay AOI defect dots for this unit
-                if not defect_df.empty and 'ALIGNED_X' in defect_df.columns:
-                    unit_df = defect_df.copy()
-                    if row_val != 'All':
-                        unit_df = unit_df[unit_df['UNIT_INDEX_Y'] == int(row_val)] if 'UNIT_INDEX_Y' in unit_df.columns else unit_df
-                    if col_val != 'All':
-                        unit_df = unit_df[unit_df['UNIT_INDEX_X'] == int(col_val)] if 'UNIT_INDEX_X' in unit_df.columns else unit_df
-                    if not unit_df.empty:
-                        fig_svg.add_trace(go.Scatter(
-                            x=unit_df['ALIGNED_X'], y=unit_df['ALIGNED_Y'],
-                            mode='markers',
-                            marker=dict(size=8, color='red', symbol='circle-open', line=dict(width=2)),
-                            name='Defects',
-                            hovertext=unit_df.get('DEFECT_TYPE', pd.Series()),
-                        ))
-
-                # Show SVG bounding box so user can see where the image lands
-                _bx = [img_x, img_x + cell_w, img_x + cell_w, img_x, img_x]
-                _by = [img_y, img_y, img_y + cell_h, img_y + cell_h, img_y]
-                fig_svg.add_trace(go.Scatter(
-                    x=_bx, y=_by, mode='lines',
-                    line=dict(color='cyan', width=1, dash='dot'),
-                    name='SVG bounds', hoverinfo='skip',
-                ))
-
-                fig_svg.update_layout(
-                    xaxis=dict(
-                        range=[unit_x - 2, unit_x + cell_w + 2], scaleanchor="y", scaleratio=1,
-                        title="X (mm)", showgrid=True, gridcolor='rgba(255,255,255,0.06)',
-                        zeroline=False, tickcolor='#555555', linecolor='#333333',
-                    ),
-                    yaxis=dict(
-                        range=[unit_y - 2, unit_y + cell_h + 2], title="Y (mm)",
-                        showgrid=True, gridcolor='rgba(255,255,255,0.06)',
-                        zeroline=False, tickcolor='#555555', linecolor='#333333',
-                    ),
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    height=600,
-                    title=f"SVG Unit View — {svg_key} | Row {row_val}, Col {col_val}",
-                    plot_bgcolor='#111111',
-                    paper_bgcolor='#1a1a1a',
-                    font_color='white',
-                )
-                st.plotly_chart(fig_svg, width='stretch', config={'scrollZoom': True, 'displaylogo': False})
 
     # ── Calibration Wizard ──────────────────────────────────────────────────
     elif view_mode == "🎯 Calibration Wizard":
@@ -1157,197 +1136,6 @@ if (st.session_state.get('data_loaded') and (parsed or aoi)) or st.session_state
         else:
             st.info("Upload an ODB++ archive to use the Calibration Wizard.")
 
-    # ── SVG Panel View ────────────────────────────────────────────────────────
-    elif view_mode == "🗺️ SVG Panel View":
-        svg_store = st.session_state.get('svg_store', {})
-        if not svg_store:
-            st.info("Upload SVG files in the '🧪 SVG Layers (Experimental)' sidebar section first.")
-        else:
-            bu_nums, sides_avail = parse_svg_keys(svg_store)
-            cell_w = float(st.session_state.get('svg_cell_w', 35.0))
-            cell_h = float(st.session_state.get('svg_cell_h', 39.0))
-            q_rows = int(st.session_state.get('quad_rows_input', 6))
-            q_cols = int(st.session_state.get('quad_cols_input', 6))
-            d_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
-            d_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
-
-            # BU / Side selectors (reuse svg_sel_bu / svg_sel_side from SVG Unit View)
-            if 'svg_sel_bu' not in st.session_state:
-                st.session_state['svg_sel_bu'] = bu_nums[0] if bu_nums else 1
-            if 'svg_sel_side' not in st.session_state:
-                st.session_state['svg_sel_side'] = sides_avail[0] if sides_avail else 'F'
-
-            pbu_c = st.columns(len(bu_nums), gap="small")
-            for _i, _bn in enumerate(bu_nums):
-                _act = st.session_state['svg_sel_bu'] == _bn
-                def _psel_bu(_b=_bn): st.session_state['svg_sel_bu'] = _b
-                pbu_c[_i].button(f"BU-{_bn:02d}", key=f"pansvg_bu_{_bn}",
-                                 type="primary" if _act else "secondary",
-                                 width="stretch", on_click=_psel_bu)
-            ps_cols = st.columns(len(sides_avail), gap="small")
-            for _i, _s in enumerate(sides_avail):
-                _act = st.session_state['svg_sel_side'] == _s
-                def _psel_side(_s2=_s): st.session_state['svg_sel_side'] = _s2
-                _lbl = "Front" if _s == "F" else "Back"
-                ps_cols[_i].button(_lbl, key=f"pansvg_side_{_s}",
-                                   type="primary" if _act else "secondary",
-                                   width="stretch", on_click=_psel_side)
-
-            sel_bu = st.session_state['svg_sel_bu']
-            sel_side = st.session_state['svg_sel_side']
-            svg_key = f"BU-{sel_bu:02d}_{sel_side}"
-            svg_str = svg_store.get(svg_key)
-
-            if not svg_str:
-                st.warning(f"SVG not found for {svg_key}.svg — check uploaded files.")
-            else:
-                st.divider()
-                total_units = q_rows * q_cols * 4  # 2×2 quads
-                if total_units > 64:
-                    st.warning(
-                        f"⚠️ {total_units} units to tile — Plotly may be slow above ~64 images. "
-                        "Consider reducing rows/cols per quadrant in the sidebar for a preview."
-                    )
-
-                ctx = calculate_geometry(q_rows, q_cols, d_gap_x, d_gap_y)
-
-                fig_pan = go.Figure()
-
-                # 1. Copper frame (rounded rect, ported from faster-aoi shapes.py)
-                frame_path = get_rounded_rect_path(0, 0, FRAME_WIDTH, FRAME_HEIGHT, r=20.0)
-                fig_pan.add_shape(
-                    type="path", path=frame_path,
-                    fillcolor="#C87533", line=dict(color="#8B4513", width=3),
-                    layer="below"
-                )
-
-                # 2. Tile units — composited SVG for large panels, per-tile for small
-                _USE_COMPOSITE = total_units > 36
-                if _USE_COMPOSITE:
-                    # Build one big SVG with all unit cells placed at their mm positions
-                    # using <use> or direct <g transform="translate(x,y)"> embedding.
-                    # We embed the original SVG content via <g> transform, not <use>,
-                    # for maximum browser compatibility.
-                    import xml.etree.ElementTree as _ET
-                    try:
-                        _root = _ET.fromstring(svg_str)
-                        # Extract inner content (everything except the <svg> tag itself)
-                        _inner = ''.join(_ET.tostring(child, encoding='unicode') for child in _root)
-                    except Exception:
-                        _inner = f'<image href="{svg_to_data_url(svg_str)}" x="0" y="0" width="{ctx.cell_width}" height="{ctx.cell_height}"/>'
-
-                    _tiles = []
-                    for _q_label, (q_ox, q_oy) in ctx.quadrant_origins.items():
-                        for _r in range(q_rows):
-                            for _c in range(q_cols):
-                                ux = q_ox + INTER_UNIT_GAP + _c * ctx.stride_x
-                                uy = q_oy + INTER_UNIT_GAP + _r * ctx.stride_y
-                                # SVG Y is top-down; Plotly Y is bottom-up.
-                                # Composite SVG is rendered as a single image so both axes top-down.
-                                _tiles.append(
-                                    f'<g transform="translate({ux:.3f},{uy:.3f})">{_inner}</g>'
-                                )
-
-                    _composite_svg = (
-                        f'<svg xmlns="http://www.w3.org/2000/svg" '
-                        f'viewBox="0 0 {FRAME_WIDTH} {FRAME_HEIGHT}" '
-                        f'width="{FRAME_WIDTH}mm" height="{FRAME_HEIGHT}mm">'
-                        + ''.join(_tiles)
-                        + '</svg>'
-                    )
-                    _composite_url = svg_to_data_url(_composite_svg)
-                    fig_pan.update_layout(images=[dict(
-                        source=_composite_url,
-                        xref="x", yref="y",
-                        x=0, y=FRAME_HEIGHT,
-                        sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                        sizing="stretch", layer="below", opacity=1.0,
-                    )])
-                else:
-                    data_url = svg_to_data_url(svg_str)
-                    images = []
-                    for _q_label, (q_ox, q_oy) in ctx.quadrant_origins.items():
-                        for _r in range(q_rows):
-                            for _c in range(q_cols):
-                                ux = q_ox + INTER_UNIT_GAP + _c * ctx.stride_x
-                                uy = q_oy + INTER_UNIT_GAP + _r * ctx.stride_y
-                                images.append(dict(
-                                    source=data_url,
-                                    xref="x", yref="y",
-                                    x=ux, y=uy + ctx.cell_height,
-                                    sizex=ctx.cell_width, sizey=ctx.cell_height,
-                                    sizing="stretch", layer="below", opacity=1.0,
-                                ))
-                    fig_pan.update_layout(images=images)
-
-                # 3. Overlay ALL defect dots
-                if not defect_df.empty and 'ALIGNED_X' in defect_df.columns:
-                    # Filter to selected BU/side if columns available
-                    pan_df = defect_df.copy()
-                    if 'BUILDUP' in pan_df.columns:
-                        pan_df = pan_df[pan_df['BUILDUP'] == sel_bu]
-                    if 'SIDE' in pan_df.columns:
-                        side_full = "Front" if sel_side == "F" else "Back"
-                        pan_df = pan_df[pan_df['SIDE'] == side_full]
-                    if not pan_df.empty:
-                        # Ensure safety for missing unit indices
-                        if 'UNIT_INDEX_X' not in pan_df.columns:
-                            pan_df['UNIT_INDEX_X'] = 0.0
-                        if 'UNIT_INDEX_Y' not in pan_df.columns:
-                            pan_df['UNIT_INDEX_Y'] = 0.0
-
-                        custom_data = pan_df[['UNIT_INDEX_Y', 'UNIT_INDEX_X']].values
-
-                        fig_pan.add_trace(go.Scatter(
-                            x=pan_df['ALIGNED_X'], y=pan_df['ALIGNED_Y'],
-                            mode='markers',
-                            marker=dict(size=5, color='red', symbol='circle-open', line=dict(width=1.5)),
-                            name='Defects',
-                            customdata=custom_data,
-                            hovertext=pan_df.get('DEFECT_TYPE', pd.Series()),
-                        ))
-
-                fig_pan.update_layout(
-                    xaxis=dict(
-                        range=[-10, FRAME_WIDTH + 10], scaleanchor="y", scaleratio=1,
-                        title="X (mm)", showgrid=True, gridcolor='rgba(255,255,255,0.06)',
-                        zeroline=False, tickcolor='#555555', linecolor='#333333',
-                    ),
-                    yaxis=dict(
-                        range=[-10, FRAME_HEIGHT + 10], title="Y (mm)",
-                        showgrid=True, gridcolor='rgba(255,255,255,0.06)',
-                        zeroline=False, tickcolor='#555555', linecolor='#333333',
-                    ),
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    height=750,
-                    title=f"SVG Panel View — {svg_key} | {q_rows}×{q_cols} per quad | {total_units} units",
-                    plot_bgcolor='#111111',
-                    paper_bgcolor='#1a1a1a',
-                    font_color='white',
-                    clickmode='event+select',
-                )
-
-                # Capture clicks on defects to jump to SVG Unit View
-                selection = st.plotly_chart(
-                    fig_pan,
-                    width='stretch',
-                    config={'scrollZoom': True, 'displaylogo': False},
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="svg_panel_overview_chart",
-                )
-
-                if selection and "selection" in selection:
-                    pts = selection["selection"].get("points", [])
-                    if pts:
-                        cd = pts[0].get("customdata", [])
-                        if len(cd) >= 2:
-                            uy, ux = cd[0], cd[1]
-                            st.session_state['_pending_row'] = int(uy)
-                            st.session_state['_pending_col'] = int(ux)
-                            st.session_state['_pending_nav'] = True
-                            st.session_state['_pending_view'] = "🧪 SVG Unit View"
-                            st.rerun()
 
 
 

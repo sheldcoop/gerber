@@ -559,40 +559,50 @@ def _odb_arc_to_points(x1: float, y1: float, x2: float, y2: float,
 # ---------------------------------------------------------------------------
 
 def _parse_pad_record(parts: list, symbols: dict, uf: float,
-                       force_positive: bool = False):
+                       force_positive: bool = False,
+                       ignore_polarity: bool = False):
     """
     Parse a P (pad/flash) or H (drill hole) record.
 
     Format: P x y sym_idx rotation mirror polarity [;attrs]
-    polarity: P=positive (render), N=negative (clearance, skip)
+    polarity: P=positive (render), N=negative (clearance)
     force_positive: H records are always positive regardless of field value
+    ignore_polarity: return geometry even for N records (used for neg-polarity cutouts)
+
+    Returns (geometry, polarity_char) tuple.
     """
     try:
         x   = float(parts[1]) * uf
         y   = float(parts[2]) * uf
         sym_idx = int(parts[3])
         rot = float(parts[4]) if len(parts) > 4 else 0.0
-        # parts[5] is mirror (0/1), parts[6] is polarity (P/N)
         polarity = parts[6].upper() if len(parts) > 6 else 'P'
     except (IndexError, ValueError):
-        return None
+        return None, 'P'
 
-    if polarity == 'N' and not force_positive:
-        return None  # negative = clearance, skip for visualization
+    if force_positive:
+        polarity = 'P'
 
     sym = symbols.get(sym_idx)
     if sym is None:
-        return None
+        return None, polarity
 
-    return _symbol_to_geometry(x, y, sym, rot)
+    if polarity == 'N' and not ignore_polarity:
+        return None, 'N'
+
+    return _symbol_to_geometry(x, y, sym, rot), polarity
 
 
-def _parse_line_record(parts: list, symbols: dict, uf: float):
+def _parse_line_record(parts: list, symbols: dict, uf: float,
+                        ignore_polarity: bool = False):
     """
     Parse an L (line/trace) record.
 
     Format: L x1 y1 x2 y2 sym_idx polarity [;attrs]
     Line width is the symbol's size_x.
+    ignore_polarity: return geometry even for N records (used for neg-polarity cutouts)
+
+    Returns (geometry, polarity_char) tuple.
     """
     try:
         x1  = float(parts[1]) * uf
@@ -602,29 +612,27 @@ def _parse_line_record(parts: list, symbols: dict, uf: float):
         sym_idx = int(parts[5])
         polarity = parts[6].upper() if len(parts) > 6 else 'P'
     except (IndexError, ValueError):
-        return None
+        return None, 'P'
 
-    if polarity == 'N':
-        return None
+    if polarity == 'N' and not ignore_polarity:
+        return None, 'N'
 
     sym = symbols.get(sym_idx)
     if sym is None:
-        return None
+        return None, polarity
 
-    # sym.size_x is already in mm (scaled by uf in _parse_features_text)
     width = sym.size_x
     if width <= 0:
-        return None
+        return None, polarity
 
     try:
-        # Avoid zero-length line buffer errors
         if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
-            return Point(x1, y1).buffer(width / 2.0, resolution=8)
+            return Point(x1, y1).buffer(width / 2.0, resolution=8), polarity
         line = LineString([(x1, y1), (x2, y2)])
         cap = 1 if sym.shape == 'round' else 2  # 1=round, 2=flat caps
-        return line.buffer(width / 2.0, cap_style=cap, resolution=8)
+        return line.buffer(width / 2.0, cap_style=cap, resolution=8), polarity
     except Exception:
-        return None
+        return None, polarity
 
 
 def _parse_surface_block(surface_lines: list, uf: float):
@@ -703,8 +711,9 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
     Returns (geometries, trace_widths, warnings, fiducials, drill_hits).
     drill_hits is a list of (x, y, diameter_mm) tuples from H records.
     """
-    geometries = []
-    trace_widths = []  # parallel list: feature width in mm per geometry
+    pos_geoms = []     # positive-polarity geometries (add copper)
+    neg_geoms = []     # negative-polarity geometries (clearances to subtract)
+    trace_widths = []  # parallel to pos_geoms: feature width in mm
     warnings = []
     fiducials = []
     drill_hits = []   # list of (x, y, diameter_mm) from H (drill hole) records
@@ -780,25 +789,37 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
                     except (ValueError, IndexError):
                         pass
 
-                geom = _parse_pad_record(parts, symbols, uf,
-                                         force_positive=(record_type == 'H'))
+                geom, polarity = _parse_pad_record(
+                    parts, symbols, uf,
+                    force_positive=(record_type == 'H'),
+                    ignore_polarity=True,
+                )
                 if geom is not None:
-                    geometries.append(geom)
-                    # Pad width = max symbol dimension
                     sym_idx = int(parts[3]) if len(parts) > 3 else -1
                     sym = symbols.get(sym_idx)
-                    trace_widths.append(max(sym.size_x, sym.size_y) if sym else 0.0)
+                    width = max(sym.size_x, sym.size_y) if sym else 0.0
+                    if polarity == 'N' and record_type != 'H':
+                        neg_geoms.append(geom)
+                    else:
+                        pos_geoms.append(geom)
+                        trace_widths.append(width)
 
             elif record_type == 'L':
-                geom = _parse_line_record(parts, symbols, uf)
+                geom, polarity = _parse_line_record(parts, symbols, uf,
+                                                    ignore_polarity=True)
                 if geom is not None:
-                    geometries.append(geom)
-                    # Line width = symbol's size_x (trace width)
                     sym_idx = int(parts[5]) if len(parts) > 5 else -1
                     sym = symbols.get(sym_idx)
-                    trace_widths.append(sym.size_x if sym else 0.0)
+                    width = sym.size_x if sym else 0.0
+                    if polarity == 'N':
+                        neg_geoms.append(geom)
+                    else:
+                        pos_geoms.append(geom)
+                        trace_widths.append(width)
 
             elif record_type == 'S':
+                # Surface polarity is on the S line: S <polarity> [;attrs]
+                surf_polarity = parts[1].upper() if len(parts) > 1 else 'P'
                 # Collect lines until SE
                 surface_lines = []
                 while i < len(lines):
@@ -809,10 +830,12 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
                     surface_lines.append(sline)
                 geom = _parse_surface_block(surface_lines, uf)
                 if geom is not None:
-                    geometries.append(geom)
-                    # Surface width = bounding box diagonal as proxy
-                    minx, miny, maxx, maxy = geom.bounds
-                    trace_widths.append(max(maxx - minx, maxy - miny))
+                    if surf_polarity == 'N':
+                        neg_geoms.append(geom)
+                    else:
+                        pos_geoms.append(geom)
+                        minx, miny, maxx, maxy = geom.bounds
+                        trace_widths.append(max(maxx - minx, maxy - miny))
 
             # A (arc), T (text), B (barcode) — skip silently
 
@@ -820,6 +843,29 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set) -> tuple:
             error_count += 1
             if error_count <= MAX_ERRORS:
                 warnings.append(f"Feature parse error at line {i}: {e}")
+
+    # Apply negative-polarity subtraction (clearances cut into copper planes)
+    if neg_geoms and pos_geoms:
+        try:
+            pos_union = unary_union(pos_geoms)
+            neg_union = unary_union(neg_geoms)
+            result = pos_union.difference(neg_union)
+            # Decompose back to a flat geometry list for the visualizer
+            if result.geom_type == 'MultiPolygon':
+                geometries = list(result.geoms)
+            elif result.geom_type in ('Polygon', 'GeometryCollection'):
+                geometries = [g for g in (result.geoms if hasattr(result, 'geoms') else [result])
+                              if not g.is_empty]
+            else:
+                geometries = [result] if not result.is_empty else pos_geoms
+            # After union-difference, per-feature widths are no longer meaningful;
+            # use 0.0 so LOD filtering leaves these large geometries alone
+            trace_widths = [0.0] * len(geometries)
+        except Exception as e:
+            warnings.append(f"Negative polarity subtraction failed: {e} — using positive geoms only")
+            geometries = pos_geoms
+    else:
+        geometries = pos_geoms
 
     return geometries, trace_widths, warnings, fiducials, drill_hits
 
