@@ -191,9 +191,71 @@ def build_panel_svg(svg_string: str, panel_layout) -> str:
     return _svg_to_data_url_fast(composite)
 
 
+def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 8) -> str:
+    """Rasterize the panel composite to a high-resolution PNG.
+
+    Builds the same <use>-tiled composite SVG as build_panel_svg, then
+    rasterizes it with cairosvg at px_per_mm resolution.  At 8px/mm a
+    0.3mm pad = 2.4px — clearly visible when zoomed.  PNG scales instantly
+    on zoom/pan (GPU bilinear), unlike SVG which re-renders every frame.
+
+    Returns:
+        Base64 PNG data URL, or '' on failure.
+    """
+    import re as _re_local
+    import cairosvg
+
+    vb_match = _re_local.search(r'viewBox=["\']([^"\']+)["\']', svg_string)
+    if not vb_match:
+        return ''
+    vb_parts = vb_match.group(1).split()
+    if len(vb_parts) != 4:
+        return ''
+    vx, vy, vw, vh = map(float, vb_parts)
+    if vw <= 0 or vh <= 0:
+        return ''
+
+    inner_match = _re_local.search(r'<svg[^>]*>(.*?)</svg>', svg_string, _re_local.DOTALL)
+    if not inner_match:
+        return ''
+    inner = inner_match.group(1).strip()
+
+    pw, ph = panel_layout.panel_width, panel_layout.panel_height
+    uw, uh = panel_layout.unit_bounds
+
+    uses = []
+    for x_mm, y_mm in panel_layout.unit_positions:
+        tx = x_mm - vx
+        ty = (ph - y_mm - uh) - vy
+        uses.append(
+            f'<use href="#_u" xlink:href="#_u" transform="translate({tx:.4f} {ty:.4f})"/>'
+        )
+
+    composite_svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'viewBox="0 0 {pw:.4f} {ph:.4f}">'
+        f'<rect width="{pw:.4f}" height="{ph:.4f}" fill="#060A06"/>'
+        f'<defs><g id="_u">{inner}</g></defs>'
+        f'{"".join(uses)}'
+        f'</svg>'
+    )
+
+    out_w = int(pw * px_per_mm)
+    out_h = int(ph * px_per_mm)
+    try:
+        png_bytes = cairosvg.svg2png(
+            bytestring=composite_svg.encode('utf-8'),
+            output_width=out_w,
+            output_height=out_h,
+        )
+        return _png_to_data_url(png_bytes)
+    except Exception:
+        return ''
+
+
 def build_panel_pngs(rendered: 'RenderedODB') -> None:
-    """Build panel SVGs in-place for all non-drill layers. Called lazily on first
-    Panel Overview visit so the initial TGZ render stays fast."""
+    """Build high-res panel PNGs in-place for all non-drill layers."""
     if not rendered or not rendered.panel_layout:
         return
 
@@ -201,7 +263,7 @@ def build_panel_pngs(rendered: 'RenderedODB') -> None:
         if layer_obj.layer_type == 'drill' or layer_obj.panel_png_data_url:
             return
         try:
-            layer_obj.panel_png_data_url = build_panel_svg(
+            layer_obj.panel_png_data_url = build_panel_png_hires(
                 layer_obj.svg_string, rendered.panel_layout
             )
         except Exception:
@@ -666,6 +728,26 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                         if result2 and result2[0].objects:
                             gf, stats = result2
                             gf.objects = [o for o in gf.objects if not isinstance(o, Region)]
+                # Aperture sanity: _detect_symbol_scale fails for panel-scale drill layers
+                # (max_coord ≈ 500mm → mils heuristic never fires → symbols stay in mils
+                # → 10mm circles instead of 0.254mm).  If any aperture looks mils-sized
+                # (> 1mm and all apertures roughly proportional), apply 0.0254 correction.
+                def _ap_dim(ap):
+                    if hasattr(ap, 'diameter'):
+                        return ap.diameter
+                    return max(getattr(ap, 'w', 0), getattr(ap, 'h', 0))
+                _dims = [_ap_dim(obj.aperture) for obj in gf.objects if isinstance(obj, Flash)]
+                if _dims:
+                    _max_ap = max(_dims)
+                    # HDI laser vias are 0.05–0.15mm; PTH max ≈ 3mm.
+                    # If largest aperture > 1mm, assume mils were not converted → apply 0.0254.
+                    if _max_ap > 1.0:
+                        _scale = 0.0254  # mils → mm
+                        for obj in gf.objects:
+                            if isinstance(obj, Flash):
+                                _d = _ap_dim(obj.aperture)
+                                obj.aperture = CircleAperture(diameter=max(_d * _scale, 0.05), unit=MM)
+                # panel-scale position clipping happens post-render once board_bounds is known
             return name, ltype, gf, stats, None
 
         parse_results = []
@@ -741,6 +823,52 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         else:
             board_bounds = (0, 0, 1, 1)
 
+        # ── Clip panel-scale drill layers to unit bounds ──────────────────
+        # 2B-3B and 2F-3F store all panel vias in one file (panel-level step).
+        # After aperture rescaling, their Flash positions are panel-scale.
+        # Filter to only vias within the unit bounding box, then shift to local coords.
+        _tol = 1.0  # mm tolerance around unit bounds for edge vias
+        _ux0, _uy0, _ux1, _uy1 = board_bounds
+        for _dname, _dlyr in list(rendered_layers.items()):
+            if _dlyr.layer_type != 'drill' or _dlyr.gerber_file is None:
+                continue
+            _gf = _dlyr.gerber_file
+            _bb = _gf.bounding_box(MM)
+            _ext = max(abs(_bb[1][0] - _bb[0][0]), abs(_bb[1][1] - _bb[0][1]))
+            if _ext <= 100:
+                continue  # already unit-scale, skip
+            # Filter Flash/Line to unit bounds
+            _kept = []
+            for _obj in _gf.objects:
+                if isinstance(_obj, Flash):
+                    if (_ux0 - _tol <= _obj.x <= _ux1 + _tol and
+                            _uy0 - _tol <= _obj.y <= _uy1 + _tol):
+                        _kept.append(_obj)
+                elif isinstance(_obj, Line):
+                    mx = (_obj.x1 + _obj.x2) / 2
+                    my = (_obj.y1 + _obj.y2) / 2
+                    if (_ux0 - _tol <= mx <= _ux1 + _tol and
+                            _uy0 - _tol <= my <= _uy1 + _tol):
+                        _kept.append(_obj)
+            if not _kept:
+                del rendered_layers[_dname]
+                warnings.append(f"Layer '{_dname}': no drill features within unit bounds")
+                continue
+            _gf.objects = _kept
+            # Re-render SVG with clipped objects
+            _fg = '#FFD700'
+            _svg2 = str(_gf.to_svg(fg=_fg, bg='#060A06'))
+            _bb2 = _gf.bounding_box(MM)
+            _bounds2 = (_bb2[0][0], _bb2[0][1], _bb2[1][0], _bb2[1][1])
+            _dlyr.svg_string = _svg2
+            _dlyr.svg_data_url = _svg_to_data_url_fast(_svg2)
+            _dlyr.bounds = _bounds2
+            _dlyr.color_svg_urls = {
+                next(iter(_dlyr.color_svg_urls), _fg): _svg_to_data_url_fast(
+                    str(_gf.to_svg(fg=next(iter(_dlyr.color_svg_urls), _fg), bg='#060A06'))
+                )
+            }
+
         # Compute panel layout from step-repeat hierarchy + board bounds
         panel_layout = None
         if step_hierarchy:
@@ -774,7 +902,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             )
             if _first_copper:
                 try:
-                    _first_copper.panel_png_data_url = build_panel_svg(
+                    _first_copper.panel_png_data_url = build_panel_png_hires(
                         _first_copper.svg_string, panel_layout
                     )
                 except Exception:

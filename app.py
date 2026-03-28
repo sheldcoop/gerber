@@ -491,11 +491,46 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
+def _compute_clusters_cached(_df_hash: str, _df: pd.DataFrame, eps: float, min_samples: int):
+    """Run DBSCAN + summary + all hull coords. Cached by df hash + params."""
+    from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
+    clustered = compute_clusters(_df, eps=eps, min_samples=min_samples)
+    summary = get_cluster_summary(clustered)
+    hulls = {}
+    if not summary.empty:
+        for _, crow in summary.iterrows():
+            h = get_cluster_hull_coords(clustered, crow['cluster_id'])
+            if h:
+                hulls[crow['cluster_id']] = (h, crow['defect_count'])
+    return clustered, summary, hulls
+
+
+@st.cache_data(show_spinner=False)
+def _compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> list:
+    """Pre-compute all unit cell shape dicts. Cached per grid geometry."""
+    from alignment import calculate_geometry, INTER_UNIT_GAP
+    ctx = calculate_geometry(rows, cols, gap_x, gap_y)
+    shapes = []
+    for _, (q_ox, q_oy) in ctx.quadrant_origins.items():
+        for r in range(rows):
+            for c in range(cols):
+                ux = q_ox + INTER_UNIT_GAP + c * ctx.stride_x
+                uy = q_oy + INTER_UNIT_GAP + r * ctx.stride_y
+                shapes.append(dict(
+                    type="rect",
+                    x0=ux, y0=uy,
+                    x1=ux + ctx.cell_width, y1=uy + ctx.cell_height,
+                    fillcolor="rgba(0,180,100,0.07)",
+                    line=dict(color="rgba(0,220,130,0.5)", width=0.8),
+                    layer="below",
+                ))
+    return shapes
+
+
+@st.cache_data(show_spinner=False)
 def _compute_cm_geometry(
     raw_positions: tuple,        # tuple of (x, y) — hashable
     first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y)
-    panel_w: float,
-    panel_h: float,
 ) -> tuple:
     """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout."""
     cam_min_x, cam_min_y, cam_max_x, cam_max_y = first_layer_bounds
@@ -504,8 +539,8 @@ def _compute_cm_geometry(
     uniq_x = sorted(set(round(x, 2) for x, _ in raw_positions))
     uniq_y = sorted(set(round(y, 2) for _, y in raw_positions))
     origins = {
-        (ri, ci): (uniq_x[ci] + cam_min_x + panel_w / 2,
-                   uniq_y[ri] + cam_min_y + panel_h / 2)
+        (ri, ci): (uniq_x[ci] + cam_min_x,
+                   uniq_y[ri] + cam_min_y)
         for ri in range(len(uniq_y))
         for ci in range(len(uniq_x))
     }
@@ -710,26 +745,35 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             panel_fig = build_defect_only_figure(panel_df, panel_config)
             panel_fig.update_layout(showlegend=False)
 
-            # ── CAM (Gerbonara) background tiling (pre-cached panel PNG) ────
+            # ── CAM (Gerbonara) background tiling (pre-cached panel SVG) ────
             _rendered_panel = st.session_state.get('rendered_odb')
             if _rendered_panel and _rendered_panel.panel_layout:
-                # Build panel PNGs lazily on first Panel Overview visit
+                # Build panel SVGs lazily on first Panel Overview visit
                 if not st.session_state.get('_panel_pngs_built'):
-                    with st.spinner("Building panel PNG (one-time)..."):
+                    with st.spinner("Building panel layer images (one-time)..."):
                         build_panel_pngs(_rendered_panel)
                         _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
                         if _tgz_b:
                             save_render_cache(_tgz_b, _rendered_panel)
                     st.session_state['_panel_pngs_built'] = True
 
-                # Pick the first visible layer's pre-cached panel PNG
+                # Pick panel background from checked sidebar layer (first checked wins)
                 _panel_png_url = None
+                _panel_bg_name = None
                 for _ln in _rendered_panel.layers:
                     if st.session_state.get(f"vis_{_ln}", False):
-                        _panel_png_url = _rendered_panel.layers[_ln].panel_png_data_url
-                        break
-                if not _panel_png_url and _rendered_panel.layers:
-                    _panel_png_url = next(iter(_rendered_panel.layers.values())).panel_png_data_url
+                        _url = _rendered_panel.layers[_ln].panel_png_data_url
+                        if _url:
+                            _panel_png_url = _url
+                            _panel_bg_name = _ln
+                            break
+                # Fallback: first layer that has a URL (don't default to FSR if not checked)
+                if not _panel_png_url:
+                    for _ln, _lo in _rendered_panel.layers.items():
+                        if _lo.panel_png_data_url and _lo.layer_type != 'drill':
+                            _panel_png_url = _lo.panel_png_data_url
+                            _panel_bg_name = _ln
+                            break
 
                 if _panel_png_url:
                     panel_fig.update_layout(images=[dict(
@@ -741,23 +785,20 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     )])
 
             # ── Cluster Intelligence Overlay ──────────────────────────────
-            from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
             if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
-                clustered_df = compute_clusters(panel_df, eps=2.0, min_samples=3)
-                cluster_summary = get_cluster_summary(clustered_df)
+                _cl_hash = compute_dataframe_hash(panel_df)
+                clustered_df, cluster_summary, _hulls = _compute_clusters_cached(
+                    _cl_hash, panel_df, eps=2.0, min_samples=3
+                )
                 if not cluster_summary.empty:
-                    # Draw convex hull boundaries for each cluster
-                    for _, crow in cluster_summary.iterrows():
-                        hull = get_cluster_hull_coords(clustered_df, crow['cluster_id'])
-                        if hull:
-                            hx, hy = hull
-                            panel_fig.add_trace(go.Scatter(
-                                x=hx, y=hy, mode='lines',
-                                line=dict(color='#00FFCC', width=2, dash='dash'),
-                                name=f"Cluster {crow['cluster_id']} ({crow['defect_count']})",
-                                hoverinfo='name', showlegend=False,
-                            ))
-                    # Store for cluster panel below
+                    for _cid, (_hull, _cnt) in _hulls.items():
+                        hx, hy = _hull
+                        panel_fig.add_trace(go.Scatter(
+                            x=hx, y=hy, mode='lines',
+                            line=dict(color='#00FFCC', width=2, dash='dash'),
+                            name=f"Cluster {_cid} ({_cnt})",
+                            hoverinfo='name', showlegend=False,
+                        ))
                     st.session_state['_cluster_summary'] = cluster_summary
                     st.session_state['_clustered_df'] = clustered_df
 
@@ -795,25 +836,13 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     layer="below",
                 )
 
-            # Draw individual unit cells within each quadrant
+            # Draw individual unit cells (cached — only recomputes on grid param change)
             _pq_rows = int(st.session_state.get('quad_rows_input', 6))
             _pq_cols = int(st.session_state.get('quad_cols_input', 6))
             _pd_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
             _pd_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
-            _pctx = calculate_geometry(_pq_rows, _pq_cols, _pd_gap_x, _pd_gap_y)
-            for _, (q_ox, q_oy) in _pctx.quadrant_origins.items():
-                for _pr in range(_pq_rows):
-                    for _pc in range(_pq_cols):
-                        _ux = q_ox + INTER_UNIT_GAP + _pc * _pctx.stride_x
-                        _uy = q_oy + INTER_UNIT_GAP + _pr * _pctx.stride_y
-                        panel_fig.add_shape(
-                            type="rect",
-                            x0=_ux, y0=_uy,
-                            x1=_ux + _pctx.cell_width, y1=_uy + _pctx.cell_height,
-                            fillcolor="rgba(0,180,100,0.07)",
-                            line=dict(color="rgba(0,220,130,0.5)", width=0.8),
-                            layer="below",
-                        )
+            _cell_shapes = _compute_panel_shapes(_pq_rows, _pq_cols, _pd_gap_x, _pd_gap_y)
+            panel_fig.update_layout(shapes=panel_fig.layout.shapes + tuple(_cell_shapes))
 
             event = st.plotly_chart(
                 panel_fig,
@@ -910,13 +939,58 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     elif view_mode == "🔬 Single Unit Inspection":
         # Build overlay config from sidebar controls
         config = OverlayConfig()
-        config.offset_x = align_args.get('manual_offset_x', 0.0)
-        config.offset_y = align_args.get('manual_offset_y', 0.0)
+        config.offset_x = 0.0
+        config.offset_y = 0.0
 
-        # VRS filter — reuse the same filter config the visualizer already applies
-        # instead of duplicating the logic here. We pass it through OverlayConfig
-        # and let _add_defect_traces handle grouping internally.
-        vrs_df = defect_df.copy()
+        # ── Use the same Commonality alignment when TGZ + unit selected ─────
+        _sui_unit_row = align_args.get('unit_row')
+        _sui_unit_col = align_args.get('unit_col')
+        _sui_rodb     = st.session_state.get('rendered_odb')
+        _sui_use_cm_align = (
+            _sui_unit_row is not None and _sui_unit_col is not None
+            and _sui_rodb and _sui_rodb.panel_layout and _sui_rodb.layers
+            and aoi and aoi.has_data
+            and 'X_MM' in aoi.all_defects.columns
+            and 'UNIT_INDEX_X' in aoi.all_defects.columns
+        )
+
+        if _sui_use_cm_align:
+            # Compute same origins dict as Commonality
+            _sui_first_lyr = next(
+                (l for l in _sui_rodb.layers.values() if l.layer_type != 'drill'),
+                next(iter(_sui_rodb.layers.values()))
+            )
+            _sui_raw_pos = tuple(
+                getattr(_sui_rodb.panel_layout, 'unit_positions_raw', None)
+                or _sui_rodb.panel_layout.unit_positions
+            )
+            _sui_origins, _sui_cell_w, _sui_cell_h = _compute_cm_geometry(
+                raw_positions=_sui_raw_pos,
+                first_layer_bounds=tuple(_sui_first_lyr.bounds),
+            )
+            _sui_origin = _sui_origins.get((_sui_unit_row, _sui_unit_col), (0.0, 0.0))
+
+            # Filter to selected unit only
+            _sui_src = aoi.all_defects.copy()
+            _bu_sui = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
+            if _bu_sui and 'BUILDUP' in _sui_src.columns:
+                _sui_src = _sui_src[_sui_src['BUILDUP'].isin(_bu_sui)]
+            _sui_src = _sui_src[
+                (_sui_src['UNIT_INDEX_Y'].astype(int) == int(_sui_unit_row)) &
+                (_sui_src['UNIT_INDEX_X'].astype(int) == int(_sui_unit_col))
+            ].copy()
+
+            # Subtract unit origin — same formula as Commonality
+            _sui_src['ALIGNED_X'] = _sui_src['X_MM'] - _sui_origin[0]
+            _sui_src['ALIGNED_Y'] = _sui_src['Y_MM'] - _sui_origin[1]
+            vrs_df = _sui_src
+            config.board_bounds = (-1.0, -1.0, _sui_cell_w + 1.0, _sui_cell_h + 1.0)
+            _sui_cam_bounds = _sui_first_lyr.bounds  # used below for SVG placement
+        else:
+            vrs_df = defect_df.copy()
+            _sui_use_cm_align = False
+            _sui_cam_bounds = None
+
         if not vrs_df.empty:
             dtype_sel = st.session_state.get('defect_type_select')
             bu_sel    = st.session_state.get('buildup_filter_select')
@@ -952,15 +1026,15 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             st.session_state['vrs_idx'] = min(max(0, st.session_state['vrs_idx']), num_def - 1)
             idx = st.session_state['vrs_idx']
 
-            vrs_col2.button("⏪ Prev", on_click=prev_def, use_container_width=True)
-            vrs_col3.button("Next ⏩", on_click=next_def, use_container_width=True)
+            vrs_col2.button("⏪ Prev", on_click=prev_def, width="stretch")
+            vrs_col3.button("Next ⏩", on_click=next_def, width="stretch")
 
             # Show defect info with priority score
             active_def = vrs_df.iloc[idx]
             priority = active_def.get('_PRIORITY', 0)
             dtype = active_def.get('DEFECT_TYPE', '?')
             vrs_col4.markdown(f"**{idx + 1}/{num_def}** — {dtype} (score: {priority:.0f})")
-            vrs_col5.button("🔝 Jump to top", on_click=jump_top, use_container_width=True)
+            vrs_col5.button("🔝 Jump to top", on_click=jump_top, width="stretch")
 
             # Extract active defect coordinates
             ax = active_def['ALIGNED_X']
@@ -993,7 +1067,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             config.color_mode = st.session_state.get('color_mode_select', 'by_type')
 
         # Determine board bounds for axis range
-        if vrs_mode and num_def > 0 and config.active_defect_x is not None:
+        # When CM alignment is active, board_bounds already set to cell dims above
+        if _sui_use_cm_align:
+            pass  # already set to (-1, -1, cell_w+1, cell_h+1)
+        elif vrs_mode and num_def > 0 and config.active_defect_x is not None:
             # Override bounding box to zoom heavily onto the active defect
             zoom_radius = 2.0  # mm (camera perfectly centered on the defect)
             config.board_bounds = (
@@ -1035,8 +1112,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         _use_cam_bg = True
         _rendered_odb = st.session_state.get('rendered_odb')
 
-        if not defect_df.empty:
-            fig = build_defect_only_figure(defect_df, config)
+        if not vrs_df.empty:
+            fig = build_defect_only_figure(vrs_df, config)
         else:
             fig = go.Figure()
             _apply_layout(fig, config)
@@ -1067,24 +1144,38 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _data_url = _cam_lyr.svg_data_url
 
                 _cb = _cam_lyr.bounds
-                ox = config.offset_x
-                oy = config.offset_y
+
+                if _sui_use_cm_align:
+                    # Same as Commonality: shift SVG so unit lower-left = (0, 0)
+                    _im_x = 0.0
+                    _im_y = _cb[3] - _cb[1]   # = unit height
+                    _im_w = _cb[2] - _cb[0]
+                    _im_h = _cb[3] - _cb[1]
+                else:
+                    ox = config.offset_x
+                    oy = config.offset_y
+                    _im_x = _cb[0] + ox
+                    _im_y = _cb[3] + oy
+                    _im_w = _cb[2] - _cb[0]
+                    _im_h = _cb[3] - _cb[1]
 
                 fig.add_layout_image(dict(
                     source=_data_url,
                     xref="x", yref="y",
-                    x=_cb[0] + ox,
-                    y=_cb[3] + oy,
-                    sizex=_cb[2] - _cb[0],
-                    sizey=_cb[3] - _cb[1],
+                    x=_im_x,
+                    y=_im_y,
+                    sizex=_im_w,
+                    sizey=_im_h,
                     sizing="stretch",
                     layer="below",
                     opacity=0.95 if not _is_multi else 0.7,
                 ))
 
             # Update board bounds from CAM data if not already set
-            if not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
+            if not _sui_use_cm_align and not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
                 _rbb = _rendered_odb.board_bounds
+                ox = config.offset_x
+                oy = config.offset_y
                 config.board_bounds = (_rbb[0] + ox, _rbb[1] + oy, _rbb[2] + ox, _rbb[3] + oy)
                 _apply_layout(fig, config)
 
@@ -1111,10 +1202,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         data=img_bytes,
                         file_name="defect_overlay.png",
                         mime="image/png",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 except Exception:
-                    st.button("📷 Export PNG (kaleido required)", disabled=True, use_container_width=True)
+                    st.button("📷 Export PNG (kaleido required)", disabled=True, width="stretch")
             with exp_col2:
                 csv_str = export_unit_csv(defect_df)
                 st.download_button(
@@ -1122,7 +1213,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     data=csv_str,
                     file_name="defect_summary.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
     # ── Commonality / Superposition View ────────────────────────────────────
@@ -1187,12 +1278,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
             # ── Quick-select buttons ──────────────────────────────────────────
             _qs_cm = st.columns(6, gap="small")
-            _qs_cm[0].button("ALL",   key="cm_all",   on_click=_cm_set(_all_cm_labels), use_container_width=True, type="primary")
-            _qs_cm[1].button("Q1",    key="cm_q1",    on_click=_cm_set(_q1_cm_lbl),     use_container_width=True)
-            _qs_cm[2].button("Q2",    key="cm_q2",    on_click=_cm_set(_q2_cm_lbl),     use_container_width=True)
-            _qs_cm[3].button("Q3",    key="cm_q3",    on_click=_cm_set(_q3_cm_lbl),     use_container_width=True)
-            _qs_cm[4].button("Q4",    key="cm_q4",    on_click=_cm_set(_q4_cm_lbl),     use_container_width=True)
-            _qs_cm[5].button("Clear", key="cm_clear", on_click=_cm_set([]),             use_container_width=True)
+            _qs_cm[0].button("ALL",   key="cm_all",   on_click=_cm_set(_all_cm_labels), width="stretch", type="primary")
+            _qs_cm[1].button("Q1",    key="cm_q1",    on_click=_cm_set(_q1_cm_lbl),     width="stretch")
+            _qs_cm[2].button("Q2",    key="cm_q2",    on_click=_cm_set(_q2_cm_lbl),     width="stretch")
+            _qs_cm[3].button("Q3",    key="cm_q3",    on_click=_cm_set(_q3_cm_lbl),     width="stretch")
+            _qs_cm[4].button("Q4",    key="cm_q4",    on_click=_cm_set(_q4_cm_lbl),     width="stretch")
+            _qs_cm[5].button("Clear", key="cm_clear", on_click=_cm_set([]),             width="stretch")
 
             # Sanitise stale labels (units may no longer exist in current data)
             _cur_cm_lbl = [l for l in st.session_state.get('cm_multiselect', []) if l in _all_cm_labels]
@@ -1254,8 +1345,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _cm_origins, _cam_cell_w, _cam_cell_h = _compute_cm_geometry(
                         raw_positions=_raw_pos,
                         first_layer_bounds=tuple(_first_lyr_cm.bounds),
-                        panel_w=_rodb_cm.panel_layout.panel_width,
-                        panel_h=_rodb_cm.panel_layout.panel_height,
                     )
                     _cam_min_x = _first_lyr_cm.bounds[0]
                     _cam_min_y = _first_lyr_cm.bounds[1]
@@ -1440,7 +1529,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
                 height=500,
             )
-            st.plotly_chart(calib_fig, use_container_width=True)
+            st.plotly_chart(calib_fig, width="stretch")
 
             # Manual fiducial entry
             st.subheader("Enter AOI Fiducial Coordinates")
@@ -1598,7 +1687,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             )
             st.dataframe(
                 summary,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1635,7 +1724,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             job_id = reg_col1.text_input("Job ID", value="", key="reg_job_id", placeholder="e.g. LOT-2026-0327")
             panel_id = reg_col2.text_input("Panel ID", value="", key="reg_panel_id", placeholder="e.g. Panel-01")
             date_val = reg_col3.date_input("Date", key="reg_date")
-            if reg_col4.button("Register Job", use_container_width=True) and job_id:
+            if reg_col4.button("Register Job", width="stretch") and job_id:
                 _hash = _hl.md5(aoi.all_defects.to_csv().encode()).hexdigest()
                 ok = register_job(job_id, panel_id, str(date_val), _hash, aoi.all_defects)
                 if ok:
@@ -1650,7 +1739,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 st.info("No jobs registered yet. Register the current inspection above to start trending.")
             else:
                 st.dataframe(jobs_df[['job_id', 'panel_id', 'date']].drop_duplicates(),
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
 
                 density = get_job_density_summary()
                 if not density.empty:
@@ -1666,7 +1755,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
                         font=dict(color='#e0e0e0'),
                     )
-                    st.plotly_chart(trend_fig, use_container_width=True)
+                    st.plotly_chart(trend_fig, width="stretch")
 
                     # Heatmap: defect density per unit position
                     unit_density = density.groupby(['unit_row', 'unit_col'])['total_defects'].sum().reset_index()
@@ -1680,7 +1769,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                             plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
                             font=dict(color='#e0e0e0'),
                         )
-                        st.plotly_chart(heatmap_fig, use_container_width=True)
+                        st.plotly_chart(heatmap_fig, width="stretch")
 
 else:
     # Landing page
