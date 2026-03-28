@@ -697,49 +697,6 @@ def _smart_tick(axis_range: float) -> Optional[float]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_overlay_figure(
-    gerber_layers: dict,
-    defect_df: pd.DataFrame,
-    config: OverlayConfig,
-    drill_hits: list | None = None,
-    components: list | None = None,
-) -> go.Figure:
-    """
-    Build the complete Plotly overlay figure with Gerber layers and AOI defects.
-
-    Args:
-        gerber_layers: dict of layer_name → GerberLayer from the parser
-        defect_df: AOI defect DataFrame with ALIGNED_X, ALIGNED_Y columns
-        config: OverlayConfig controlling visibility, filters, and styling
-        drill_hits: Optional list of DrillHit objects from the ODB++ parser
-        components: Optional list of ComponentPlacement objects from the ODB++ parser
-
-    Returns:
-        go.Figure ready for st.plotly_chart()
-    """
-    fig = go.Figure()
-
-    # 1. Add PCB layer polygons (bottom of z-order)
-    if gerber_layers:
-        _add_layer_traces(fig, gerber_layers, config)
-
-    # 2. Add drill hits (rendered as hollow circles — dark drill through copper)
-    if drill_hits:
-        _add_drill_hit_traces(fig, drill_hits, config)
-
-    # 3. Add component outlines and refdes
-    if components:
-        _add_component_traces(fig, components, config)
-
-    # 4. Add AOI defect markers (top of z-order)
-    if defect_df is not None and not defect_df.empty:
-        _add_defect_traces(fig, defect_df, config)
-
-    # 5. Apply layout
-    _apply_layout(fig, config)
-
-    return fig
-
 
 def _add_drill_hit_traces(fig: go.Figure, drill_hits: list, config: OverlayConfig) -> None:
     """Render drill holes as dark-filled circle markers on top of copper."""

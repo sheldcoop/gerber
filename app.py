@@ -19,17 +19,17 @@ import pandas as pd
 from odb_parser import parse_odb_archive, ParsedODB
 from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache
 from aoi_loader import (
-    load_aoi_files, load_aoi_with_manual_side, render_column_mapping_ui,
+    load_aoi_files, load_aoi_with_manual_side,
     AOIDataset, FILENAME_PATTERN,
 )
 from alignment import (
-    compute_alignment, apply_alignment, get_debug_info, AlignmentResult,
+    get_debug_info, AlignmentResult,
     compute_alignment_cached, apply_alignment_cached, _dict_to_alignment_result,
     compute_dataframe_hash,
     calculate_physical_unit_origin, get_panel_quadrant_bounds,
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
-from visualizer import build_overlay_figure, build_defect_only_figure, OverlayConfig, _apply_layout
+from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
 import plotly.graph_objects as go
 
 
@@ -150,65 +150,11 @@ with st.sidebar:
     st.divider()
 
     # ---- Load & Process Button ----
-    col_btn1, col_btn2 = st.columns([3, 1])
-    with col_btn1:
-        load_btn = st.button("🔄 Load & Process", width='stretch', type="primary")
-    with col_btn2:
-        test_btn = st.button("🧪 Auto-Load Test", width='stretch')
+    load_btn = st.button("🔄 Load & Process", width='stretch', type="primary")
 
-    if load_btn or test_btn:
+    if load_btn:
         parsed_odb = None
         aoi_dataset = None
-
-        if test_btn:
-            import io
-            import os
-            import sys
-            import pandas as pd
-
-            # 1. Load Dummy ODB++ Board
-            if os.path.exists("test_2F.tgz"):
-                with open("test_2F.tgz", "rb") as f:
-                    gerber_file = io.BytesIO(f.read())
-                    gerber_file.name = "test_2F.tgz"
-
-            # 2. Native Dynamic Execution of faster-aoi Sample Generator
-            faster_dir = "/Users/prince/Desktop/faster-aoi"
-            if os.path.exists(faster_dir) and faster_dir not in sys.path:
-                sys.path.insert(0, faster_dir)
-                
-            try:
-                from src.io.sample_generator import generate_sample_data
-                p_data = generate_sample_data(6, 6, 510.0, 515.0, 13.0, 10.0)
-                dfs = []
-                buildups = set()
-                dtypes = set()
-                for l_num in p_data.get_all_layer_nums():
-                    for side in p_data.get_sides_for_layer(l_num):
-                        layer = p_data.get_layer(l_num, side)
-                        if layer and not layer.data.empty:
-                            df = layer.data.copy()
-                            df['BUILDUP'] = layer.layer_num
-                            buildups.add(layer.layer_num)
-                            dtypes.update(df['DEFECT_TYPE'].unique())
-                            dfs.append(df)
-                    
-                final_df = pd.concat(dfs, ignore_index=True)
-                # Map columns to match what the visualizer expects
-                final_df['X'] = final_df['X_COORDINATES']
-                final_df['Y'] = final_df['Y_COORDINATES']
-                final_df['X_MM'] = final_df['X_COORDINATES'] / 1000.0
-                final_df['Y_MM'] = final_df['Y_COORDINATES'] / 1000.0
-                
-                aoi_dataset = AOIDataset(
-                    all_defects=final_df,
-                    buildup_numbers=sorted(list(buildups)),
-                    defect_types=sorted(list(dtypes)),
-                    sides=sorted(list(final_df['SIDE'].unique()))
-                )
-                aoi_files = None # Skip file loader
-            except Exception as e:
-                st.error(f"Failed to load faster-aoi sample logic: {e}")
 
         # Parse ODB++ archive
         if gerber_file:
@@ -328,8 +274,6 @@ with st.sidebar:
             quad_rows = int(st.session_state.get('quad_rows_input', 6))
             quad_cols = int(st.session_state.get('quad_cols_input', 6))
 
-            flip_y = st.checkbox("Flip Y axis", False, help="Invert Y coordinates based on board height")
-            
             aoi_data = st.session_state.get('aoi_dataset')
             valid_rows, valid_cols = [], []
         
@@ -399,7 +343,6 @@ with st.sidebar:
                 offset_y = st.number_input("Y Offset (mm)", step=0.1, key='manual_offset_y')
 
             st.session_state['align_args'] = {
-                'flip_y': flip_y,
                 'manual_offset_x': offset_x,
                 'manual_offset_y': offset_y,
                 'unit_row': unit_row_val,
@@ -965,16 +908,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         _use_cam_bg = True
         _rendered_odb = st.session_state.get('rendered_odb')
 
-        # When using CAM background, don't render Shapely layers (avoid double-render)
-        gerber_layers = parsed.layers if (parsed and not _use_cam_bg) else {}
-
-        if gerber_layers:
-            fig = build_overlay_figure(
-                gerber_layers, defect_df, config,
-                drill_hits=parsed.drill_hits if parsed else None,
-                components=parsed.components if parsed else None,
-            )
-        elif not defect_df.empty:
+        if not defect_df.empty:
             fig = build_defect_only_figure(defect_df, config)
         else:
             fig = go.Figure()
