@@ -130,63 +130,69 @@ def load_render_cache(tgz_bytes: bytes) -> Optional['RenderedODB']:
         return None
 
 
-def build_panel_png(svg_string: str, panel_layout, unit_px: int = 200) -> str:
-    """Rasterize unit SVG and tile it across the panel into a single PNG.
+def build_panel_svg(svg_string: str, panel_layout) -> str:
+    """Composite unit SVG into a panel SVG using <use> tiling.
+
+    Defines the unit artwork once in <defs> and references it N times with
+    translate transforms.  Result is ~50 KB vs ~5 MB for a raster PNG and
+    renders at any zoom without pixelation.
 
     Args:
-        svg_string: SVG string for one unit.
-        panel_layout: PanelLayout with unit_positions and bounds.
-        unit_px: Width of each unit tile in pixels (height scales proportionally).
+        svg_string: SVG string for one unit (from gerbonara render).
+        panel_layout: PanelLayout with unit_positions and panel_width/height.
 
     Returns:
-        Base64 data URL of the panel PNG.
+        Base64 SVG data URL, or '' on failure.
     """
-    import cairosvg
-    from PIL import Image
-    import io
+    import re as _re_local
 
-    uw, uh = panel_layout.unit_bounds
-    if uw <= 0 or uh <= 0:
+    # Extract viewBox from unit SVG to get its coordinate space
+    vb_match = _re_local.search(r'viewBox=["\']([^"\']+)["\']', svg_string)
+    if not vb_match:
+        return ''
+    vb_parts = vb_match.group(1).split()
+    if len(vb_parts) != 4:
+        return ''
+    vx, vy, vw, vh = map(float, vb_parts)
+    if vw <= 0 or vh <= 0:
         return ''
 
-    # Rasterize unit SVG to PNG bytes
-    unit_h_px = int(unit_px * (uh / uw))
-    try:
-        unit_png_bytes = cairosvg.svg2png(
-            bytestring=svg_string.encode('utf-8'),
-            output_width=unit_px,
-            output_height=unit_h_px,
-        )
-    except Exception:
+    # Extract inner SVG content (everything between the root <svg> tags)
+    inner_match = _re_local.search(r'<svg[^>]*>(.*?)</svg>', svg_string, _re_local.DOTALL)
+    if not inner_match:
         return ''
+    inner = inner_match.group(1).strip()
 
-    unit_img = Image.open(io.BytesIO(unit_png_bytes)).convert('RGBA')
-
-    # Scale factor: mm → pixels
     pw, ph = panel_layout.panel_width, panel_layout.panel_height
-    scale = unit_px / uw  # pixels per mm
-    panel_w_px = int(pw * scale)
-    panel_h_px = int(ph * scale)
+    uw, uh = panel_layout.unit_bounds
 
-    # Create panel canvas (dark background)
-    panel_img = Image.new('RGBA', (panel_w_px, panel_h_px), (6, 10, 6, 255))
-
-    # Paste unit at each position
+    # Build <use> elements for each panel position.
+    # unit_positions give bottom-left corner in mm (Y=0 at bottom).
+    # SVG Y=0 is at top, so we flip: svg_y = ph - (y_mm + uh).
+    # Within the unit coordinate space the origin matches the viewBox origin,
+    # so translate = (x_mm - vx,  (ph - y_mm - uh) - vy).
+    uses = []
     for x_mm, y_mm in panel_layout.unit_positions:
-        px = int(x_mm * scale)
-        # SVG/Plotly Y=0 is bottom, PIL Y=0 is top → flip
-        py = panel_h_px - int((y_mm + uh) * scale)
-        if 0 <= px < panel_w_px and 0 <= py < panel_h_px:
-            panel_img.paste(unit_img, (px, py), unit_img)
+        tx = x_mm - vx
+        ty = (ph - y_mm - uh) - vy
+        uses.append(
+            f'<use href="#_u" xlink:href="#_u" transform="translate({tx:.4f} {ty:.4f})"/>'
+        )
 
-    # Encode to PNG bytes
-    buf = io.BytesIO()
-    panel_img.save(buf, format='PNG', optimize=True)
-    return _png_to_data_url(buf.getvalue())
+    composite = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'viewBox="0 0 {pw:.4f} {ph:.4f}">'
+        f'<rect width="{pw:.4f}" height="{ph:.4f}" fill="#060A06"/>'
+        f'<defs><g id="_u">{inner}</g></defs>'
+        f'{"".join(uses)}'
+        f'</svg>'
+    )
+    return _svg_to_data_url_fast(composite)
 
 
 def build_panel_pngs(rendered: 'RenderedODB') -> None:
-    """Build panel PNGs in-place for all non-drill layers. Called lazily on first
+    """Build panel SVGs in-place for all non-drill layers. Called lazily on first
     Panel Overview visit so the initial TGZ render stays fast."""
     if not rendered or not rendered.panel_layout:
         return
@@ -195,8 +201,8 @@ def build_panel_pngs(rendered: 'RenderedODB') -> None:
         if layer_obj.layer_type == 'drill' or layer_obj.panel_png_data_url:
             return
         try:
-            layer_obj.panel_png_data_url = build_panel_png(
-                layer_obj.svg_string, rendered.panel_layout, unit_px=500
+            layer_obj.panel_png_data_url = build_panel_svg(
+                layer_obj.svg_string, rendered.panel_layout
             )
         except Exception:
             pass
@@ -768,8 +774,8 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             )
             if _first_copper:
                 try:
-                    _first_copper.panel_png_data_url = build_panel_png(
-                        _first_copper.svg_string, panel_layout, unit_px=500
+                    _first_copper.panel_png_data_url = build_panel_svg(
+                        _first_copper.svg_string, panel_layout
                     )
                 except Exception:
                     pass

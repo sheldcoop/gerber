@@ -123,8 +123,9 @@ if _prog_path and Path(_prog_path).exists():
             if _bg_rendered:
                 st.session_state['rendered_odb'] = _bg_rendered
                 st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
-                st.session_state['_panel_pngs_built'] = any(
-                    l.panel_png_data_url for l in _bg_rendered.layers.values()
+                _copper_layers = [l for l in _bg_rendered.layers.values() if l.layer_type != 'drill']
+                st.session_state['_panel_pngs_built'] = bool(_copper_layers) and all(
+                    l.panel_png_data_url for l in _copper_layers
                 )
                 st.session_state['data_loaded'] = True
                 st.rerun()
@@ -229,8 +230,9 @@ with st.sidebar:
                         # Cache hit — load instantly
                         st.session_state['rendered_odb'] = rendered
                         st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
-                        _pngs_ready = _from_cache and any(
-                            l.panel_png_data_url for l in rendered.layers.values()
+                        _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
+                        _pngs_ready = _from_cache and bool(_copper_lyrs) and all(
+                            l.panel_png_data_url for l in _copper_lyrs
                         )
                         st.session_state['_panel_pngs_built'] = _pngs_ready
 
