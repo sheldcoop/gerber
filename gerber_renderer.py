@@ -604,16 +604,25 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         all_bounds = []
 
         # ── Parallel layer parsing ────────────────────────────────────────
+        # Pattern for drill-span layer names like "2F-3F", "2B-3B", "1FCO-2F", etc.
+        import re as _re
+        _DRILL_SPAN_RE = _re.compile(
+            r'^\d+[FB](CO)?[-_]\d+[FB](CO)?', _re.IGNORECASE
+        )
+
         def _process_layer(args):
             name, ltype = args
+            # Name-based drill reclassification: ODB++ sometimes exports drill span
+            # layers (e.g. "2B-3B", "2F-3F") with matrix TYPE=MIXED or SIGNAL.
+            # Override ltype so Region strip and colour logic apply correctly.
+            if ltype != 'drill' and _DRILL_SPAN_RE.match(name):
+                ltype = 'drill'
             result = _parse_layer_to_gerbonara(job_root, step_name, name, uf, user_sym_map)
             if result is None:
                 return name, ltype, None, None, f"Layer '{name}': no features found"
             gf, stats = result
             if not gf.objects:
                 return name, ltype, None, None, f"Layer '{name}': 0 objects parsed"
-            # Drill layers in ODB++ unit steps sometimes store coordinates in inches
-            # even when the file declares mm. Detect by checking bounding box extent.
             if ltype == 'drill':
                 # Drill layers may contain surface (Region) objects — board outlines
                 # or copper pours — that render as a solid blob.  Strip them; only

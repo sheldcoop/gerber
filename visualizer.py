@@ -507,7 +507,7 @@ def _add_defect_traces(
 
     # Highlight active defect (VRS Mode)
     if config.active_defect_x is not None and config.active_defect_y is not None:
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=[config.active_defect_x],
             y=[config.active_defect_y],
             mode='markers',
@@ -553,7 +553,7 @@ def _add_defect_traces(
         # Build customdata for this group
         group_customdata = _build_customdata(group_df)
 
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=group_df['ALIGNED_X'],
             y=group_df['ALIGNED_Y'],
             mode='markers',
@@ -724,7 +724,7 @@ def _add_drill_hit_traces(fig: go.Figure, drill_hits: list, config: OverlayConfi
     if not xs:
         return
 
-    fig.add_trace(go.Scatter(
+    fig.add_trace(go.Scattergl(
         x=xs, y=ys,
         mode='markers',
         marker=dict(
