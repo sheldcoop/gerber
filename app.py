@@ -11,7 +11,12 @@ Orchestrates:
 Run with: streamlit run app.py
 """
 
+import json
 import re
+import tempfile
+import threading
+import time
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
@@ -97,6 +102,46 @@ _init_state()
 
 
 # ---------------------------------------------------------------------------
+# Background render polling
+# ---------------------------------------------------------------------------
+
+_prog_path = st.session_state.get('_render_progress_file')
+if _prog_path and Path(_prog_path).exists():
+    try:
+        _prog = json.loads(Path(_prog_path).read_text())
+    except Exception:
+        _prog = {'status': 'running'}
+
+    if _prog.get('status') == 'done':
+        # Render finished — load from cache
+        _bg_tgz = st.session_state.pop('_render_tgz_bytes', None)
+        _bg_name = st.session_state.pop('_render_filename', '')
+        st.session_state.pop('_render_progress_file')
+        Path(_prog_path).unlink(missing_ok=True)
+        if _bg_tgz:
+            _bg_rendered = load_render_cache(_bg_tgz)
+            if _bg_rendered:
+                st.session_state['rendered_odb'] = _bg_rendered
+                st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
+                st.session_state['_panel_pngs_built'] = any(
+                    l.panel_png_data_url for l in _bg_rendered.layers.values()
+                )
+                st.session_state['data_loaded'] = True
+                st.rerun()
+
+    elif _prog.get('status') == 'error':
+        st.session_state.pop('_render_progress_file')
+        Path(_prog_path).unlink(missing_ok=True)
+        st.error(f"Background render failed: {_prog.get('error', 'unknown error')}")
+
+    else:
+        # Still running — show banner and schedule recheck
+        st.info("Rendering CAM layers in background...")
+        time.sleep(3)
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
@@ -170,7 +215,7 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"ODB++ parsing failed: {e}")
 
-            # Render CAM-quality SVGs via Gerbonara (with disk cache)
+            # Render CAM-quality SVGs via Gerbonara (with disk cache + background worker)
             if gerber_file:
                 try:
                     gerber_file.seek(0)
@@ -180,53 +225,65 @@ with st.sidebar:
                     rendered = load_render_cache(_tgz_bytes)
                     _from_cache = rendered is not None
 
-                    if not rendered:
-                        with st.spinner("Rendering CAM-quality copper layers..."):
-                            rendered = render_odb_to_cam(_tgz_bytes, gerber_file.name)
-                            save_render_cache(_tgz_bytes, rendered)
-
-                    st.session_state['rendered_odb'] = rendered
-                    st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
-                    # Panel PNGs built lazily on first Panel Overview visit.
-                    # If from cache they may already be populated; if fresh render they aren't.
-                    _pngs_ready = _from_cache and any(
-                        l.panel_png_data_url for l in rendered.layers.values()
-                    )
-                    st.session_state['_panel_pngs_built'] = _pngs_ready
-
-                    # Auto-populate panel grid from TGZ step-repeat data
-                    if rendered.panel_layout:
-                        _pl = rendered.panel_layout
-                        _qr = max(1, _pl.rows // 2)
-                        _qc = max(1, _pl.cols // 2)
-                        st.session_state['quad_rows_input'] = _qr
-                        st.session_state['quad_cols_input'] = _qc
-                        st.info(
-                            f"Panel layout from TGZ: {_pl.total_units} units "
-                            f"({_pl.cols}×{_pl.rows} grid, "
-                            f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
+                    if rendered:
+                        # Cache hit — load instantly
+                        st.session_state['rendered_odb'] = rendered
+                        st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
+                        _pngs_ready = _from_cache and any(
+                            l.panel_png_data_url for l in rendered.layers.values()
                         )
+                        st.session_state['_panel_pngs_built'] = _pngs_ready
 
-                    if rendered.layers:
-                        layer_names = list(rendered.layers.keys())
-                        st.session_state['cam_layer_select'] = layer_names[0]
-                        total_features = sum(l.feature_count for l in rendered.layers.values())
-                        if _from_cache:
-                            st.success(
-                                f"Loaded from design cache — {len(rendered.layers)} layers, "
-                                f"{total_features:,} features"
+                        if rendered.panel_layout:
+                            _pl = rendered.panel_layout
+                            _qr = max(1, _pl.rows // 2)
+                            _qc = max(1, _pl.cols // 2)
+                            st.session_state['quad_rows_input'] = _qr
+                            st.session_state['quad_cols_input'] = _qc
+                            st.info(
+                                f"Panel layout from TGZ: {_pl.total_units} units "
+                                f"({_pl.cols}×{_pl.rows} grid, "
+                                f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
                             )
-                        else:
-                            st.success(
-                                f"CAM render: {len(rendered.layers)} copper layers, "
-                                f"{total_features:,} features "
-                                f"(bounds: {rendered.board_bounds[2]-rendered.board_bounds[0]:.1f} x "
-                                f"{rendered.board_bounds[3]-rendered.board_bounds[1]:.1f} mm)"
-                            )
-                    for w in rendered.warnings:
-                        st.warning(w, icon="⚠️")
+
+                        if rendered.layers:
+                            layer_names = list(rendered.layers.keys())
+                            st.session_state['cam_layer_select'] = layer_names[0]
+                            total_features = sum(l.feature_count for l in rendered.layers.values())
+                            if _from_cache:
+                                st.success(
+                                    f"Loaded from design cache — {len(rendered.layers)} layers, "
+                                    f"{total_features:,} features"
+                                )
+                            else:
+                                st.success(
+                                    f"CAM render: {len(rendered.layers)} layers, "
+                                    f"{total_features:,} features"
+                                )
+                        for w in rendered.warnings:
+                            st.warning(w, icon="⚠️")
+
+                    else:
+                        # Not cached — start background render thread
+                        _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
+                        _prog_file.write_text('{"status":"running"}')
+
+                        def _bg_render(_bytes=_tgz_bytes, _name=gerber_file.name, _pf=_prog_file):
+                            try:
+                                r = render_odb_to_cam(_bytes, _name)
+                                save_render_cache(_bytes, r)
+                                _pf.write_text('{"status":"done"}')
+                            except Exception as e:
+                                _pf.write_text(json.dumps({"status": "error", "error": str(e)}))
+
+                        threading.Thread(target=_bg_render, daemon=True).start()
+                        st.session_state['_render_progress_file'] = str(_prog_file)
+                        st.session_state['_render_tgz_bytes'] = _tgz_bytes
+                        st.session_state['_render_filename'] = gerber_file.name
+                        st.info("Rendering CAM layers in background — the page will update automatically when ready.")
+
                 except Exception as e:
-                    st.warning(f"CAM rendering failed (falling back to Shapely): {e}")
+                    st.warning(f"CAM rendering failed: {e}")
 
         # Load AOI data
         if aoi_files:

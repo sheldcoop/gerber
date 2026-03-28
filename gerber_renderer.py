@@ -759,6 +759,21 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 step_hierarchy, (unit_w, unit_h),
             )
 
+        # Build panel PNG for the first copper layer only (used as Panel Overview
+        # background). Remaining layers are built lazily via build_panel_pngs().
+        if panel_layout and rendered_layers:
+            _first_copper = next(
+                (lo for lo in rendered_layers.values() if lo.layer_type != 'drill'),
+                None
+            )
+            if _first_copper:
+                try:
+                    _first_copper.panel_png_data_url = build_panel_png(
+                        _first_copper.svg_string, panel_layout, unit_px=500
+                    )
+                except Exception:
+                    pass
+
         return RenderedODB(
             layers=rendered_layers,
             board_bounds=board_bounds,
