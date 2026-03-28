@@ -466,27 +466,7 @@ with st.sidebar:
             )
 
         # ---- Background Source ----
-        _has_rendered = bool(st.session_state.get('rendered_odb'))
-        _has_odb = bool(st.session_state.get('parsed_odb'))
-        if _has_rendered or _has_odb:
-            if 'bg_source' not in st.session_state:
-                st.session_state['bg_source'] = 'CAM (Gerbonara)' if _has_rendered else 'ODB++ / Shapely'
-            _bg_options = []
-            if _has_rendered:
-                _bg_options.append('CAM (Gerbonara)')
-            if _has_odb:
-                _bg_options.append('ODB++ / Shapely')
-            if not _bg_options:
-                _bg_options = ['ODB++ / Shapely']
-            st.radio(
-                "Background source",
-                _bg_options,
-                key='bg_source',
-                horizontal=True,
-                help="Select rendering backend for PCB layer background",
-            )
-        else:
-            st.session_state['bg_source'] = 'ODB++ / Shapely'
+        st.session_state['bg_source'] = 'CAM (Gerbonara)'
 
 
 # ---------------------------------------------------------------------------
@@ -670,9 +650,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             panel_fig.update_layout(showlegend=False)
 
             # ── CAM (Gerbonara) background tiling (pre-cached panel PNG) ────
-            _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
             _rendered_panel = st.session_state.get('rendered_odb')
-            if _bg_source == 'CAM (Gerbonara)' and _rendered_panel and _rendered_panel.panel_layout:
+            if _rendered_panel and _rendered_panel.panel_layout:
                 # Pick the first visible layer's pre-cached panel PNG
                 _panel_png_url = None
                 for _ln in _rendered_panel.layers:
@@ -983,8 +962,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             config.board_bounds = aoi.coord_bounds
 
         # Build and render figure
-        _bg_source = st.session_state.get('bg_source', 'ODB++ / Shapely')
-        _use_cam_bg = (_bg_source == 'CAM (Gerbonara)')
+        _use_cam_bg = True
         _rendered_odb = st.session_state.get('rendered_odb')
 
         # When using CAM background, don't render Shapely layers (avoid double-render)
@@ -1304,10 +1282,9 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
 
                     # ── Background: CAM (Gerbonara) ──────────────────────────
-                    _bg_src_cm    = st.session_state.get('bg_source', 'ODB++ / Shapely')
                     _rendered_cm  = st.session_state.get('rendered_odb')
 
-                    if _bg_src_cm == 'CAM (Gerbonara)' and _rendered_cm and _rendered_cm.layers:
+                    if _rendered_cm and _rendered_cm.layers:
                         # Pick checked layers (same as Single Unit view logic)
                         _cm_cam_layers = [
                             n for n in _rendered_cm.layers
