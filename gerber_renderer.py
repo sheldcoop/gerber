@@ -587,10 +587,10 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         if not matrix_layers:
             matrix_layers = _scan_layers_dir(os.path.join(job_root, 'steps', step_name, 'layers'))
 
-        # Render copper + soldermask layers; skip impedance test coupons (L0x_*)
+        # Render copper + soldermask + drill layers; skip impedance test coupons (L0x_*)
         import re
         _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
-        renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask'}
+        renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask', 'drill'}
 
         if layer_filter:
             selected = [(n, t) for n, t in matrix_layers if n.lower() in [l.lower() for l in layer_filter]]
@@ -612,6 +612,25 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             gf, stats = result
             if not gf.objects:
                 return name, ltype, None, None, f"Layer '{name}': 0 objects parsed"
+            # Drill layers in ODB++ unit steps sometimes store coordinates in inches
+            # even when the file declares mm. Detect by checking bounding box extent.
+            if ltype == 'drill':
+                # Drill layers may contain surface (Region) objects — board outlines
+                # or copper pours — that render as a solid blob.  Strip them; only
+                # flash/line features represent actual drill holes/vias.
+                gf.objects = [o for o in gf.objects if not isinstance(o, Region)]
+                if not gf.objects:
+                    return name, ltype, None, None, f"Layer '{name}': no drill features after region strip"
+                # Coordinate unit fix: ODB++ drill step features sometimes stored in
+                # inches even when file declares mm → bounding box will be tiny (<5mm).
+                if uf == 1.0:
+                    bb = gf.bounding_box(MM)
+                    extent = max(abs(bb[1][0] - bb[0][0]), abs(bb[1][1] - bb[0][1]))
+                    if extent < 5.0:
+                        result2 = _parse_layer_to_gerbonara(job_root, step_name, name, 25.4, user_sym_map)
+                        if result2 and result2[0].objects:
+                            gf, stats = result2
+                            gf.objects = [o for o in gf.objects if not isinstance(o, Region)]
             return name, ltype, gf, stats, None
 
         parse_results = []
@@ -636,8 +655,9 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         }
 
         def _render_layer(name, ltype, gf, stats):
-            # Default SVG (copper color)
-            svg_str = str(gf.to_svg(fg='#b87333', bg='#060A06'))
+            # Drill layers render in yellow; copper layers in copper brown
+            fg_color = '#FFD700' if ltype == 'drill' else '#b87333'
+            svg_str = str(gf.to_svg(fg=fg_color, bg='#060A06'))
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             # One stacking color (assigned by index) — not all 8
@@ -670,9 +690,12 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             for future in as_completed(render_futures):
                 name, layer_obj, bounds = future.result()
                 rendered_layers[name] = layer_obj
-                all_bounds.append(bounds)
+                # Exclude drill layers from board_bounds: drill features can span
+                # panel coordinates (not unit coordinates) and would inflate unit_w/unit_h.
+                if layer_obj.layer_type != 'drill':
+                    all_bounds.append(bounds)
 
-        # Aggregate bounds
+        # Aggregate bounds (copper/soldermask only — determines unit dimensions)
         if all_bounds:
             board_bounds = (
                 min(b[0] for b in all_bounds),
@@ -707,9 +730,11 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 step_hierarchy, (unit_w, unit_h),
             )
 
-        # Pre-render panel PNGs (one per layer, parallelized)
+        # Pre-render panel PNGs (one per layer, parallelized); skip drill layers
         if panel_layout and rendered_layers:
             def _build_panel_png(layer_obj):
+                if layer_obj.layer_type == 'drill':
+                    return  # drill vias too small/numerous to be useful at panel scale
                 try:
                     url = build_panel_png(layer_obj.svg_string, panel_layout, unit_px=500)
                     layer_obj.panel_png_data_url = url
@@ -740,7 +765,7 @@ def scan_available_layers(data: bytes) -> list[tuple[str, str]]:
     import re
     import shutil
     _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
-    renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask'}
+    renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask', 'drill'}
 
     tmp_dir, job_root = _extract_odb_tgz(data)
     try:

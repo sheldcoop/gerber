@@ -67,14 +67,14 @@ def _init_state():
 
 def sync_layers_to_aoi() -> None:
     """Callback: sync ODB++ layer checkboxes to the active AOI buildup/side filter."""
-    local_parsed = st.session_state.get('parsed_odb')
-    if not local_parsed:
+    local_rendered = st.session_state.get('rendered_odb')
+    if not local_rendered:
         return
 
     b_list = st.session_state.get('buildup_filter_select', [])
     side_str = st.session_state.get('side_filter_select', 'Both')
 
-    for name, lyr in local_parsed.layers.items():
+    for name, lyr in local_rendered.layers.items():
         if lyr.layer_type not in ('copper', 'soldermask'):
             continue
         name_upper = name.upper()
@@ -166,16 +166,7 @@ with st.sidebar:
                     gerber_file.seek(0)
                     st.session_state['parsed_odb'] = parsed_odb
 
-                    if parsed_odb.layers:
-                        st.success(
-                            f"Parsed {len(parsed_odb.layers)} ODB++ layers "
-                            f"(step: {parsed_odb.step_name}, units: {parsed_odb.units})"
-                        )
-                    else:
-                        st.error("No layers parsed from ODB++ archive")
-
-                    for w in parsed_odb.warnings[:10]:
-                        st.warning(w, icon="⚠️")
+                    pass  # parsed_odb used for alignment metadata only
                 except Exception as e:
                     st.error(f"ODB++ parsing failed: {e}")
 
@@ -301,20 +292,6 @@ with st.sidebar:
             if 'manual_offset_y' not in st.session_state:
                 st.session_state['manual_offset_y'] = 0.0
 
-            def update_offsets():
-                row_val = st.session_state.get('sel_unit_row', 'All')
-                col_val = st.session_state.get('sel_unit_col', 'All')
-                if row_val != 'All' and col_val != 'All':
-                    ox, oy = calculate_physical_unit_origin(
-                        int(row_val), int(col_val),
-                        panel_rows_per_quad=st.session_state.get('quad_rows_input', 6),
-                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6),
-                        dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
-                        dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
-                    )
-                    st.session_state['manual_offset_x'] = float(round(ox, 3))
-                    st.session_state['manual_offset_y'] = float(round(oy, 3))
-
             # --- Phase 2 FIX: consume pending click-to-inspect navigation BEFORE
             # the selectbox widgets are instantiated. Writing to a widget-bound key
             # after the widget renders raises StreamlitAPIException, so we do it here.
@@ -329,9 +306,9 @@ with st.sidebar:
 
             col3, col4 = st.columns(2)
             with col3:
-                unit_row = st.selectbox("Unit Row", unit_row_opts, key='sel_unit_row', on_change=update_offsets)
+                unit_row = st.selectbox("Unit Row", unit_row_opts, key='sel_unit_row')
             with col4:
-                unit_col = st.selectbox("Unit Col", unit_col_opts, key='sel_unit_col', on_change=update_offsets)
+                unit_col = st.selectbox("Unit Col", unit_col_opts, key='sel_unit_col')
             
             unit_row_val = None if unit_row == 'All' else unit_row
             unit_col_val = None if unit_col == 'All' else unit_col
@@ -352,39 +329,46 @@ with st.sidebar:
         st.divider()
 
         # ---- Section 2: Layer Controls ----
-        parsed = st.session_state.get('parsed_odb')
-        if parsed and parsed.layers:
+        _rendered_for_ctrl = st.session_state.get('rendered_odb')
+        if _rendered_for_ctrl and _rendered_for_ctrl.layers:
             st.header("2. Layer Controls")
 
             visible_layers = []
             layer_opacities = {}
 
-            for layer_name, layer in parsed.layers.items():
-                # Default visibility: ON for copper / soldermask / profile; OFF for everything else
-                default_visible = layer.layer_type in ('copper', 'soldermask', 'outline')
-
-                default_opacity = 0.40
-
+            def _layer_row(layer_name, layer, default_visible):
                 col1, col2 = st.columns([1, 2])
                 with col1:
                     visible = st.checkbox(
                         layer_name,
                         value=default_visible,
                         key=f"vis_{layer_name}",
-                        help=f"{layer.layer_type} — {layer.polygon_count} shapes",
+                        help=f"{layer.layer_type} — {layer.feature_count} features",
                     )
                 with col2:
-                    opacity = st.slider(
-                        "Opacity",
-                        0.0, 1.0, default_opacity,
-                        step=0.05,
+                    st.slider(
+                        "Opacity", 0.0, 1.0, 0.40, step=0.05,
                         key=f"opacity_{layer_name}",
                         label_visibility="collapsed",
                     )
+                return visible
 
-                if visible:
-                    visible_layers.append(layer_name)
-                layer_opacities[layer_name] = opacity
+            copper_layers = {n: l for n, l in _rendered_for_ctrl.layers.items()
+                             if l.layer_type in ('copper', 'soldermask')}
+            drill_layers  = {n: l for n, l in _rendered_for_ctrl.layers.items()
+                             if l.layer_type == 'drill'}
+
+            with st.expander(f"Copper & Soldermask ({len(copper_layers)})", expanded=True):
+                for layer_name, layer in copper_layers.items():
+                    if _layer_row(layer_name, layer, True):
+                        visible_layers.append(layer_name)
+                    layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
+
+            with st.expander(f"Drill / Via ({len(drill_layers)})", expanded=False):
+                for layer_name, layer in drill_layers.items():
+                    if _layer_row(layer_name, layer, False):
+                        visible_layers.append(layer_name)
+                    layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
 
             st.divider()
 
@@ -1172,19 +1156,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 if _cm_src.empty:
                     st.info("No defects found for the selected units / scope filters.")
                 else:
-                    # ── DEBUG: show coordinate diagnostics ────────────────────
-                    with st.expander("🔬 Coord Debug (remove after fix)", expanded=True):
-                        st.write("**cam_min_x/y:**", _cam_min_x, _cam_min_y)
-                        st.write("**cam_cell_w/h:**", _cam_cell_w, _cam_cell_h)
-                        st.write("**_raw_pos (first 3):**", _raw_pos[:3] if _raw_pos else "EMPTY")
-                        st.write("**_uniq_x_cm (first 6):**", _uniq_x_cm[:6])
-                        st.write("**_uniq_y_cm (first 6):**", _uniq_y_cm[:6])
-                        _sample_origins = dict(list(_cm_origins.items())[:4])
-                        st.write("**_cm_origins (first 4):**", _sample_origins)
-                        if not _cm_src.empty:
-                            st.write("**Sample X_MM / Y_MM (first 3):**",
-                                     _cm_src[['X_MM','Y_MM','UNIT_INDEX_Y','UNIT_INDEX_X']].head(3).to_dict('records'))
-
                     # ── Coordinate normalisation (vectorized) ─────────────────
                     # Subtract each unit's effective origin (TGZ pos + cam_min)
                     # so all units fold into local coords [0…cell_w] × [0…cell_h],
