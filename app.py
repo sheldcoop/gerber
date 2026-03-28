@@ -527,20 +527,76 @@ def _compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> l
     return shapes
 
 
+# ── Coordinate system reference ───────────────────────────────────────────────
+#
+# THREE coordinate spaces are in play. Understanding them is critical.
+#
+# 1. ODB++ RAW space  (unit_positions_raw)
+#    Origin: centre of the ODB++ panel frame (0, 0 = panel centre).
+#    Values: NEGATIVE for most units, e.g. bottom-left unit ≈ (-207mm, -218mm).
+#    Used for: step-repeat parsing inside gerber_renderer only.
+#    *** NEVER use these values for AOI alignment. ***
+#
+# 2. ODB++ DISPLAY space  (unit_positions  ←  what we use here)
+#    Origin: bottom-left corner of the 510×515mm panel frame (0, 0 = panel corner).
+#    Values: POSITIVE, ranging from ~23mm to ~460mm for a 12×12 panel.
+#    Computed by: gerber_renderer.compute_unit_positions() — shifts raw coords
+#                 so content is centred inside the physical panel frame.
+#    This is the STEP ORIGIN for each unit (where the ODB++ step-repeat places it).
+#
+# 3. AOI machine space  (X_MM / Y_MM columns in the Excel file)
+#    Origin: bottom-left corner of the same panel frame (matches display space).
+#    Values: POSITIVE, empirically confirmed to start at unit_positions_y for
+#            each unit row (e.g. row-0 defects start at Y_MM ≈ 23.1mm = unit_pos_y).
+#    Key insight: AOI measures from the STEP ORIGIN, not from the bottom of the
+#                 CAM features. Because the CAM design is CENTRED at the step origin
+#                 (cam_min_y ≈ -16mm, cam_max_y ≈ +16mm), features below the step
+#                 origin exist in ODB++ but the AOI Y reference starts AT the origin.
+#
+# ALIGNMENT FORMULA (Commonality and SUI):
+#    ALIGNED_X = X_MM  - unit_pos_x     (subtract step-origin X)
+#    ALIGNED_Y = Y_MM  - unit_pos_y     (subtract step-origin Y)
+#    Result range: [0, cell_w] × [0, cell_h]  — matches the CAM SVG in Plotly space.
+#
+# CAM SVG PLOTLY PLACEMENT:
+#    The SVG has local coords [cam_min_x, cam_max_x] × [cam_min_y, cam_max_y].
+#    Plotly places it at x=0, y=cell_h, sizex=cell_w, sizey=cell_h.
+#    This maps  cam_min → Plotly 0  and  cam_max → Plotly cell_w/cell_h.
+#    A feature at local (lx, ly) appears at Plotly (lx-cam_min_x, ly-cam_min_y).
+#    A defect at ALIGNED (ax, ay) = (X_MM-unit_pos_x, Y_MM-unit_pos_y) maps to
+#    the same Plotly position, so dots land on copper. ✓
+#
+# WHY NOT unit_pos + cam_min?
+#    Subtracting (unit_pos + cam_min) shifts defects UP by |cam_min| ≈ 16mm,
+#    pushing ~half of all defects above the visible CAM area. Verified against
+#    actual Excel data: Y_MM_min per unit row == unit_positions_y (not +cam_min).
+# ──────────────────────────────────────────────────────────────────────────────
+
 @st.cache_data(show_spinner=False)
 def _compute_cm_geometry(
-    raw_positions: tuple,        # tuple of (x, y) — hashable
-    first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y)
+    unit_positions: tuple,       # tuple of (x, y) — ODB++ display (panel-absolute) coords
+    first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y) of CAM layer in local space
 ) -> tuple:
-    """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout."""
+    """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout.
+
+    origins_dict maps (row_index, col_index) → (origin_x, origin_y) where:
+      - row_index / col_index are 0-based sorted position indices
+      - origin_x/y = the unit's display position (step origin in panel space)
+
+    To align a defect: ALIGNED = (X_MM - origin_x, Y_MM - origin_y)
+    Result is in [0, cell_w] × [0, cell_h], matching the CAM SVG in Plotly.
+
+    See the coordinate system reference comment above for full explanation.
+    """
     cam_min_x, cam_min_y, cam_max_x, cam_max_y = first_layer_bounds
     cell_w = cam_max_x - cam_min_x
     cell_h = cam_max_y - cam_min_y
-    uniq_x = sorted(set(round(x, 2) for x, _ in raw_positions))
-    uniq_y = sorted(set(round(y, 2) for _, y in raw_positions))
+    uniq_x = sorted(set(round(x, 2) for x, _ in unit_positions))
+    uniq_y = sorted(set(round(y, 2) for _, y in unit_positions))
+    # Origin = display position only — NO cam_min offset.
+    # AOI measures from the step origin; cam_min offset must NOT be subtracted.
     origins = {
-        (ri, ci): (uniq_x[ci] + cam_min_x,
-                   uniq_y[ri] + cam_min_y)
+        (ri, ci): (uniq_x[ci], uniq_y[ri])
         for ri in range(len(uniq_y))
         for ci in range(len(uniq_x))
     }
@@ -963,20 +1019,26 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         )
 
         if _sui_use_cm_align:
-            # Compute same origins dict as Commonality
             _sui_first_lyr = next(
                 (l for l in _sui_rodb.layers.values() if l.layer_type != 'drill'),
                 next(iter(_sui_rodb.layers.values()))
             )
-            _sui_raw_pos = tuple(
-                getattr(_sui_rodb.panel_layout, 'unit_positions_raw', None)
-                or _sui_rodb.panel_layout.unit_positions
-            )
+            # IMPORTANT: use unit_positions (display/panel-absolute), NOT
+            # unit_positions_raw. Raw positions are in ODB++ centered coords
+            # (negative values, e.g. -207mm). AOI X_MM/Y_MM are panel-absolute
+            # (positive, 0→510mm). Only display positions share the same frame.
+            _sui_disp_pos = tuple(_sui_rodb.panel_layout.unit_positions)
             _sui_origins, _sui_cell_w, _sui_cell_h = _compute_cm_geometry(
-                raw_positions=_sui_raw_pos,
+                unit_positions=_sui_disp_pos,
                 first_layer_bounds=tuple(_sui_first_lyr.bounds),
             )
-            _sui_origin = _sui_origins.get((_sui_unit_row, _sui_unit_col), (0.0, 0.0))
+
+            # Normalise UNIT_INDEX to 0-based (handles 1-based AOI machines)
+            _min_iy = int(aoi.all_defects['UNIT_INDEX_Y'].min())
+            _min_ix = int(aoi.all_defects['UNIT_INDEX_X'].min())
+            _ri = int(_sui_unit_row) - _min_iy
+            _ci = int(_sui_unit_col) - _min_ix
+            _sui_origin = _sui_origins.get((_ri, _ci), (0.0, 0.0))
 
             # Filter to selected unit only
             _sui_src = aoi.all_defects.copy()
@@ -994,7 +1056,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     f"Available UNIT_INDEX_Y values: {sorted(aoi.all_defects['UNIT_INDEX_Y'].dropna().unique().astype(int).tolist())[:10]}"
                 )
 
-            # Subtract unit origin — same formula as Commonality
+            # Subtract unit origin → local CAM coords [0…cell_w] × [0…cell_h]
             _sui_src['ALIGNED_X'] = _sui_src['X_MM'] - _sui_origin[0]
             _sui_src['ALIGNED_Y'] = _sui_src['Y_MM'] - _sui_origin[1]
             vrs_df = _sui_src
@@ -1251,7 +1313,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             _rodb_cm_pl = st.session_state.get('rendered_odb')
             if _rodb_cm_pl and _rodb_cm_pl.panel_layout:
                 _pl_cm  = _rodb_cm_pl.panel_layout
-                _rp_cm  = getattr(_pl_cm, 'unit_positions_raw', None) or _pl_cm.unit_positions
+                _rp_cm  = _pl_cm.unit_positions   # display (panel-absolute), same frame as AOI X_MM
                 _uxs_cm = sorted(set(round(x, 2) for x, _ in _rp_cm))
                 _uys_cm = sorted(set(round(y, 2) for _, y in _rp_cm))
                 _all_cm_pairs = [(ri, ci)
@@ -1354,12 +1416,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         (l for l in _rodb_cm.layers.values() if l.layer_type != 'drill'),
                         next(iter(_rodb_cm.layers.values()))
                     )
-                    _raw_pos = tuple(
-                        getattr(_rodb_cm.panel_layout, 'unit_positions_raw', None)
-                        or _rodb_cm.panel_layout.unit_positions
-                    )
                     _cm_origins, _cam_cell_w, _cam_cell_h = _compute_cm_geometry(
-                        raw_positions=_raw_pos,
+                        unit_positions=tuple(_rodb_cm.panel_layout.unit_positions),
                         first_layer_bounds=tuple(_first_lyr_cm.bounds),
                     )
                     _cam_min_x = _first_lyr_cm.bounds[0]
@@ -1395,12 +1453,14 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.info("No defects found for the selected units / scope filters.")
                 else:
                     # ── Coordinate normalisation (vectorized) ─────────────────
-                    # Subtract each unit's effective origin (TGZ pos + cam_min)
-                    # so all units fold into local coords [0…cell_w] × [0…cell_h],
-                    # matching the CAM SVG which is also shifted to start at (0, 0).
+                    # Subtract each unit's effective origin so all units fold into
+                    # local coords [0…cell_w] × [0…cell_h], matching CAM SVG at (0,0).
+                    # Normalise UNIT_INDEX to 0-based to match sorted-position indices.
+                    _cm_min_iy = int(aoi.all_defects['UNIT_INDEX_Y'].min())
+                    _cm_min_ix = int(aoi.all_defects['UNIT_INDEX_X'].min())
                     _pairs_cm = list(zip(
-                        _cm_src['UNIT_INDEX_Y'].astype(int),
-                        _cm_src['UNIT_INDEX_X'].astype(int),
+                        _cm_src['UNIT_INDEX_Y'].astype(int) - _cm_min_iy,
+                        _cm_src['UNIT_INDEX_X'].astype(int) - _cm_min_ix,
                     ))
                     _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
                     _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
