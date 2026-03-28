@@ -17,7 +17,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache
+from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache, build_panel_pngs
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side,
     AOIDataset, FILENAME_PATTERN,
@@ -186,6 +186,13 @@ with st.sidebar:
                             save_render_cache(_tgz_bytes, rendered)
 
                     st.session_state['rendered_odb'] = rendered
+                    st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
+                    # Panel PNGs built lazily on first Panel Overview visit.
+                    # If from cache they may already be populated; if fresh render they aren't.
+                    _pngs_ready = _from_cache and any(
+                        l.panel_png_data_url for l in rendered.layers.values()
+                    )
+                    st.session_state['_panel_pngs_built'] = _pngs_ready
 
                     # Auto-populate panel grid from TGZ step-repeat data
                     if rendered.panel_layout:
@@ -353,14 +360,38 @@ with st.sidebar:
                     )
                 return visible
 
-            copper_layers = {n: l for n, l in _rendered_for_ctrl.layers.items()
-                             if l.layer_type in ('copper', 'soldermask')}
-            drill_layers  = {n: l for n, l in _rendered_for_ctrl.layers.items()
-                             if l.layer_type == 'drill'}
+            def _copper_sort_key(name: str) -> int:
+                n = name.upper()
+                # Soldermask front
+                if 'FSR' in n or ('MASK' in n and 'F' in n and 'B' not in n): return 0
+                if n.startswith('3F') or n == '3F': return 10
+                if n.startswith('2F') or n == '2F': return 20
+                if '1FCO' in n: return 30
+                if '1BCO' in n: return 40
+                if n.startswith('2B') or n == '2B': return 50
+                if n.startswith('3B') or n == '3B': return 60
+                if 'BSR' in n or ('MASK' in n and 'B' in n): return 70
+                return 99
+
+            def _drill_sort_key(name: str) -> tuple:
+                nums = re.findall(r'\d+', name)
+                return (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (99, 99)
+
+            copper_layers = dict(sorted(
+                ((n, l) for n, l in _rendered_for_ctrl.layers.items()
+                 if l.layer_type in ('copper', 'soldermask')),
+                key=lambda kv: _copper_sort_key(kv[0])
+            ))
+            drill_layers = dict(sorted(
+                ((n, l) for n, l in _rendered_for_ctrl.layers.items()
+                 if l.layer_type == 'drill'),
+                key=lambda kv: _drill_sort_key(kv[0])
+            ))
 
             with st.expander(f"Copper & Soldermask ({len(copper_layers)})", expanded=True):
-                for layer_name, layer in copper_layers.items():
-                    if _layer_row(layer_name, layer, True):
+                for i, (layer_name, layer) in enumerate(copper_layers.items()):
+                    # Only the first (outermost) copper layer on by default
+                    if _layer_row(layer_name, layer, i == 0):
                         visible_layers.append(layer_name)
                     layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
 
@@ -394,6 +425,50 @@ with st.sidebar:
 
         # ---- Background Source ----
         st.session_state['bg_source'] = 'CAM (Gerbonara)'
+
+
+# ---------------------------------------------------------------------------
+# Cached helpers (pure functions — recompute only when inputs change)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def _compute_cm_geometry(
+    raw_positions: tuple,        # tuple of (x, y) — hashable
+    first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y)
+    panel_w: float,
+    panel_h: float,
+) -> tuple:
+    """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout."""
+    cam_min_x, cam_min_y, cam_max_x, cam_max_y = first_layer_bounds
+    cell_w = cam_max_x - cam_min_x
+    cell_h = cam_max_y - cam_min_y
+    uniq_x = sorted(set(round(x, 2) for x, _ in raw_positions))
+    uniq_y = sorted(set(round(y, 2) for _, y in raw_positions))
+    origins = {
+        (ri, ci): (uniq_x[ci] + cam_min_x + panel_w / 2,
+                   uniq_y[ri] + cam_min_y + panel_h / 2)
+        for ri in range(len(uniq_y))
+        for ci in range(len(uniq_x))
+    }
+    return origins, cell_w, cell_h
+
+
+@st.cache_data(show_spinner=False)
+def _filter_aoi_cm(
+    _df: pd.DataFrame,
+    buildup_filter: tuple,
+    side_filter: tuple,
+) -> pd.DataFrame:
+    """Scope-filter AOI defects for Commonality. Cached by filter combo."""
+    src = _df.copy()
+    if buildup_filter and 'BUILDUP' in src.columns:
+        src = src[src['BUILDUP'].isin(buildup_filter)]
+    if 'SIDE' in src.columns:
+        if 'Front' in side_filter and 'Back' not in side_filter:
+            src = src[src['SIDE'] == 'F']
+        elif 'Back' in side_filter and 'Front' not in side_filter:
+            src = src[src['SIDE'] == 'B']
+    return src
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +654,15 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             # ── CAM (Gerbonara) background tiling (pre-cached panel PNG) ────
             _rendered_panel = st.session_state.get('rendered_odb')
             if _rendered_panel and _rendered_panel.panel_layout:
+                # Build panel PNGs lazily on first Panel Overview visit
+                if not st.session_state.get('_panel_pngs_built'):
+                    with st.spinner("Building panel PNG (one-time)..."):
+                        build_panel_pngs(_rendered_panel)
+                        _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
+                        if _tgz_b:
+                            save_render_cache(_tgz_b, _rendered_panel)
+                    st.session_state['_panel_pngs_built'] = True
+
                 # Pick the first visible layer's pre-cached panel PNG
                 _panel_png_url = None
                 for _ln in _rendered_panel.layers:
@@ -1100,29 +1184,22 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 _cam_min_y  = 0.0
 
                 if _rodb_cm and _rodb_cm.panel_layout and _rodb_cm.layers:
-                    _first_lyr_cm = next(iter(_rodb_cm.layers.values()))
-                    _cam_min_x  = _first_lyr_cm.bounds[0]
-                    _cam_min_y  = _first_lyr_cm.bounds[1]
-                    _cam_cell_w = _first_lyr_cm.bounds[2] - _first_lyr_cm.bounds[0]
-                    _cam_cell_h = _first_lyr_cm.bounds[3] - _first_lyr_cm.bounds[1]
-
-                    # Sort unique TGZ x/y values to build (row, col) → origin mapping.
-                    # TGZ uses center-origin (panel center = 0,0).
-                    # AOI uses lower-left origin (panel edge = 0,0).
-                    # Conversion: aoi_x = tgz_x + panel_width/2
-                    # Unit lower-left in AOI space = raw_tgz_x + cam_min_x + panel_width/2
-                    _raw_pos   = (getattr(_rodb_cm.panel_layout, 'unit_positions_raw', None)
-                                  or _rodb_cm.panel_layout.unit_positions)
-                    _uniq_x_cm = sorted(set(round(x, 2) for x, _ in _raw_pos))
-                    _uniq_y_cm = sorted(set(round(y, 2) for _, y in _raw_pos))
-                    _pl_w = _rodb_cm.panel_layout.panel_width   # 510mm
-                    _pl_h = _rodb_cm.panel_layout.panel_height  # 515mm
-                    _cm_origins = {
-                        (ri, ci): (_uniq_x_cm[ci] + _cam_min_x + _pl_w / 2,
-                                   _uniq_y_cm[ri] + _cam_min_y + _pl_h / 2)
-                        for ri in range(len(_uniq_y_cm))
-                        for ci in range(len(_uniq_x_cm))
-                    }
+                    _first_lyr_cm = next(
+                        (l for l in _rodb_cm.layers.values() if l.layer_type != 'drill'),
+                        next(iter(_rodb_cm.layers.values()))
+                    )
+                    _raw_pos = tuple(
+                        getattr(_rodb_cm.panel_layout, 'unit_positions_raw', None)
+                        or _rodb_cm.panel_layout.unit_positions
+                    )
+                    _cm_origins, _cam_cell_w, _cam_cell_h = _compute_cm_geometry(
+                        raw_positions=_raw_pos,
+                        first_layer_bounds=tuple(_first_lyr_cm.bounds),
+                        panel_w=_rodb_cm.panel_layout.panel_width,
+                        panel_h=_rodb_cm.panel_layout.panel_height,
+                    )
+                    _cam_min_x = _first_lyr_cm.bounds[0]
+                    _cam_min_y = _first_lyr_cm.bounds[1]
                 else:
                     # Fallback: manual geometry (uses user-set gap / grid params)
                     _cm_origins = {
@@ -1132,17 +1209,14 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         for r, c in _cm_sel_units
                     }
 
-                # ── Scope-filter AOI data ─────────────────────────────────────
-                _cm_src = aoi.all_defects.copy()
+                # ── Scope-filter AOI data (cached) ────────────────────────────
                 _bu_cm   = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
                 _side_cm = st.session_state.get('scope_side_sel', ['Front', 'Back'])
-                if _bu_cm and 'BUILDUP' in _cm_src.columns:
-                    _cm_src = _cm_src[_cm_src['BUILDUP'].isin(_bu_cm)]
-                if 'SIDE' in _cm_src.columns:
-                    if 'Front' in _side_cm and 'Back' not in _side_cm:
-                        _cm_src = _cm_src[_cm_src['SIDE'] == 'F']
-                    elif 'Back' in _side_cm and 'Front' not in _side_cm:
-                        _cm_src = _cm_src[_cm_src['SIDE'] == 'B']
+                _cm_src  = _filter_aoi_cm(
+                    aoi.all_defects,
+                    tuple(sorted(_bu_cm)) if _bu_cm else (),
+                    tuple(sorted(_side_cm)),
+                )
 
                 # Filter to selected units only
                 _cm_src = _cm_src.copy()

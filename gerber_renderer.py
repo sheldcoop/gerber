@@ -185,6 +185,26 @@ def build_panel_png(svg_string: str, panel_layout, unit_px: int = 200) -> str:
     return _png_to_data_url(buf.getvalue())
 
 
+def build_panel_pngs(rendered: 'RenderedODB') -> None:
+    """Build panel PNGs in-place for all non-drill layers. Called lazily on first
+    Panel Overview visit so the initial TGZ render stays fast."""
+    if not rendered or not rendered.panel_layout:
+        return
+
+    def _do(layer_obj):
+        if layer_obj.layer_type == 'drill' or layer_obj.panel_png_data_url:
+            return
+        try:
+            layer_obj.panel_png_data_url = build_panel_png(
+                layer_obj.svg_string, rendered.panel_layout, unit_px=500
+            )
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=min(4, len(rendered.layers))) as ex:
+        list(ex.map(_do, rendered.layers.values()))
+
+
 # Pre-defined color palette for stacking
 LAYER_COLORS = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644',
                 '#44ccaa', '#cc4466', '#44cccc']
@@ -738,20 +758,6 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             panel_layout = compute_unit_positions(
                 step_hierarchy, (unit_w, unit_h),
             )
-
-        # Pre-render panel PNGs (one per layer, parallelized); skip drill layers
-        if panel_layout and rendered_layers:
-            def _build_panel_png(layer_obj):
-                if layer_obj.layer_type == 'drill':
-                    return  # drill vias too small/numerous to be useful at panel scale
-                try:
-                    url = build_panel_png(layer_obj.svg_string, panel_layout, unit_px=500)
-                    layer_obj.panel_png_data_url = url
-                except Exception:
-                    pass
-
-            with ThreadPoolExecutor(max_workers=min(4, len(rendered_layers))) as executor:
-                list(executor.map(_build_panel_png, rendered_layers.values()))
 
         return RenderedODB(
             layers=rendered_layers,

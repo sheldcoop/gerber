@@ -527,19 +527,30 @@ def load_aoi_with_manual_side(
     Returns:
         AOIDataset
     """
+    import json
+
+    # Cache key: file contents + manual map
+    h = hashlib.md5()
+    all_bytes = []
+    for uf in uploaded_files:
+        b = uf.read()
+        h.update(b)
+        all_bytes.append((uf.name, b))
+        uf.seek(0)
+    h.update(json.dumps(buildup_side_map, sort_keys=True).encode())
+    file_hash = h.hexdigest() + '_manual'
+
+    cached = _try_load_from_cache(file_hash)
+    if cached is not None:
+        return cached
+
     all_results = []
     all_warnings = []
 
-    for uf in uploaded_files:
-        filename = uf.name
-        file_bytes = uf.read()
-        uf.seek(0)
-
+    for filename, file_bytes in all_bytes:
         buildup, side = buildup_side_map.get(filename, (0, 'F'))
-
         result = _load_single_aoi(file_bytes, filename, buildup, side)
         all_warnings.extend(result.warnings)
-
         if not result.df.empty:
             all_results.append(result)
 
@@ -547,11 +558,12 @@ def load_aoi_with_manual_side(
         return AOIDataset(warnings=all_warnings + ["No valid defect data loaded"])
 
     combined = pd.concat([r.df for r in all_results], ignore_index=True)
-
-    return AOIDataset(
+    dataset = AOIDataset(
         all_defects=combined,
         defect_types=sorted(combined['DEFECT_TYPE'].unique().tolist()),
         buildup_numbers=sorted(combined['BUILDUP'].unique().tolist()),
         sides=sorted(combined['SIDE'].unique().tolist()),
         warnings=all_warnings
     )
+    _save_to_cache(file_hash, dataset)
+    return dataset
