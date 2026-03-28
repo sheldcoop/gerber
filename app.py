@@ -748,32 +748,40 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             # ── CAM (Gerbonara) background tiling (pre-cached panel SVG) ────
             _rendered_panel = st.session_state.get('rendered_odb')
             if _rendered_panel and _rendered_panel.panel_layout:
-                # Build panel SVGs lazily on first Panel Overview visit
-                if not st.session_state.get('_panel_pngs_built'):
-                    with st.spinner("Building panel layer images (one-time)..."):
-                        build_panel_pngs(_rendered_panel)
-                        _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                        if _tgz_b:
-                            save_render_cache(_tgz_b, _rendered_panel)
-                    st.session_state['_panel_pngs_built'] = True
-
-                # Pick panel background from checked sidebar layer (first checked wins)
+                # Pick which layer to display (first checked, or first available)
                 _panel_png_url = None
                 _panel_bg_name = None
+                _want_layer = None
                 for _ln in _rendered_panel.layers:
                     if st.session_state.get(f"vis_{_ln}", False):
-                        _url = _rendered_panel.layers[_ln].panel_png_data_url
-                        if _url:
-                            _panel_png_url = _url
-                            _panel_bg_name = _ln
+                        _lo = _rendered_panel.layers[_ln]
+                        if _lo.layer_type != 'drill':
+                            _want_layer = _ln
                             break
-                # Fallback: first layer that has a URL (don't default to FSR if not checked)
-                if not _panel_png_url:
+                if not _want_layer:
                     for _ln, _lo in _rendered_panel.layers.items():
-                        if _lo.panel_png_data_url and _lo.layer_type != 'drill':
-                            _panel_png_url = _lo.panel_png_data_url
-                            _panel_bg_name = _ln
+                        if _lo.layer_type != 'drill':
+                            _want_layer = _ln
                             break
+
+                # Build panel PNG only for the selected layer (on-demand, one layer at a time)
+                if _want_layer:
+                    _want_lyr_obj = _rendered_panel.layers[_want_layer]
+                    if not _want_lyr_obj.panel_png_data_url:
+                        with st.spinner(f"Building panel image for {_want_layer}..."):
+                            from gerber_renderer import build_panel_png_hires
+                            try:
+                                _want_lyr_obj.panel_png_data_url = build_panel_png_hires(
+                                    _want_lyr_obj.svg_string, _rendered_panel.panel_layout
+                                )
+                            except Exception:
+                                pass
+                            _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
+                            if _tgz_b and _want_lyr_obj.panel_png_data_url:
+                                save_render_cache(_tgz_b, _rendered_panel)
+                    if _want_lyr_obj.panel_png_data_url:
+                        _panel_png_url = _want_lyr_obj.panel_png_data_url
+                        _panel_bg_name = _want_layer
 
                 if _panel_png_url:
                     panel_fig.update_layout(images=[dict(
@@ -980,6 +988,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 (_sui_src['UNIT_INDEX_X'].astype(int) == int(_sui_unit_col))
             ].copy()
 
+            if _sui_src.empty:
+                st.warning(
+                    f"No defects found for unit (row={_sui_unit_row}, col={_sui_unit_col}). "
+                    f"Available UNIT_INDEX_Y values: {sorted(aoi.all_defects['UNIT_INDEX_Y'].dropna().unique().astype(int).tolist())[:10]}"
+                )
+
             # Subtract unit origin — same formula as Commonality
             _sui_src['ALIGNED_X'] = _sui_src['X_MM'] - _sui_origin[0]
             _sui_src['ALIGNED_Y'] = _sui_src['Y_MM'] - _sui_origin[1]
@@ -1171,8 +1185,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     opacity=0.95 if not _is_multi else 0.7,
                 ))
 
-            # Update board bounds from CAM data if not already set
-            if not _sui_use_cm_align and not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
+            # Re-apply layout after CAM image to lock viewport (mirrors Commonality)
+            if _sui_use_cm_align:
+                _apply_layout(fig, config)
+            elif not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
                 _rbb = _rendered_odb.board_bounds
                 ox = config.offset_x
                 oy = config.offset_y

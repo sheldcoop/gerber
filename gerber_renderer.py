@@ -191,67 +191,58 @@ def build_panel_svg(svg_string: str, panel_layout) -> str:
     return _svg_to_data_url_fast(composite)
 
 
-def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 8) -> str:
-    """Rasterize the panel composite to a high-resolution PNG.
+def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) -> str:
+    """Build a high-resolution panel PNG by tiling the unit raster.
 
-    Builds the same <use>-tiled composite SVG as build_panel_svg, then
-    rasterizes it with cairosvg at px_per_mm resolution.  At 8px/mm a
-    0.3mm pad = 2.4px — clearly visible when zoomed.  PNG scales instantly
-    on zoom/pan (GPU bilinear), unlike SVG which re-renders every frame.
+    Strategy (fast):
+      1. Rasterize the single-unit SVG once with cairosvg → small unit PNG
+      2. Open with PIL and paste it N times on a panel canvas (pixel copy)
+
+    This is orders of magnitude faster than asking cairosvg to render a
+    composite SVG with N × (unit feature count) elements.
 
     Returns:
         Base64 PNG data URL, or '' on failure.
     """
-    import re as _re_local
+    import io
     import cairosvg
-
-    vb_match = _re_local.search(r'viewBox=["\']([^"\']+)["\']', svg_string)
-    if not vb_match:
-        return ''
-    vb_parts = vb_match.group(1).split()
-    if len(vb_parts) != 4:
-        return ''
-    vx, vy, vw, vh = map(float, vb_parts)
-    if vw <= 0 or vh <= 0:
-        return ''
-
-    inner_match = _re_local.search(r'<svg[^>]*>(.*?)</svg>', svg_string, _re_local.DOTALL)
-    if not inner_match:
-        return ''
-    inner = inner_match.group(1).strip()
+    from PIL import Image
 
     pw, ph = panel_layout.panel_width, panel_layout.panel_height
     uw, uh = panel_layout.unit_bounds
 
-    uses = []
-    for x_mm, y_mm in panel_layout.unit_positions:
-        tx = x_mm - vx
-        ty = (ph - y_mm - uh) - vy
-        uses.append(
-            f'<use href="#_u" xlink:href="#_u" transform="translate({tx:.4f} {ty:.4f})"/>'
-        )
+    unit_w_px = max(1, round(uw * px_per_mm))
+    unit_h_px = max(1, round(uh * px_per_mm))
 
-    composite_svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
-        f'viewBox="0 0 {pw:.4f} {ph:.4f}">'
-        f'<rect width="{pw:.4f}" height="{ph:.4f}" fill="#060A06"/>'
-        f'<defs><g id="_u">{inner}</g></defs>'
-        f'{"".join(uses)}'
-        f'</svg>'
-    )
-
-    out_w = int(pw * px_per_mm)
-    out_h = int(ph * px_per_mm)
+    # Step 1: rasterize the single unit SVG
     try:
-        png_bytes = cairosvg.svg2png(
-            bytestring=composite_svg.encode('utf-8'),
-            output_width=out_w,
-            output_height=out_h,
+        unit_png_bytes = cairosvg.svg2png(
+            bytestring=svg_string.encode('utf-8'),
+            output_width=unit_w_px,
+            output_height=unit_h_px,
         )
-        return _png_to_data_url(png_bytes)
     except Exception:
         return ''
+
+    unit_img = Image.open(io.BytesIO(unit_png_bytes)).convert('RGBA')
+
+    # Step 2: create panel canvas (Y-down, background = #060A06)
+    panel_w_px = max(1, round(pw * px_per_mm))
+    panel_h_px = max(1, round(ph * px_per_mm))
+    panel_img = Image.new('RGBA', (panel_w_px, panel_h_px), (6, 10, 6, 255))
+
+    # Step 3: paste unit PNG at each position (pixel copy — milliseconds)
+    for x_mm, y_mm in panel_layout.unit_positions:
+        # x_mm, y_mm = bottom-left corner of unit in panel coords (Y-up)
+        # PNG is Y-down: top of unit = ph - y_mm - uh
+        px = round(x_mm * px_per_mm)
+        py = round((ph - y_mm - uh) * px_per_mm)
+        panel_img.paste(unit_img, (px, py))
+
+    # Step 4: encode to PNG bytes
+    buf = io.BytesIO()
+    panel_img.save(buf, format='PNG', optimize=False, compress_level=1)
+    return _png_to_data_url(buf.getvalue())
 
 
 def build_panel_pngs(rendered: 'RenderedODB') -> None:
@@ -746,7 +737,31 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                         for obj in gf.objects:
                             if isinstance(obj, Flash):
                                 _d = _ap_dim(obj.aperture)
-                                obj.aperture = CircleAperture(diameter=max(_d * _scale, 0.05), unit=MM)
+                                obj.aperture = CircleAperture(diameter=max(_d * _scale, 0.02), unit=MM)
+                        # Recompute max after mils correction
+                        _dims = [_ap_dim(obj.aperture) for obj in gf.objects if isinstance(obj, Flash)]
+                        _max_ap = max(_dims) if _dims else 0.0
+
+                # Density-based overlap correction: if circles physically overlap
+                # (diameter > estimated inter-via spacing), scale down to non-overlapping.
+                # This catches layers where the ODB++ stores capture-pad size instead of
+                # drill-hole size (e.g. 2F-3F stores 30-mil pads, not 4-mil holes).
+                if _dims and len(_dims) >= 10:
+                    _bb_drill = gf.bounding_box(MM)
+                    _area = (abs(_bb_drill[1][0] - _bb_drill[0][0]) *
+                             abs(_bb_drill[1][1] - _bb_drill[0][1]))
+                    if _area > 0.01:
+                        _est_spacing = (_area / len(_dims)) ** 0.5
+                        if _max_ap > _est_spacing * 0.9:
+                            # Circles overlap → scale to 25% of estimated spacing
+                            _sf = (0.25 * _est_spacing) / _max_ap
+                            for obj in gf.objects:
+                                if isinstance(obj, Flash):
+                                    _d = _ap_dim(obj.aperture)
+                                    obj.aperture = CircleAperture(
+                                        diameter=max(_d * _sf, 0.02), unit=MM
+                                    )
+
                 # panel-scale position clipping happens post-render once board_bounds is known
             return name, ltype, gf, stats, None
 
