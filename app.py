@@ -459,8 +459,9 @@ with st.sidebar:
 
             color_mode = st.selectbox(
                 "Color Mode",
-                ['by_type', 'by_buildup', 'by_severity'],
-                format_func=lambda x: x.replace('_', ' ').title(),
+                ['by_type', 'by_verification', 'by_buildup', 'by_severity'],
+                format_func=lambda x: {'by_type': 'By Defect Type', 'by_verification': 'By Verification',
+                                       'by_buildup': 'By Buildup', 'by_severity': 'By Severity'}.get(x, x),
                 key='color_mode_select',
             )
 

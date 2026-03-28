@@ -531,6 +531,9 @@ def _add_defect_traces(
         filtered['_SEVERITY'] = filtered['DEFECT_TYPE'].map(severity_map)
         group_col = '_SEVERITY'
         palette = ['#4CAF50', '#FFEB3B', '#FF9800', '#F44336']  # green→yellow→orange→red
+    elif config.color_mode == 'by_verification' and 'VERIFICATION' in filtered.columns:
+        group_col = 'VERIFICATION'
+        palette = DEFECT_TYPE_COLORS
     else:
         group_col = 'DEFECT_TYPE'
         palette = DEFECT_TYPE_COLORS
