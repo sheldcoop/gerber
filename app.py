@@ -1003,7 +1003,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         def _layer_sort_key(name_lyr_pair):
             return _LAYER_Z.get(name_lyr_pair[1].layer_type, 1)
 
-        def _layer_opacity(lyr_type, multi):
+        def _layer_opacity(layer_name, lyr_type, multi):
+            # Sidebar slider takes priority; fall back to per-type defaults
+            slider_val = st.session_state.get(f"opacity_{layer_name}")
+            if slider_val is not None:
+                return float(slider_val)
             d = _LAYER_OPACITY_MULTI if multi else _LAYER_OPACITY_SINGLE
             return d.get(lyr_type, 0.70 if multi else 0.85)
         st.markdown("### 🗺️ Commonality — Defect Superposition")
@@ -1067,7 +1071,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                             sizex=_lyr_b_na[2] - _lyr_b_na[0],
                             sizey=_lyr_b_na[3] - _lyr_b_na[1],
                             sizing="stretch", layer="below",
-                            opacity=_layer_opacity(_na_l.layer_type, _is_multi_na),
+                            opacity=_layer_opacity(_na_n, _na_l.layer_type, _is_multi_na),
                         ))
 
                     # Layer label — show all active names
@@ -1276,7 +1280,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                     sizex=_lyr_b_em[2] - _lyr_b_em[0],
                                     sizey=_lyr_b_em[3] - _lyr_b_em[1],
                                     sizing="stretch", layer="below",
-                                    opacity=_layer_opacity(_em_l.layer_type, _is_multi_em),
+                                    opacity=_layer_opacity(_em_n, _em_l.layer_type, _is_multi_em),
                                 ))
                             _em_lbl = " + ".join(n for n, _ in _em_checked)
                             # Layer name label (top-centre green)
@@ -1389,7 +1393,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                 x=_im_x, y=_im_y,
                                 sizex=_im_w, sizey=_im_h,
                                 sizing="stretch", layer="below",
-                                opacity=_layer_opacity(_cm_cam_lyr.layer_type, _is_multi_cm),
+                                opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
                             ))
                         # Lock viewport to cell dimensions (same as green rect and SVG placement)
                         from visualizer import _apply_layout as _cm_apply_layout
