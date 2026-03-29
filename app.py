@@ -1238,6 +1238,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         ]
 
                         _is_multi_cm = len(_cm_cam_layers) > 1
+                        _active_layer_name = _cm_cam_layers[0] if _cm_cam_layers else None
                         for _cm_cam_ln in _cm_cam_layers:
                             _cm_cam_lyr = _rendered_cm.layers.get(_cm_cam_ln)
                             if not _cm_cam_lyr:
@@ -1269,15 +1270,137 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         from visualizer import _apply_layout as _cm_apply_layout
                         _cm_apply_layout(_cm_fig, _cm_cfg)
 
-                    # Unit bounding rectangle
-                    _cm_fig.add_shape(
-                        type="rect",
-                        x0=0, y0=0,
-                        x1=_cam_cell_w, y1=_cam_cell_h,
-                        line=dict(color="rgba(0,220,130,0.9)", width=2),
-                        fillcolor="rgba(0,0,0,0)",
-                        layer="above",
+                    # ── Subtle mm grid ────────────────────────────────────────
+                    _grid_step = 5.0  # 5mm grid
+                    import math as _math
+                    _gx = _grid_step
+                    while _gx < _cam_cell_w:
+                        _cm_fig.add_shape(type="line",
+                            x0=_gx, y0=0, x1=_gx, y1=_cam_cell_h,
+                            line=dict(color="rgba(255,255,255,0.06)", width=1),
+                            layer="below")
+                        _gx += _grid_step
+                    _gy = _grid_step
+                    while _gy < _cam_cell_h:
+                        _cm_fig.add_shape(type="line",
+                            x0=0, y0=_gy, x1=_cam_cell_w, y1=_gy,
+                            line=dict(color="rgba(255,255,255,0.06)", width=1),
+                            layer="below")
+                        _gy += _grid_step
+
+
+                    # ── Dimension annotations (width × height) ────────────────
+                    _cm_fig.add_annotation(
+                        x=_cam_cell_w / 2, y=-_cam_cell_h * 0.045,
+                        text=f"W: {_cam_cell_w:.2f} mm",
+                        showarrow=False,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
                     )
+                    _cm_fig.add_annotation(
+                        x=-_cam_cell_w * 0.045, y=_cam_cell_h / 2,
+                        text=f"H: {_cam_cell_h:.2f} mm",
+                        showarrow=False, textangle=-90,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
+                    )
+
+                    # ── Layer name label (top-centre, green) ─────────────────
+                    if _active_layer_name:
+                        _cm_fig.add_annotation(
+                            x=_cam_cell_w / 2, y=_cam_cell_h + _cam_cell_h * 0.04,
+                            text=f"Layer: {_active_layer_name}",
+                            showarrow=False, xanchor="center", yanchor="bottom",
+                            font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
+                            xref="x", yref="y",
+                        )
+
+                    # ── Hotspot ring (densest cluster centre) ─────────────────
+                    if len(_cm_plot) >= 5:
+                        try:
+                            from sklearn.neighbors import KernelDensity
+                            import numpy as _np2
+                            _hs_xy = _cm_plot[['ALIGNED_X', 'ALIGNED_Y']].dropna().values
+                            if len(_hs_xy) >= 5:
+                                _kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
+                                _kde.fit(_hs_xy)
+                                _nx, _ny = 40, 40
+                                _gxv = _np2.linspace(0, _cam_cell_w, _nx)
+                                _gyv = _np2.linspace(0, _cam_cell_h, _ny)
+                                _gxx, _gyy = _np2.meshgrid(_gxv, _gyv)
+                                _grid_pts = _np2.column_stack([_gxx.ravel(), _gyy.ravel()])
+                                _dens = _np2.exp(_kde.score_samples(_grid_pts)).reshape(_ny, _nx)
+                                _peak_idx = _np2.unravel_index(_dens.argmax(), _dens.shape)
+                                _hs_cx = float(_gxv[_peak_idx[1]])
+                                _hs_cy = float(_gyv[_peak_idx[0]])
+                                _hs_r  = min(_cam_cell_w, _cam_cell_h) * 0.06
+                                _cm_fig.add_shape(type="circle",
+                                    x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
+                                    x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
+                                    line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
+                                    fillcolor="rgba(255,80,80,0.08)", layer="above")
+                                _cm_fig.add_annotation(
+                                    x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
+                                    text="hotspot", showarrow=False,
+                                    font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
+                                    xref="x", yref="y",
+                                )
+                        except Exception:
+                            pass  # sklearn not available or not enough data
+
+                    # ── Heatmap toggle ────────────────────────────────────────
+                    _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
+                                              help="Overlay a 2D defect density heatmap instead of individual dots",
+                                              key="cm_heatmap_toggle")
+                    if _show_heatmap and len(_cm_plot) >= 3:
+                        try:
+                            import numpy as _np3
+                            _hm_x = _cm_plot['ALIGNED_X'].dropna().values
+                            _hm_y = _cm_plot['ALIGNED_Y'].dropna().values
+                            _hm_nx, _hm_ny = 60, 60
+                            _hm_gx = _np3.linspace(0, _cam_cell_w, _hm_nx)
+                            _hm_gy = _np3.linspace(0, _cam_cell_h, _hm_ny)
+                            _hm_z, _, _ = _np3.histogram2d(_hm_y, _hm_x,
+                                bins=[_hm_ny, _hm_nx],
+                                range=[[0, _cam_cell_h], [0, _cam_cell_w]])
+                            from scipy.ndimage import gaussian_filter as _gf
+                            _hm_z = _gf(_hm_z.astype(float), sigma=2.0)
+                            _cm_fig.add_trace(go.Heatmap(
+                                z=_hm_z,
+                                x=_hm_gx, y=_hm_gy,
+                                colorscale='Hot',
+                                opacity=0.55,
+                                showscale=False,
+                                hoverinfo='skip',
+                            ))
+                        except Exception:
+                            st.warning("Heatmap requires scipy. Install with: pip install scipy")
+
+                    # ── "N defects from M units" subtitle ────────────────────
+                    _n_def = len(_cm_plot)
+                    _n_units = len(_cm_sel_units)
+                    _cm_fig.update_layout(
+                        title=dict(
+                            text=f"{_n_def} defects · {_n_units} units · avg {_n_def/_n_units:.1f}/unit",
+                            font=dict(color="rgba(180,180,180,0.8)", size=12, family="monospace"),
+                            x=0.5, xanchor="center",
+                        )
+                    )
+
+                    _export_col, _spacer = st.columns([1, 4])
+                    with _export_col:
+                        try:
+                            from export import export_current_view
+                            _cm_png = export_current_view(_cm_fig, fmt='png', scale=3)
+                            st.download_button(
+                                "📷 Export PNG",
+                                data=_cm_png,
+                                file_name="commonality_unit.png",
+                                mime="image/png",
+                                width="stretch",
+                            )
+                        except Exception:
+                            st.button("📷 Export PNG (kaleido required)", disabled=True, width="stretch")
 
                     st.plotly_chart(
                         _cm_fig,
