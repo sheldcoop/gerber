@@ -31,7 +31,7 @@ from alignment import (
     get_debug_info, AlignmentResult,
     compute_alignment_cached, apply_alignment_cached, _dict_to_alignment_result,
     compute_dataframe_hash,
-    calculate_physical_unit_origin, get_panel_quadrant_bounds,
+    get_panel_quadrant_bounds,
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
 from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
@@ -350,34 +350,10 @@ with st.sidebar:
             else:
                 valid_cols = list(range(quad_cols * 2))
         
-            unit_row_opts = ['All'] + [int(r) for r in valid_rows]
-            unit_col_opts = ['All'] + [int(c) for c in valid_cols]
-
             if 'manual_offset_x' not in st.session_state:
                 st.session_state['manual_offset_x'] = 0.0
             if 'manual_offset_y' not in st.session_state:
                 st.session_state['manual_offset_y'] = 0.0
-
-            # --- Phase 2 FIX: consume pending click-to-inspect navigation BEFORE
-            # the selectbox widgets are instantiated. Writing to a widget-bound key
-            # after the widget renders raises StreamlitAPIException, so we do it here.
-            if st.session_state.get('_pending_nav'):
-                prow = st.session_state.pop('_pending_row', None)
-                pcol = st.session_state.pop('_pending_col', None)
-                st.session_state.pop('_pending_nav')
-                if prow is not None and prow in unit_row_opts:
-                    st.session_state['sel_unit_row'] = prow
-                if pcol is not None and pcol in unit_col_opts:
-                    st.session_state['sel_unit_col'] = pcol
-
-            col3, col4 = st.columns(2)
-            with col3:
-                unit_row = st.selectbox("Unit Row", unit_row_opts, key='sel_unit_row')
-            with col4:
-                unit_col = st.selectbox("Unit Col", unit_col_opts, key='sel_unit_col')
-            
-            unit_row_val = None if unit_row == 'All' else unit_row
-            unit_col_val = None if unit_col == 'All' else unit_col
 
             col1, col2 = st.columns(2)
             with col1:
@@ -388,8 +364,6 @@ with st.sidebar:
             st.session_state['align_args'] = {
                 'manual_offset_x': offset_x,
                 'manual_offset_y': offset_y,
-                'unit_row': unit_row_val,
-                'unit_col': unit_col_val,
             }
 
         st.divider()
@@ -683,7 +657,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🔬 Single Unit Inspection", "🗺️ Commonality", "🎯 Calibration Wizard"]
+    _tabs = ["🔭 Panel Overview", "🗺️ Commonality", "🎯 Calibration Wizard"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -917,10 +891,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
             )
             
-            # --- Phase 2: Click-To-Inspect ---
-            # Fix: Cannot write to widget-bound keys (sel_unit_row/col) after widgets
-            # are rendered. Write to unbound proxy keys; the sidebar consumes them
-            # BEFORE the selectbox widgets are instantiated on the next rerun.
+            # --- Click event handling ---
             sel = event.selection if (event and hasattr(event, 'selection')) else {}
             point_indices = sel.get('point_indices', [])
             if point_indices:
@@ -929,23 +900,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 uy = clicked_row.get('UNIT_INDEX_Y')
 
                 if ux is not None and uy is not None:
-                    # Write to PROXY keys, NOT the widget-bound keys
-                    st.session_state['_pending_row'] = int(uy)
-                    st.session_state['_pending_col'] = int(ux)
-                    st.session_state['_pending_nav'] = True
-                    # _pending_view is consumed BEFORE the radio renders on next rerun
-                    st.session_state['_pending_view'] = "🔬 Single Unit Inspection"
-
-                    # Pre-compute and store the physical offset
-                    ox, oy = calculate_physical_unit_origin(
-                        int(uy), int(ux),
-                        panel_rows_per_quad=st.session_state.get('quad_rows_input', 6),
-                        panel_cols_per_quad=st.session_state.get('quad_cols_input', 6),
-                        dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
-                        dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
-                    )
-                    st.session_state['manual_offset_x'] = float(round(ox, 3))
-                    st.session_state['manual_offset_y'] = float(round(oy, 3))
                     st.rerun()
 
         elif st.session_state.get('rendered_odb') and st.session_state.get('bg_source') == 'CAM (Gerbonara)':
@@ -999,300 +953,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
         else:
             st.info("Upload AOI defect data to view the Panel Map.")
-
-    elif view_mode == "🔬 Single Unit Inspection":
-        # Build overlay config from sidebar controls
-        config = OverlayConfig()
-        config.offset_x = 0.0
-        config.offset_y = 0.0
-
-        # ── Use the same Commonality alignment when TGZ + unit selected ─────
-        _sui_unit_row = align_args.get('unit_row')
-        _sui_unit_col = align_args.get('unit_col')
-        _sui_rodb     = st.session_state.get('rendered_odb')
-        _sui_use_cm_align = (
-            _sui_unit_row is not None and _sui_unit_col is not None
-            and _sui_rodb and _sui_rodb.panel_layout and _sui_rodb.layers
-            and aoi and aoi.has_data
-            and 'X_MM' in aoi.all_defects.columns
-            and 'UNIT_INDEX_X' in aoi.all_defects.columns
-        )
-
-        if _sui_use_cm_align:
-            _sui_first_lyr = next(
-                (l for l in _sui_rodb.layers.values() if l.layer_type != 'drill'),
-                next(iter(_sui_rodb.layers.values()))
-            )
-            # IMPORTANT: use unit_positions (display/panel-absolute), NOT
-            # unit_positions_raw. Raw positions are in ODB++ centered coords
-            # (negative values, e.g. -207mm). AOI X_MM/Y_MM are panel-absolute
-            # (positive, 0→510mm). Only display positions share the same frame.
-            _sui_disp_pos = tuple(_sui_rodb.panel_layout.unit_positions)
-            _sui_origins, _sui_cell_w, _sui_cell_h = _compute_cm_geometry(
-                unit_positions=_sui_disp_pos,
-                first_layer_bounds=tuple(_sui_first_lyr.bounds),
-            )
-
-            # Normalise UNIT_INDEX to 0-based (handles 1-based AOI machines)
-            _min_iy = int(aoi.all_defects['UNIT_INDEX_Y'].min())
-            _min_ix = int(aoi.all_defects['UNIT_INDEX_X'].min())
-            _ri = int(_sui_unit_row) - _min_iy
-            _ci = int(_sui_unit_col) - _min_ix
-            _sui_origin = _sui_origins.get((_ri, _ci), (0.0, 0.0))
-
-            # Filter to selected unit only
-            _sui_src = aoi.all_defects.copy()
-            _bu_sui = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-            if _bu_sui and 'BUILDUP' in _sui_src.columns:
-                _sui_src = _sui_src[_sui_src['BUILDUP'].isin(_bu_sui)]
-            _sui_src = _sui_src[
-                (_sui_src['UNIT_INDEX_Y'].astype(int) == int(_sui_unit_row)) &
-                (_sui_src['UNIT_INDEX_X'].astype(int) == int(_sui_unit_col))
-            ].copy()
-
-            if _sui_src.empty:
-                st.warning(
-                    f"No defects found for unit (row={_sui_unit_row}, col={_sui_unit_col}). "
-                    f"Available UNIT_INDEX_Y values: {sorted(aoi.all_defects['UNIT_INDEX_Y'].dropna().unique().astype(int).tolist())[:10]}"
-                )
-
-            # Subtract unit origin → local CAM coords [0…cell_w] × [0…cell_h]
-            _sui_src['ALIGNED_X'] = _sui_src['X_MM'] - _sui_origin[0]
-            _sui_src['ALIGNED_Y'] = _sui_src['Y_MM'] - _sui_origin[1]
-            vrs_df = _sui_src
-            config.board_bounds = (-1.0, -1.0, _sui_cell_w + 1.0, _sui_cell_h + 1.0)
-            _sui_cam_bounds = _sui_first_lyr.bounds  # used below for SVG placement
-        else:
-            vrs_df = defect_df.copy()
-            _sui_use_cm_align = False
-            _sui_cam_bounds = None
-
-        if not vrs_df.empty:
-            dtype_sel = st.session_state.get('defect_type_select')
-            bu_sel    = st.session_state.get('buildup_filter_select')
-            side_sel  = st.session_state.get('side_filter_select', 'Both')
-            if dtype_sel and 'DEFECT_TYPE' in vrs_df.columns:
-                vrs_df = vrs_df[vrs_df['DEFECT_TYPE'].isin(dtype_sel)]
-            if bu_sel and 'BUILDUP' in vrs_df.columns:
-                vrs_df = vrs_df[vrs_df['BUILDUP'].isin(bu_sel)]
-            if side_sel != 'Both' and 'SIDE' in vrs_df.columns:
-                vrs_df = vrs_df[vrs_df['SIDE'] == ('F' if side_sel == 'Front' else 'B')]
-        
-        # VRS Defect Stepper Console (with priority scoring)
-        vrs_col1, vrs_col2, vrs_col3, vrs_col4, vrs_col5 = st.columns([3, 1.5, 1.5, 3, 2])
-        with vrs_col1:
-            vrs_mode = st.toggle("🎯 VRS Auto-Zoom Mode", value=False, help="Enable Defect Review Station mode to auto-pan cameras")
-
-        num_def = len(vrs_df)
-        if vrs_mode and num_def > 0:
-            # Sort defects by priority score (highest first)
-            from scoring import score_defect_priority
-            vrs_df = vrs_df.copy()
-            vrs_df['_PRIORITY'] = score_defect_priority(vrs_df)
-            vrs_df = vrs_df.sort_values('_PRIORITY', ascending=False).reset_index(drop=True)
-
-            if 'vrs_idx' not in st.session_state:
-                st.session_state['vrs_idx'] = 0
-
-            def prev_def(): st.session_state['vrs_idx'] = max(0, st.session_state['vrs_idx'] - 1)
-            def next_def(): st.session_state['vrs_idx'] = min(num_def - 1, st.session_state['vrs_idx'] + 1)
-            def jump_top(): st.session_state['vrs_idx'] = 0
-
-            # Safeguard boundary if filtering reduced the total defects
-            st.session_state['vrs_idx'] = min(max(0, st.session_state['vrs_idx']), num_def - 1)
-            idx = st.session_state['vrs_idx']
-
-            vrs_col2.button("⏪ Prev", on_click=prev_def, width="stretch")
-            vrs_col3.button("Next ⏩", on_click=next_def, width="stretch")
-
-            # Show defect info with priority score
-            active_def = vrs_df.iloc[idx]
-            priority = active_def.get('_PRIORITY', 0)
-            dtype = active_def.get('DEFECT_TYPE', '?')
-            vrs_col4.markdown(f"**{idx + 1}/{num_def}** — {dtype} (score: {priority:.0f})")
-            vrs_col5.button("🔝 Jump to top", on_click=jump_top, width="stretch")
-
-            # Extract active defect coordinates
-            ax = active_def['ALIGNED_X']
-            ay = active_def['ALIGNED_Y']
-
-            config.active_defect_x = ax
-            config.active_defect_y = ay
-        elif vrs_mode:
-            vrs_col4.markdown("**No defects visible**")
-
-        st.divider()
-
-        # Layer visibility (from checkboxes)
-        if parsed and parsed.layers:
-            config.visible_layers = [
-                name for name in parsed.layers
-                if st.session_state.get(f"vis_{name}", True)
-            ]
-            config.layer_opacities = {
-                name: st.session_state.get(f"opacity_{name}", 0.5)
-                for name in parsed.layers
-            }
-
-        # Defect filters
-        if aoi and aoi.has_data:
-            config.side_filter = st.session_state.get('side_filter_select', 'Both')
-            config.buildup_filter = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-            config.defect_types = st.session_state.get('defect_type_select', aoi.defect_types)
-            config.marker_style = st.session_state.get('marker_style_select', 'dot')
-            config.color_mode = st.session_state.get('color_mode_select', 'by_type')
-
-        # Determine board bounds for axis range
-        # When CM alignment is active, board_bounds already set to cell dims above
-        if _sui_use_cm_align:
-            pass  # already set to (-1, -1, cell_w+1, cell_h+1)
-        elif vrs_mode and num_def > 0 and config.active_defect_x is not None:
-            # Override bounding box to zoom heavily onto the active defect
-            zoom_radius = 2.0  # mm (camera perfectly centered on the defect)
-            config.board_bounds = (
-                config.active_defect_x - zoom_radius,
-                config.active_defect_y - zoom_radius,
-                config.active_defect_x + zoom_radius,
-                config.active_defect_y + zoom_radius
-            )
-            # Frustum Culling Geometry Box (Matches camera + 1mm bleed buffer)
-            config.crop_bounds = (
-                config.active_defect_x - 3.0,
-                config.active_defect_y - 3.0,
-                config.active_defect_x + 3.0,
-                config.active_defect_y + 3.0
-            )
-        elif _rendered_odb_bounds := st.session_state.get('rendered_odb'):
-            # Use CAM bounds (Gerbonara — more accurate than Shapely)
-            ox = config.offset_x
-            oy = config.offset_y
-            bb = _rendered_odb_bounds.board_bounds
-            config.board_bounds = (bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy)
-        elif parsed and parsed.layers:
-            # Shift the bounding box camera so it follows the physically offset board
-            ox = config.offset_x
-            oy = config.offset_y
-
-            # If bounded directly to a Single Unit, aggressively cull all neighboring Panel trace arrays!
-            if align_args.get('unit_row') is not None and align_args.get('unit_col') is not None:
-                config.crop_bounds = (ox - 2.0, oy - 2.0, ox + 50.0, oy + 50.0)
-                config.board_bounds = config.crop_bounds
-            else:
-                bb = parsed.board_bounds
-                config.board_bounds = (bb[0] + ox, bb[1] + oy, bb[2] + ox, bb[3] + oy)
-
-        elif aoi and aoi.has_data:
-            config.board_bounds = aoi.coord_bounds
-
-        # Build and render figure
-        _use_cam_bg = True
-        _rendered_odb = st.session_state.get('rendered_odb')
-
-        if not vrs_df.empty:
-            fig = build_defect_only_figure(vrs_df, config)
-        else:
-            fig = go.Figure()
-            _apply_layout(fig, config)
-
-        # ── CAM (Gerbonara) SVG background ───────────────────────────────
-        if _use_cam_bg and _rendered_odb and _rendered_odb.layers and fig is not None:
-            # Use Layer Controls checkboxes to determine which CAM layers to show
-            _cam_layers_to_show = [
-                name for name in _rendered_odb.layers
-                if st.session_state.get(f"vis_{name}", False)
-            ]
-            # Fallback: if no layers selected, show first available
-            if not _cam_layers_to_show:
-                _cam_layers_to_show = list(_rendered_odb.layers.keys())[:1]
-
-            # Use pre-cached data URLs — zero re-rendering on toggle
-            _is_multi = len(_cam_layers_to_show) > 1
-
-            for _ci, _cam_ln in enumerate(_cam_layers_to_show):
-                _cam_lyr = _rendered_odb.layers.get(_cam_ln)
-                if not _cam_lyr:
-                    continue
-
-                # Instant: just pick the right pre-cached data URL
-                if _is_multi and _cam_lyr.color_svg_urls:
-                    _data_url = next(iter(_cam_lyr.color_svg_urls.values()))
-                else:
-                    _data_url = _cam_lyr.svg_data_url
-
-                _cb = _cam_lyr.bounds
-
-                if _sui_use_cm_align:
-                    # Same as Commonality: shift SVG so unit lower-left = (0, 0)
-                    _im_x = 0.0
-                    _im_y = _cb[3] - _cb[1]   # = unit height
-                    _im_w = _cb[2] - _cb[0]
-                    _im_h = _cb[3] - _cb[1]
-                else:
-                    ox = config.offset_x
-                    oy = config.offset_y
-                    _im_x = _cb[0] + ox
-                    _im_y = _cb[3] + oy
-                    _im_w = _cb[2] - _cb[0]
-                    _im_h = _cb[3] - _cb[1]
-
-                fig.add_layout_image(dict(
-                    source=_data_url,
-                    xref="x", yref="y",
-                    x=_im_x,
-                    y=_im_y,
-                    sizex=_im_w,
-                    sizey=_im_h,
-                    sizing="stretch",
-                    layer="below",
-                    opacity=0.95 if not _is_multi else 0.7,
-                ))
-
-            # Re-apply layout after CAM image to lock viewport (mirrors Commonality)
-            if _sui_use_cm_align:
-                _apply_layout(fig, config)
-            elif not (vrs_mode and num_def > 0) and config.board_bounds == (0, 0, 0, 0):
-                _rbb = _rendered_odb.board_bounds
-                ox = config.offset_x
-                oy = config.offset_y
-                config.board_bounds = (_rbb[0] + ox, _rbb[1] + oy, _rbb[2] + ox, _rbb[3] + oy)
-                _apply_layout(fig, config)
-
-        if fig:
-            st.plotly_chart(
-                fig,
-                width='stretch',
-                config={
-                    'scrollZoom': True,
-                    'displayModeBar': True,
-                    'modeBarButtonsToAdd': ['drawrect', 'eraseshape'],
-                    'displaylogo': False,
-                },
-            )
-
-            # ── Export Pipeline ──────────────────────────────────────────────
-            from export import export_current_view, export_unit_csv
-            exp_col1, exp_col2, exp_col3 = st.columns([2, 2, 6])
-            with exp_col1:
-                try:
-                    img_bytes = export_current_view(fig, fmt='png', scale=3)
-                    st.download_button(
-                        "📷 Export PNG",
-                        data=img_bytes,
-                        file_name="defect_overlay.png",
-                        mime="image/png",
-                        width="stretch",
-                    )
-                except Exception:
-                    st.button("📷 Export PNG (kaleido required)", disabled=True, width="stretch")
-            with exp_col2:
-                csv_str = export_unit_csv(defect_df)
-                st.download_button(
-                    "📊 Export CSV",
-                    data=csv_str,
-                    file_name="defect_summary.csv",
-                    mime="text/csv",
-                    width="stretch",
-                )
 
     # ── Commonality / Superposition View ────────────────────────────────────
     elif view_mode == "🗺️ Commonality":
@@ -1423,13 +1083,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _cam_min_x = _first_lyr_cm.bounds[0]
                     _cam_min_y = _first_lyr_cm.bounds[1]
                 else:
-                    # Fallback: manual geometry (uses user-set gap / grid params)
-                    _cm_origins = {
-                        (r, c): calculate_physical_unit_origin(
-                            r, c, _q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm
-                        )
-                        for r, c in _cm_sel_units
-                    }
+                    # No TGZ loaded — origins unknown, defects will show at raw coords
+                    _cm_origins = {}
 
                 # ── Scope-filter AOI data (cached) ────────────────────────────
                 _bu_cm   = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)

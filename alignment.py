@@ -15,7 +15,7 @@ diagnose misalignment issues.
 
 Panel geometry mirrors the faster-aoi GeometryEngine exactly:
   - Fixed frame: 510 x 515 mm
-  - Fixed margins: 13.5 mm X, 15.0 mm Y
+  - Fixed margins: 13.5 mm X, 15.0 mm Y (inlined defaults, no named constants)
   - Fixed structural gap: 3.0 mm
   - User-given dynamic gap: dyn_gap_x / dyn_gap_y
   - Always 2×2 quadrant grid (Q1=top-left, Q2=bottom-left, Q3=bottom-right, Q4=top-right)
@@ -38,8 +38,6 @@ import streamlit as st
 
 FRAME_WIDTH:      float = 510.0
 FRAME_HEIGHT:     float = 515.0
-FIXED_OFFSET_X:   float = 13.5
-FIXED_OFFSET_Y:   float = 15.0
 FIXED_GAP_X:      float = 3.0
 FIXED_GAP_Y:      float = 3.0
 INTER_UNIT_GAP:   float = 0.25
@@ -113,8 +111,8 @@ def calculate_geometry(
     dyn_gap_y: float,
     frame_width: float = FRAME_WIDTH,
     frame_height: float = FRAME_HEIGHT,
-    fixed_offset_x: float = FIXED_OFFSET_X,
-    fixed_offset_y: float = FIXED_OFFSET_Y,
+    fixed_offset_x: float = 13.5,
+    fixed_offset_y: float = 15.0,
     fixed_gap_x: float = FIXED_GAP_X,
     fixed_gap_y: float = FIXED_GAP_Y,
     inter_unit_gap: float = INTER_UNIT_GAP,
@@ -857,8 +855,8 @@ def calculate_physical_unit_origin(
     # Legacy kwargs kept for backward compat but ignored (constants now embedded)
     frame_width: float = FRAME_WIDTH,
     frame_height: float = FRAME_HEIGHT,
-    fixed_offset_x: float = FIXED_OFFSET_X,
-    fixed_offset_y: float = FIXED_OFFSET_Y,
+    fixed_offset_x: float = 13.5,
+    fixed_offset_y: float = 15.0,
     fixed_gap_x: float = FIXED_GAP_X,
     fixed_gap_y: float = FIXED_GAP_Y,
     inter_unit_gap: float = INTER_UNIT_GAP,
@@ -914,8 +912,8 @@ def get_panel_quadrant_bounds(
     dyn_gap_y: float = 3.5,
     frame_width: float = FRAME_WIDTH,
     frame_height: float = FRAME_HEIGHT,
-    fixed_offset_x: float = FIXED_OFFSET_X,
-    fixed_offset_y: float = FIXED_OFFSET_Y,
+    fixed_offset_x: float = 13.5,
+    fixed_offset_y: float = 15.0,
     fixed_gap_x: float = FIXED_GAP_X,
     fixed_gap_y: float = FIXED_GAP_Y,
 ) -> dict[str, tuple[float, float, float, float]]:
