@@ -159,12 +159,24 @@ with st.sidebar:
         help="Compressed ODB++ archive exported from InCam Pro",
     )
 
-    aoi_files = st.file_uploader(
-        "AOI Excel Files (.xlsx)",
-        type=['xlsx', 'xls'],
-        accept_multiple_files=True,
-        help="Orbotech AOI defect data. Filename should follow BU-XXF / BU-XXB pattern",
-    )
+    _aoi_key = st.session_state.get('_aoi_upload_key', 0)
+    _aoi_col, _aoi_clear_col = st.columns([5, 1])
+    with _aoi_col:
+        aoi_files = st.file_uploader(
+            "AOI Excel Files (.xlsx)",
+            type=['xlsx', 'xls'],
+            accept_multiple_files=True,
+            help="Orbotech AOI defect data. Filename should follow BU-XXF / BU-XXB pattern",
+            key=f"aoi_uploader_{_aoi_key}",
+        )
+    with _aoi_clear_col:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("🗑️ Reset", key="aoi_clear_btn", help="Clear all uploaded AOI files",
+                     use_container_width=True):
+            st.session_state['_aoi_upload_key'] = _aoi_key + 1
+            for _k in ['aoi_dataset', 'needs_manual_side']:
+                st.session_state.pop(_k, None)
+            st.rerun()
 
     # Show filename-based buildup/side detection results
     if aoi_files:
@@ -1714,11 +1726,19 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 )
 
                 hm_col1, hm_col2 = st.columns(2)
-                hm_opacity  = hm_col1.slider("Heatmap Glow Opacity", 0.1, 1.0, 0.8, 0.05, key="hm_opac")
-                hm_contours = hm_col2.slider("Intensity Smoothing (Contours)", 10, 100, 30, 5, key="hm_cont")
-                if len(hm_fig.data) > 0 and hasattr(hm_fig.data[-1], 'ncontours'):
-                    hm_fig.data[-1].opacity  = hm_opacity
-                    hm_fig.data[-1].ncontours = hm_contours
+                hm_bin_opacity = hm_col1.slider(
+                    "Bin Layer Opacity", 0.1, 1.0, 0.85, 0.05, key="hm_opac",
+                    help="Opacity of the solid binned count layer (the precise layer).",
+                )
+                hm_kde_opacity = hm_col2.slider(
+                    "KDE Envelope Opacity", 0.0, 1.0, 0.5, 0.05, key="hm_kde_opac",
+                    help="Opacity of the smooth KDE overlay. Set to 0 to hide it.",
+                )
+                # Trace 0 = bin heatmap, trace 1 = KDE overlay (if scipy available)
+                if len(hm_fig.data) >= 1:
+                    hm_fig.data[0].opacity = hm_bin_opacity
+                if len(hm_fig.data) >= 2:
+                    hm_fig.data[1].opacity = hm_kde_opacity
 
                 st.plotly_chart(hm_fig, width='stretch',
                                 config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
