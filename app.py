@@ -657,7 +657,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🗺️ Commonality", "🎯 Calibration Wizard"]
+    _tabs = ["🔭 Panel Overview", "🗺️ Commonality"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -1549,232 +1549,202 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     )
                     _cm_s4.metric("Top Defect Type", _top_cm)
 
-    # ── Calibration Wizard ──────────────────────────────────────────────────
-    elif view_mode == "🎯 Calibration Wizard":
-        st.subheader("Fiducial Auto-Calibration Wizard")
-        st.markdown("""
-        **Instructions**: Click 3 fiducial points on the ODB++ render below, enter their
-        corresponding AOI machine coordinates, and the system computes the full affine
-        transform automatically. Store the calibration per machine ID.
-        """)
 
-        if parsed and parsed.layers:
-            from alignment import _align_affine
-
-            # Render ODB++ outline + fiducials for clicking
-            calib_fig = go.Figure()
-            outline_layer = next((l for l in parsed.layers.values() if l.layer_type == 'outline'), None)
-            if outline_layer:
-                from visualizer import _geometry_to_coords
-                for poly in outline_layer.polygons:
-                    px, py = _geometry_to_coords(poly)
-                    calib_fig.add_trace(go.Scatter(x=px, y=py, mode='lines',
-                        line=dict(color='gold', width=2), name='Board Outline', showlegend=False))
-
-            # Show known ODB++ fiducials
-            if parsed.fiducials:
-                fid_x = [f[0] for f in parsed.fiducials]
-                fid_y = [f[1] for f in parsed.fiducials]
-                calib_fig.add_trace(go.Scatter(
-                    x=fid_x, y=fid_y, mode='markers+text',
-                    marker=dict(size=15, color='cyan', symbol='diamond'),
-                    text=[f"F{i+1}" for i in range(len(parsed.fiducials))],
-                    textposition='top center',
-                    name='ODB++ Fiducials',
-                ))
-
-            bb = parsed.board_bounds
-            calib_fig.update_layout(
-                plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
-                font=dict(color='#e0e0e0'),
-                xaxis=dict(title='X (mm)', range=[bb[0]-5, bb[2]+5], scaleanchor='y'),
-                yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
-                height=500,
-            )
-            st.plotly_chart(calib_fig, width="stretch")
-
-            # Manual fiducial entry
-            st.subheader("Enter AOI Fiducial Coordinates")
-            n_fids = len(parsed.fiducials) if parsed.fiducials else 3
-            machine_id = st.text_input("Machine ID", value="AOI-01", key="calib_machine_id")
-
-            aoi_fid_entries = []
-            cols = st.columns(min(n_fids, 4))
-            for i in range(min(n_fids, 4)):
-                with cols[i]:
-                    st.caption(f"**Fiducial {i+1}**")
-                    if parsed.fiducials and i < len(parsed.fiducials):
-                        st.text(f"ODB++: ({parsed.fiducials[i][0]:.2f}, {parsed.fiducials[i][1]:.2f})")
-                    ax = st.number_input(f"AOI X{i+1} (mm)", value=0.0, key=f"calib_ax_{i}", format="%.3f")
-                    ay = st.number_input(f"AOI Y{i+1} (mm)", value=0.0, key=f"calib_ay_{i}", format="%.3f")
-                    aoi_fid_entries.append((ax, ay))
-
-            if st.button("Compute Calibration", type="primary"):
-                if parsed.fiducials and len(aoi_fid_entries) >= 2:
-                    n_use = min(len(parsed.fiducials), len(aoi_fid_entries))
-                    gerber_fids = parsed.fiducials[:n_use]
-                    aoi_fids = aoi_fid_entries[:n_use]
-
-                    # Check that AOI points are not all zeros
-                    if all(abs(x) < 1e-6 and abs(y) < 1e-6 for x, y in aoi_fids):
-                        st.error("All AOI coordinates are zero. Enter the machine-reported fiducial positions.")
-                    else:
-                        calib_result = _align_affine(gerber_fids, aoi_fids,
-                                                     parsed.board_bounds, parsed.board_bounds)
-                        st.success(f"Calibration computed: rotation={calib_result.rotation_deg:.4f}°, "
-                                   f"scale={calib_result.scale_x:.6f}")
-                        if calib_result.warnings:
-                            for w in calib_result.warnings:
-                                st.warning(w)
-
-                        # Store calibration per machine
-                        if 'calibrations' not in st.session_state:
-                            st.session_state['calibrations'] = {}
-                        st.session_state['calibrations'][machine_id] = {
-                            'matrix': calib_result.transform_matrix.tolist(),
-                            'rotation_deg': calib_result.rotation_deg,
-                            'scale_x': calib_result.scale_x,
-                            'scale_y': calib_result.scale_y,
-                        }
-                        st.info(f"Calibration stored for machine '{machine_id}'. "
-                                "It will be used automatically for subsequent panels on this machine.")
-                else:
-                    st.error("Need at least 2 ODB++ fiducials and 2 AOI fiducial entries.")
-
-            # Show stored calibrations
-            cals = st.session_state.get('calibrations', {})
-            if cals:
-                st.subheader("Stored Calibrations")
-                for mid, cal in cals.items():
-                    st.text(f"Machine '{mid}': rot={cal['rotation_deg']:.4f}°, "
-                            f"sx={cal['scale_x']:.6f}, sy={cal['scale_y']:.6f}")
-        else:
-            st.info("Upload an ODB++ archive to use the Calibration Wizard.")
-
-
-
-
-    # ---- Alignment & Coordinate Debug Panel ----
-    with st.expander("🔧 Alignment & Coordinate Debug", expanded=False):
-        if alignment:
-            debug = get_debug_info(alignment)
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Method", debug['method'].title())
-            col2.metric("Overlap", f"{debug['overlap_pct']:.1f}%")
-            col3.metric("Offset X", f"{debug['offset_x_mm']:.3f} mm")
-            col4.metric("Offset Y", f"{debug['offset_y_mm']:.3f} mm")
-
-            # Confidence and fiducial metrics
-            conf = debug.get('confidence', 0.0)
-            fids_used = debug.get('fiducials_used', 0)
-            mc1, mc2 = st.columns(2)
-            conf_color = "normal" if conf >= 0.5 else "off"
-            mc1.metric("Confidence", f"{conf:.0%}", delta=f"{fids_used} fiducials" if fids_used > 0 else "no fiducials")
-            if alignment.method == 'affine' and conf >= 0.5:
-                mc2.success("Fiducial auto-alignment active — manual offsets overridden")
-            elif alignment.method == 'offset':
-                mc2.info("Bounding-box offset alignment — provide fiducials for better accuracy")
-
-            if debug['rotation_deg'] != 0 or debug['scale_x'] != 1.0:
-                col5, col6 = st.columns(2)
-                col5.metric("Rotation", f"{debug['rotation_deg']:.4f}°")
-                col6.metric("Scale", f"{debug['scale_x']:.6f}")
-
-            # Warnings
-            for w in debug['warnings']:
-                st.warning(w, icon="⚠️")
-
-            # Bounds comparison
-            st.subheader("Coordinate Extents")
-            bounds_col1, bounds_col2, bounds_col3 = st.columns(3)
-
-            with bounds_col1:
-                st.caption("**ODB++ Bounds (mm)**")
-                gb = debug['gerber_bounds']
-                st.text(
-                    f"X: {gb['min_x']:.3f} → {gb['max_x']:.3f}\n"
-                    f"Y: {gb['min_y']:.3f} → {gb['max_y']:.3f}"
-                )
-
-            with bounds_col2:
-                st.caption("**AOI Bounds (Original mm)**")
-                ab = debug['aoi_bounds']
-                st.text(
-                    f"X: {ab['min_x']:.3f} → {ab['max_x']:.3f}\n"
-                    f"Y: {ab['min_y']:.3f} → {ab['max_y']:.3f}"
-                )
-
-            with bounds_col3:
-                st.caption("**AOI Bounds (Aligned mm)**")
-                if not defect_df.empty:
-                    ax = defect_df['ALIGNED_X']
-                    ay = defect_df['ALIGNED_Y']
-                    st.text(f"X: {ax.min():.3f} → {ax.max():.3f}\nY: {ay.min():.3f} → {ay.max():.3f}")
-
-            # Overlap Warning
-            overlap = debug['overlap_pct']
-            if overlap > 0:
-                st.success(f"Overlapping Regions: YES ({overlap:.1f}%)")
-            else:
-                st.error("Overlapping Regions: NO")
-
-            # ODB++ step/units info
-            if parsed:
-                st.caption(f"**Step**: `{parsed.step_name}` | **Units**: `{parsed.units}` | **Origin**: `x={parsed.origin_x}, y={parsed.origin_y}`")
-                if parsed.unknown_symbols:
-                    st.caption(f"**Unknown Symbols**: {', '.join(parsed.unknown_symbols)}")
-
-            # Full JSON debug
-            with st.expander("Raw Debug Data"):
-                st.json(debug)
-
-        elif aoi and aoi.has_data:
-            st.info("No ODB++ data loaded — showing raw AOI coordinates without alignment")
-            bounds = aoi.coord_bounds
-            st.text(
-                f"AOI X: {bounds[0]:.3f} → {bounds[2]:.3f} mm\n"
-                f"AOI Y: {bounds[1]:.3f} → {bounds[3]:.3f} mm"
-            )
 
     # ---- Defect Summary Panel ----
     if aoi and aoi.has_data:
         with st.expander("📊 Defect Summary", expanded=False):
-            summary = (
-                aoi.all_defects
-                .groupby(['BUILDUP', 'SIDE', 'DEFECT_TYPE'], observed=True)
-                .size()
-                .reset_index(name='COUNT')
-                .sort_values(['BUILDUP', 'SIDE', 'COUNT'], ascending=[True, True, False])
-            )
-            st.dataframe(
-                summary,
-                width="stretch",
-                hide_index=True,
-            )
+            import plotly.express as _px
 
-            # Quick stats
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Defects", len(aoi.all_defects))
-            col2.metric("Defect Types", len(aoi.defect_types))
-            col3.metric("Buildup Layers", len(aoi.buildup_numbers))
+            _ds_df = aoi.all_defects
+            _sc1, _sc2, _sc3 = st.columns(3)
+            _sc1.metric("Total Defects", f"{len(_ds_df):,}")
+            _sc2.metric("Defect Types", len(aoi.defect_types))
+            _sc3.metric("Buildup Layers", len(aoi.buildup_numbers))
+            st.divider()
+
+            _dc1, _dc2 = st.columns(2)
+
+            # Bar: defect count by type
+            with _dc1:
+                _by_type = (
+                    _ds_df.groupby('DEFECT_TYPE', observed=True)
+                    .size().reset_index(name='Count')
+                    .sort_values('Count', ascending=True)
+                )
+                _bar_fig = _px.bar(
+                    _by_type, x='Count', y='DEFECT_TYPE', orientation='h',
+                    title='Defects by Type',
+                    color='Count', color_continuous_scale='Reds',
+                )
+                _bar_fig.update_layout(
+                    plot_bgcolor='#000000', paper_bgcolor='#000000',
+                    font=dict(color='#cccccc'), showlegend=False,
+                    coloraxis_showscale=False, margin=dict(l=0, r=0, t=36, b=0), height=320,
+                )
+                st.plotly_chart(_bar_fig, width='stretch')
+
+            # Donut: front vs back
+            with _dc2:
+                _by_side = _ds_df.groupby('SIDE', observed=True).size().reset_index(name='Count')
+                _donut_fig = _px.pie(
+                    _by_side, values='Count', names='SIDE',
+                    title='Front vs Back', hole=0.55,
+                    color_discrete_sequence=['#00c87a', '#e05050'],
+                )
+                _donut_fig.update_layout(
+                    plot_bgcolor='#000000', paper_bgcolor='#000000',
+                    font=dict(color='#cccccc'), margin=dict(l=0, r=0, t=36, b=0), height=320,
+                )
+                st.plotly_chart(_donut_fig, width='stretch')
+
+            # Bar: defects per buildup layer
+            _by_bu = (
+                _ds_df.groupby(['BUILDUP', 'SIDE'], observed=True)
+                .size().reset_index(name='Count')
+                .sort_values('BUILDUP')
+            )
+            _bu_fig = _px.bar(
+                _by_bu, x='BUILDUP', y='Count', color='SIDE',
+                barmode='group', title='Defects per Buildup Layer',
+                color_discrete_map={'Front': '#00c87a', 'Back': '#e05050'},
+            )
+            _bu_fig.update_layout(
+                plot_bgcolor='#000000', paper_bgcolor='#000000',
+                font=dict(color='#cccccc'), margin=dict(l=0, r=0, t=36, b=0), height=280,
+            )
+            st.plotly_chart(_bu_fig, width='stretch')
+
+            # Cross-table: type × buildup
+            _cross = (
+                _ds_df.groupby(['DEFECT_TYPE', 'BUILDUP'], observed=True)
+                .size().unstack(fill_value=0)
+            )
+            st.caption("**Cross-table: Defect Type × Buildup**")
+            st.dataframe(_cross, width='stretch')
 
     # ---- Cluster Triage Panel ----
-    cluster_summary = st.session_state.get('_cluster_summary')
-    if cluster_summary is not None and not cluster_summary.empty:
-        with st.expander("🔬 Defect Cluster Triage", expanded=False):
-            st.caption("Clusters ranked by defect count. Click 'Inspect' to navigate to VRS stepper for that cluster.")
-            for i, crow in cluster_summary.iterrows():
-                cid = crow['cluster_id']
-                cnt = crow['defect_count']
-                dtype = crow['dominant_type']
-                pct = crow['dominant_pct']
-                bu = crow['buildup_info']
-                cx, cy = crow['centroid_x'], crow['centroid_y']
-                st.markdown(
-                    f"**Cluster {cid}**: {cnt} defects at ({cx}, {cy}) — "
-                    f"{pct:.0f}% {dtype}" + (f" — {bu}" if bu else "")
-                )
+    if aoi and aoi.has_data:
+        with st.expander("🔬 Cluster Triage", expanded=False):
+            import plotly.express as _px2
+            import numpy as _np_ct
+
+            _ct_df = aoi.all_defects.copy()
+            if 'ALIGNED_X' not in _ct_df.columns or 'ALIGNED_Y' not in _ct_df.columns:
+                st.info("Load AOI data with TGZ design to enable cluster triage.")
+            else:
+                _ct_xy = _ct_df[['ALIGNED_X', 'ALIGNED_Y']].dropna()
+                if len(_ct_xy) < 5:
+                    st.info("Not enough defects for cluster analysis.")
+                else:
+                    try:
+                        from sklearn.cluster import DBSCAN as _DBSCAN
+                        _labels = _DBSCAN(eps=1.5, min_samples=3).fit_predict(_ct_xy.values)
+                        _ct_df = _ct_df.loc[_ct_xy.index].copy()
+                        _ct_df['_cluster'] = _labels
+
+                        # Build cluster summary with severity score
+                        _rows = []
+                        for _cid in sorted(set(_labels)):
+                            if _cid == -1:
+                                continue
+                            _cl = _ct_df[_ct_df['_cluster'] == _cid]
+                            _cnt = len(_cl)
+                            _bu_spread = _cl['BUILDUP'].nunique() if 'BUILDUP' in _cl.columns else 1
+                            _cx = round(float(_cl['ALIGNED_X'].mean()), 2)
+                            _cy = round(float(_cl['ALIGNED_Y'].mean()), 2)
+                            _top_type = _cl['DEFECT_TYPE'].value_counts().idxmax() if 'DEFECT_TYPE' in _cl.columns else '—'
+                            _top_pct  = _cl['DEFECT_TYPE'].value_counts().iloc[0] / _cnt * 100
+                            # Severity: count × buildup spread (multi-layer clusters are more critical)
+                            _severity = round(_cnt * (1 + 0.5 * (_bu_spread - 1)), 1)
+                            _rows.append({
+                                'Cluster': _cid,
+                                'Defects': _cnt,
+                                'Severity ▼': _severity,
+                                'Layers': _bu_spread,
+                                'Top Type': f"{_top_type} ({_top_pct:.0f}%)",
+                                'Centroid X': _cx,
+                                'Centroid Y': _cy,
+                            })
+
+                        if not _rows:
+                            st.info("No clusters found with current thresholds.")
+                        else:
+                            _ct_summary = pd.DataFrame(_rows).sort_values('Severity ▼', ascending=False)
+                            _noise = int((_labels == -1).sum())
+                            _n_cl  = len(_rows)
+
+                            _cs1, _cs2, _cs3 = st.columns(3)
+                            _cs1.metric("Clusters Found", _n_cl)
+                            _cs2.metric("Clustered Defects", int((_labels != -1).sum()))
+                            _cs3.metric("Isolated (noise)", _noise)
+
+                            # Top callout
+                            _top = _ct_summary.iloc[0]
+                            if _top['Layers'] > 1:
+                                st.error(
+                                    f"⚠️ **Critical**: Cluster {int(_top['Cluster'])} spans "
+                                    f"**{int(_top['Layers'])} buildup layers** — potential registration or "
+                                    f"process-wide defect. Severity score: {_top['Severity ▼']}"
+                                )
+                            else:
+                                st.warning(
+                                    f"Highest severity cluster: **{int(_top['Defects'])} defects** "
+                                    f"at ({_top['Centroid X']}, {_top['Centroid Y']}) mm — "
+                                    f"{_top['Top Type']}. Severity: {_top['Severity ▼']}"
+                                )
+
+                            # Ranked table
+                            st.dataframe(
+                                _ct_summary,
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    'Severity ▼': st.column_config.ProgressColumn(
+                                        'Severity ▼', min_value=0,
+                                        max_value=float(_ct_summary['Severity ▼'].max()),
+                                        format='%.1f',
+                                    ),
+                                    'Defects': st.column_config.NumberColumn('Defects', format='%d'),
+                                },
+                            )
+
+                            _tp1, _tp2 = st.columns(2)
+
+                            # Bar: severity per cluster
+                            with _tp1:
+                                _sev_fig = _px2.bar(
+                                    _ct_summary, x='Cluster', y='Severity ▼',
+                                    color='Severity ▼', color_continuous_scale='OrRd',
+                                    title='Cluster Severity',
+                                )
+                                _sev_fig.update_layout(
+                                    plot_bgcolor='#000000', paper_bgcolor='#000000',
+                                    font=dict(color='#cccccc'), showlegend=False,
+                                    coloraxis_showscale=False,
+                                    margin=dict(l=0, r=0, t=36, b=0), height=280,
+                                )
+                                st.plotly_chart(_sev_fig, width='stretch')
+
+                            # Scatter: cluster positions on unit
+                            with _tp2:
+                                _sc_fig = _px2.scatter(
+                                    _ct_summary, x='Centroid X', y='Centroid Y',
+                                    size='Defects', color='Severity ▼',
+                                    color_continuous_scale='OrRd',
+                                    title='Cluster Positions',
+                                    hover_data=['Cluster', 'Top Type', 'Layers'],
+                                )
+                                _sc_fig.update_layout(
+                                    plot_bgcolor='#000000', paper_bgcolor='#000000',
+                                    font=dict(color='#cccccc'),
+                                    coloraxis_showscale=False,
+                                    margin=dict(l=0, r=0, t=36, b=0), height=280,
+                                )
+                                st.plotly_chart(_sc_fig, width='stretch')
+
+                    except ImportError:
+                        st.warning("sklearn required for cluster triage: pip install scikit-learn")
 
     # ---- Job Registration & Trend Analysis ----
     if aoi and aoi.has_data:
