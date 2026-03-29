@@ -778,7 +778,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             # ── CAM (Gerbonara) background tiling (pre-cached panel SVG) ────
             _rendered_panel = st.session_state.get('rendered_odb')
             if _rendered_panel and _rendered_panel.panel_layout:
-                # Pick which layer to display (first checked, or first available)
+                # Pick which layer to display (first checked layer only — if none checked, show nothing)
                 _panel_png_url = None
                 _panel_bg_name = None
                 _want_layer = None
@@ -788,12 +788,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         if _lo.layer_type != 'drill':
                             _want_layer = _ln
                             break
-                if not _want_layer:
-                    for _ln, _lo in _rendered_panel.layers.items():
-                        if _lo.layer_type != 'drill':
-                            _want_layer = _ln
-                            break
-
                 # Build panel PNG only for the selected layer (on-demand, one layer at a time)
                 if _want_layer:
                     _want_lyr_obj = _rendered_panel.layers[_want_layer]
@@ -959,10 +953,53 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         st.markdown("### 🗺️ Commonality — Defect Superposition")
         st.caption("Normalise each selected unit's defects into local coordinates and overlay on a single reference unit.")
 
-        if not (aoi and aoi.has_data):
-            st.info("Upload AOI defect data to use the Commonality view.")
-        elif 'UNIT_INDEX_X' not in aoi.all_defects.columns or 'UNIT_INDEX_Y' not in aoi.all_defects.columns:
-            st.warning("⚠️ UNIT_INDEX_X / UNIT_INDEX_Y columns not found. Commonality view requires unit index data.")
+        _rodb_cm_check = st.session_state.get('rendered_odb')
+        _has_aoi_cm = (
+            aoi and aoi.has_data
+            and 'UNIT_INDEX_X' in aoi.all_defects.columns
+            and 'UNIT_INDEX_Y' in aoi.all_defects.columns
+        )
+
+        if not _rodb_cm_check and not _has_aoi_cm:
+            st.info("Upload a TGZ design file or AOI defect data to use this view.")
+
+        elif not _has_aoi_cm:
+            # ── TGZ loaded but no AOI — show design reference only ────────────
+            if 'UNIT_INDEX_X' not in (aoi.all_defects.columns if aoi and aoi.has_data else []):
+                pass  # no AOI at all
+            st.info("ℹ️ Upload AOI defect data to overlay defects on the design.")
+            if _rodb_cm_check and _rodb_cm_check.layers:
+                _cm_design_lyr = next(
+                    (l for n, l in _rodb_cm_check.layers.items()
+                     if l.layer_type != 'drill' and st.session_state.get(f"vis_{n}", False)),
+                    next((l for l in _rodb_cm_check.layers.values() if l.layer_type != 'drill'), None)
+                )
+                if _cm_design_lyr:
+                    _cb = _cm_design_lyr.bounds
+                    _design_fig = go.Figure()
+                    _design_fig.add_layout_image(dict(
+                        source=_cm_design_lyr.svg_data_url,
+                        xref="x", yref="y",
+                        x=0, y=_cb[3] - _cb[1],
+                        sizex=_cb[2] - _cb[0], sizey=_cb[3] - _cb[1],
+                        sizing="stretch", layer="below", opacity=0.95,
+                    ))
+                    _design_fig.update_layout(
+                        xaxis=dict(range=[-1, _cb[2] - _cb[0] + 1], scaleanchor='y', scaleratio=1,
+                                   showgrid=False, zeroline=False, color='#aaa'),
+                        yaxis=dict(range=[-1, _cb[3] - _cb[1] + 1], showgrid=False, zeroline=False, color='#aaa'),
+                        plot_bgcolor='#0a1a0a', paper_bgcolor='#111a11',
+                        margin=dict(l=0, r=0, t=0, b=0), height=600,
+                    )
+                    _design_fig.add_shape(
+                        type="rect", x0=0, y0=0,
+                        x1=_cb[2] - _cb[0], y1=_cb[3] - _cb[1],
+                        line=dict(color="rgba(0,220,130,0.7)", width=1.5),
+                        fillcolor="rgba(0,0,0,0)", layer="above",
+                    )
+                    st.plotly_chart(_design_fig, width='stretch',
+                                    config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
+
         else:
             _q_rows_cm  = int(st.session_state.get('quad_rows_input', 6))
             _q_cols_cm  = int(st.session_state.get('quad_cols_input', 6))
@@ -1106,6 +1143,35 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
                 if _cm_src.empty:
                     st.info("No defects found for the selected units / scope filters.")
+                    # Still render the CAM design so the user can see the reference unit
+                    _rodb_cm_empty = st.session_state.get('rendered_odb')
+                    if _rodb_cm_empty and _rodb_cm_empty.layers:
+                        _em_lyr = next(
+                            (l for n, l in _rodb_cm_empty.layers.items()
+                             if l.layer_type != 'drill' and st.session_state.get(f"vis_{n}", False)),
+                            next((l for l in _rodb_cm_empty.layers.values() if l.layer_type != 'drill'), None)
+                        )
+                        if _em_lyr:
+                            _cb_em = _em_lyr.bounds
+                            _em_fig = go.Figure()
+                            _em_fig.add_layout_image(dict(
+                                source=_em_lyr.svg_data_url,
+                                xref="x", yref="y",
+                                x=0, y=_cb_em[3] - _cb_em[1],
+                                sizex=_cb_em[2] - _cb_em[0], sizey=_cb_em[3] - _cb_em[1],
+                                sizing="stretch", layer="below", opacity=0.95,
+                            ))
+                            _em_fig.update_layout(
+                                xaxis=dict(range=[-1, _cb_em[2] - _cb_em[0] + 1],
+                                           scaleanchor='y', scaleratio=1,
+                                           showgrid=False, zeroline=False, color='#aaa'),
+                                yaxis=dict(range=[-1, _cb_em[3] - _cb_em[1] + 1],
+                                           showgrid=False, zeroline=False, color='#aaa'),
+                                plot_bgcolor='#0a1a0a', paper_bgcolor='#111a11',
+                                margin=dict(l=0, r=0, t=0, b=0), height=600,
+                            )
+                            st.plotly_chart(_em_fig, width='stretch',
+                                            config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
                 else:
                     # ── Coordinate normalisation (vectorized) ─────────────────
                     # Subtract each unit's effective origin so all units fold into
@@ -1143,13 +1209,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _rendered_cm  = st.session_state.get('rendered_odb')
 
                     if _rendered_cm and _rendered_cm.layers:
-                        # Pick checked layers (same as Single Unit view logic)
+                        # Pick checked layers only — if none checked, show no background
                         _cm_cam_layers = [
                             n for n in _rendered_cm.layers
                             if st.session_state.get(f"vis_{n}", False)
                         ]
-                        if not _cm_cam_layers:
-                            _cm_cam_layers = list(_rendered_cm.layers.keys())[:1]
 
                         _is_multi_cm = len(_cm_cam_layers) > 1
                         for _cm_cam_ln in _cm_cam_layers:
