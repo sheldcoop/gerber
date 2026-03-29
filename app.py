@@ -577,7 +577,6 @@ def _compute_cm_geometry(
     return origins, cell_w, cell_h
 
 
-@st.cache_data(show_spinner=False)
 def _filter_aoi_cm(
     _df: pd.DataFrame,
     buildup_filter: tuple,
@@ -658,7 +657,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🗺️ Commonality"]
+    _tabs = ["🔭 Panel Overview", "🗺️ Commonality", "🎯 Calibration Wizard"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -794,12 +793,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 _panel_png_url = None
                 _panel_bg_name = None
                 _want_layer = None
-                for _ln in _rendered_panel.layers:
-                    if st.session_state.get(f"vis_{_ln}", False):
-                        _lo = _rendered_panel.layers[_ln]
-                        if _lo.layer_type != 'drill':
-                            _want_layer = _ln
-                            break
+                _all_checked_panel = [
+                    _ln for _ln in _rendered_panel.layers
+                    if st.session_state.get(f"vis_{_ln}", False)
+                ]
+                if _all_checked_panel:
+                    _want_layer = _all_checked_panel[0]   # PNG can only show one layer
                 # Build panel PNG only for the selected layer (on-demand, one layer at a time)
                 if _want_layer:
                     _want_lyr_obj = _rendered_panel.layers[_want_layer]
@@ -827,6 +826,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
                         sizing="stretch", layer="below", opacity=1.0,
                     )])
+                    _extra = len(_all_checked_panel) - 1
+                    if _extra > 0:
+                        st.caption(
+                            f"Panel image: **{_want_layer}**"
+                            f" (+ {_extra} more selected — panel view shows one layer at a time)"
+                        )
 
             # ── Cluster Intelligence Overlay ──────────────────────────────
             if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
@@ -924,10 +929,9 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 _cam_fig = go.Figure()
                 _cam_fig.update_layout(
                     xaxis=dict(range=[-10, FRAME_WIDTH + 10], scaleanchor='y', scaleratio=1,
-                               showgrid=False, zeroline=False, showticklabels=False, showline=False, ticks=''),
-                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False,
-                               showticklabels=False, showline=False, ticks=''),
-                    plot_bgcolor='#000000', paper_bgcolor='#000000',
+                               showgrid=False, zeroline=False, color='#aaa'),
+                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False, color='#aaa'),
+                    plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
                     margin=dict(l=0, r=0, t=24, b=0),
                     height=720,
                 )
@@ -944,14 +948,32 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                        x1=_px + _uw_cam, y1=_py + _uh_cam,
                                        fillcolor="rgba(0,180,100,0.07)",
                                        line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
-                # Use pre-cached panel PNG (instant layer switching)
+                # Use pre-cached panel PNG for the checked layer only (no fallback)
                 _panel_png = None
+                _sel_ln2 = None
                 for _ln2 in _rodb.layers:
                     if st.session_state.get(f"vis_{_ln2}", False):
-                        _panel_png = _rodb.layers[_ln2].panel_png_data_url
+                        _sel_ln2 = _ln2
                         break
+
+                if _sel_ln2:
+                    _sel_lyr2 = _rodb.layers[_sel_ln2]
+                    if not _sel_lyr2.panel_png_data_url:
+                        with st.spinner(f"Building panel image for {_sel_ln2}..."):
+                            from gerber_renderer import build_panel_png_hires
+                            try:
+                                _sel_lyr2.panel_png_data_url = build_panel_png_hires(
+                                    _sel_lyr2.svg_string, _pl_cam
+                                )
+                            except Exception:
+                                pass
+                            _tgz_b2 = st.session_state.get('_tgz_bytes_for_cache')
+                            if _tgz_b2 and _sel_lyr2.panel_png_data_url:
+                                save_render_cache(_tgz_b2, _rodb)
+                    _panel_png = _sel_lyr2.panel_png_data_url
+
                 if not _panel_png:
-                    _panel_png = next(iter(_rodb.layers.values())).panel_png_data_url
+                    st.caption("☝️ Select a layer in the sidebar to display the panel image.")
 
                 if _panel_png:
                     _cam_fig.update_layout(images=[dict(
@@ -971,6 +993,19 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
     # ── Commonality / Superposition View ────────────────────────────────────
     elif view_mode == "🗺️ Commonality":
+        # Layer stacking helpers — copper always on top, drill/laser always at back.
+        # Plotly renders layout_images in the order they are added; later = on top.
+        _LAYER_Z = {'drill': 0, 'other': 1, 'paste': 2,
+                    'soldermask': 3, 'silkscreen': 4, 'outline': 5, 'copper': 6}
+        _LAYER_OPACITY_SINGLE = {'copper': 0.95, 'drill': 0.55, 'other': 0.60}
+        _LAYER_OPACITY_MULTI  = {'copper': 0.90, 'drill': 0.45, 'other': 0.50}
+
+        def _layer_sort_key(name_lyr_pair):
+            return _LAYER_Z.get(name_lyr_pair[1].layer_type, 1)
+
+        def _layer_opacity(lyr_type, multi):
+            d = _LAYER_OPACITY_MULTI if multi else _LAYER_OPACITY_SINGLE
+            return d.get(lyr_type, 0.70 if multi else 0.85)
         st.markdown("### 🗺️ Commonality — Defect Superposition")
         st.caption("Normalise each selected unit's defects into local coordinates and overlay on a single reference unit.")
 
@@ -986,38 +1021,86 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
         elif not _has_aoi_cm:
             # ── TGZ loaded but no AOI — show design reference only ────────────
-            if 'UNIT_INDEX_X' not in (aoi.all_defects.columns if aoi and aoi.has_data else []):
-                pass  # no AOI at all
             st.info("ℹ️ Upload AOI defect data to overlay defects on the design.")
             if _rodb_cm_check and _rodb_cm_check.layers:
-                _cm_design_lyr = next(
-                    (l for n, l in _rodb_cm_check.layers.items()
-                     if l.layer_type != 'drill' and st.session_state.get(f"vis_{n}", False)),
-                    next((l for l in _rodb_cm_check.layers.values() if l.layer_type != 'drill'), None)
+                # Reference layer: first non-drill for consistent bounds
+                _no_aoi_ref_lyr = next(
+                    (l for l in _rodb_cm_check.layers.values() if l.layer_type != 'drill'),
+                    next(iter(_rodb_cm_check.layers.values()))
                 )
-                if _cm_design_lyr:
-                    _cb = _cm_design_lyr.bounds
-                    _design_fig = go.Figure()
-                    _design_fig.add_layout_image(dict(
-                        source=_cm_design_lyr.svg_data_url,
-                        xref="x", yref="y",
-                        x=0, y=_cb[3] - _cb[1],
-                        sizex=_cb[2] - _cb[0], sizey=_cb[3] - _cb[1],
-                        sizing="stretch", layer="below", opacity=0.95,
-                    ))
-                    _design_fig.update_layout(
-                        xaxis=dict(range=[-1, _cb[2] - _cb[0] + 1], scaleanchor='y', scaleratio=1,
-                                   showgrid=False, zeroline=False, showticklabels=False, showline=False, ticks=''),
-                        yaxis=dict(range=[-1, _cb[3] - _cb[1] + 1], showgrid=False, zeroline=False,
-                                   showticklabels=False, showline=False, ticks=''),
-                        plot_bgcolor='#000000', paper_bgcolor='#000000',
-                        margin=dict(l=0, r=0, t=36, b=0), height=600,
+                # Compute cell dimensions from TGZ geometry
+                if _rodb_cm_check.panel_layout:
+                    _, _no_aoi_cw, _no_aoi_ch = _compute_cm_geometry(
+                        unit_positions=tuple(_rodb_cm_check.panel_layout.unit_positions),
+                        first_layer_bounds=tuple(_no_aoi_ref_lyr.bounds),
                     )
-                    _design_fig.add_shape(
-                        type="rect", x0=0, y0=0,
-                        x1=_cb[2] - _cb[0], y1=_cb[3] - _cb[1],
-                        line=dict(color="rgba(0,220,130,0.7)", width=1.5),
-                        fillcolor="rgba(0,0,0,0)", layer="above",
+                else:
+                    _rb_na = _no_aoi_ref_lyr.bounds
+                    _no_aoi_cw = _rb_na[2] - _rb_na[0]
+                    _no_aoi_ch = _rb_na[3] - _rb_na[1]
+
+                # Collect ALL checked layers (no break — support multi-layer stack)
+                _na_checked = [
+                    (_na_n, _na_l)
+                    for _na_n, _na_l in _rodb_cm_check.layers.items()
+                    if st.session_state.get(f"vis_{_na_n}", False)
+                ]
+
+                if not _na_checked:
+                    st.caption("☝️ Select a layer in the sidebar to view the design.")
+                else:
+                    _ref_b_na  = _no_aoi_ref_lyr.bounds
+                    _ref_sx_na = -_ref_b_na[0]
+                    _ref_sy_na = -_ref_b_na[1]
+                    _is_multi_na = len(_na_checked) > 1
+                    # Sort: drill/laser at back → copper on top
+                    _na_sorted = sorted(_na_checked, key=_layer_sort_key)
+
+                    _design_fig = go.Figure()
+                    for _na_n, _na_l in _na_sorted:
+                        _lyr_b_na = _na_l.bounds
+                        _design_fig.add_layout_image(dict(
+                            source=_na_l.svg_data_url,
+                            xref="x", yref="y",
+                            x=_lyr_b_na[0] + _ref_sx_na,
+                            y=_lyr_b_na[3] + _ref_sy_na,
+                            sizex=_lyr_b_na[2] - _lyr_b_na[0],
+                            sizey=_lyr_b_na[3] - _lyr_b_na[1],
+                            sizing="stretch", layer="below",
+                            opacity=_layer_opacity(_na_l.layer_type, _is_multi_na),
+                        ))
+
+                    # Layer label — show all active names
+                    _lbl_na = " + ".join(n for n, _ in _na_checked)
+                    # Dimension annotations
+                    _design_fig.add_annotation(
+                        x=_no_aoi_cw / 2, y=-_no_aoi_ch * 0.045,
+                        text=f"W: {_no_aoi_cw:.2f} mm", showarrow=False,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
+                    )
+                    _design_fig.add_annotation(
+                        x=-_no_aoi_cw * 0.045, y=_no_aoi_ch / 2,
+                        text=f"H: {_no_aoi_ch:.2f} mm", showarrow=False, textangle=-90,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
+                    )
+                    # Layer name label (top-centre green)
+                    _design_fig.add_annotation(
+                        x=_no_aoi_cw / 2, y=_no_aoi_ch + _no_aoi_ch * 0.04,
+                        text=f"Layer: {_lbl_na}",
+                        showarrow=False, xanchor="center", yanchor="bottom",
+                        font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
+                        xref="x", yref="y",
+                    )
+                    _design_fig.update_layout(
+                        xaxis=dict(range=[-1, _no_aoi_cw + 1], scaleanchor='y', scaleratio=1,
+                                   showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(range=[-1, _no_aoi_ch + 1], showgrid=False,
+                                   zeroline=False, showticklabels=False),
+                        plot_bgcolor='#000000', paper_bgcolor='#000000',
+                        font=dict(color='#cccccc'),
+                        margin=dict(l=0, r=0, t=36, b=0), height=600,
                     )
                     st.plotly_chart(_design_fig, width='stretch',
                                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
@@ -1167,31 +1250,63 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.info("No defects found for the selected units / scope filters.")
                     # Still render the CAM design so the user can see the reference unit
                     _rodb_cm_empty = st.session_state.get('rendered_odb')
-                    if _rodb_cm_empty and _rodb_cm_empty.layers:
-                        _em_lyr = next(
-                            (l for n, l in _rodb_cm_empty.layers.items()
-                             if l.layer_type != 'drill' and st.session_state.get(f"vis_{n}", False)),
-                            next((l for l in _rodb_cm_empty.layers.values() if l.layer_type != 'drill'), None)
-                        )
-                        if _em_lyr:
-                            _cb_em = _em_lyr.bounds
+                    if _rodb_cm_empty and _rodb_cm_empty.layers and _first_lyr_cm:
+                        # Collect ALL checked layers — support multi-layer stack
+                        _em_checked = [
+                            (_em_n, _em_l)
+                            for _em_n, _em_l in _rodb_cm_empty.layers.items()
+                            if st.session_state.get(f"vis_{_em_n}", False)
+                        ]
+                        if not _em_checked:
+                            st.caption("☝️ Select a layer in the sidebar to view the design.")
+                        else:
+                            _ref_b_em   = _first_lyr_cm.bounds
+                            _ref_sx_em  = -_ref_b_em[0]
+                            _ref_sy_em  = -_ref_b_em[1]
+                            _is_multi_em = len(_em_checked) > 1
+                            _em_sorted  = sorted(_em_checked, key=_layer_sort_key)
                             _em_fig = go.Figure()
-                            _em_fig.add_layout_image(dict(
-                                source=_em_lyr.svg_data_url,
+                            for _em_n, _em_l in _em_sorted:
+                                _lyr_b_em = _em_l.bounds
+                                _em_fig.add_layout_image(dict(
+                                    source=_em_l.svg_data_url,
+                                    xref="x", yref="y",
+                                    x=_lyr_b_em[0] + _ref_sx_em,
+                                    y=_lyr_b_em[3] + _ref_sy_em,
+                                    sizex=_lyr_b_em[2] - _lyr_b_em[0],
+                                    sizey=_lyr_b_em[3] - _lyr_b_em[1],
+                                    sizing="stretch", layer="below",
+                                    opacity=_layer_opacity(_em_l.layer_type, _is_multi_em),
+                                ))
+                            _em_lbl = " + ".join(n for n, _ in _em_checked)
+                            # Layer name label (top-centre green)
+                            _em_fig.add_annotation(
+                                x=_cam_cell_w / 2, y=_cam_cell_h + _cam_cell_h * 0.04,
+                                text=f"Layer: {_em_lbl}",
+                                showarrow=False, xanchor="center", yanchor="bottom",
+                                font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
                                 xref="x", yref="y",
-                                x=0, y=_cb_em[3] - _cb_em[1],
-                                sizex=_cb_em[2] - _cb_em[0], sizey=_cb_em[3] - _cb_em[1],
-                                sizing="stretch", layer="below", opacity=0.95,
-                            ))
+                            )
+                            # Dimension annotations
+                            _em_fig.add_annotation(
+                                x=_cam_cell_w / 2, y=-_cam_cell_h * 0.045,
+                                text=f"W: {_cam_cell_w:.2f} mm", showarrow=False,
+                                font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                                xref="x", yref="y",
+                            )
+                            _em_fig.add_annotation(
+                                x=-_cam_cell_w * 0.045, y=_cam_cell_h / 2,
+                                text=f"H: {_cam_cell_h:.2f} mm", showarrow=False, textangle=-90,
+                                font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                                xref="x", yref="y",
+                            )
                             _em_fig.update_layout(
-                                xaxis=dict(range=[-1, _cb_em[2] - _cb_em[0] + 1],
-                                           scaleanchor='y', scaleratio=1,
-                                           showgrid=False, zeroline=False,
-                                           showticklabels=False, showline=False, ticks=''),
-                                yaxis=dict(range=[-1, _cb_em[3] - _cb_em[1] + 1],
-                                           showgrid=False, zeroline=False,
-                                           showticklabels=False, showline=False, ticks=''),
+                                xaxis=dict(range=[-1, _cam_cell_w + 1], scaleanchor='y', scaleratio=1,
+                                           showgrid=False, zeroline=False, showticklabels=False),
+                                yaxis=dict(range=[-1, _cam_cell_h + 1], showgrid=False,
+                                           zeroline=False, showticklabels=False),
                                 plot_bgcolor='#000000', paper_bgcolor='#000000',
+                                font=dict(color='#cccccc'),
                                 margin=dict(l=0, r=0, t=36, b=0), height=600,
                             )
                             st.plotly_chart(_em_fig, width='stretch',
@@ -1242,33 +1357,39 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         ]
 
                         _is_multi_cm = len(_cm_cam_layers) > 1
-                        _active_layer_name = _cm_cam_layers[0] if _cm_cam_layers else None
-                        for _cm_cam_ln in _cm_cam_layers:
-                            _cm_cam_lyr = _rendered_cm.layers.get(_cm_cam_ln)
-                            if not _cm_cam_lyr:
-                                continue
+                        # Sort: drill/laser rendered first (back), copper last (front)
+                        _cm_cam_pairs = [
+                            (ln, _rendered_cm.layers[ln])
+                            for ln in _cm_cam_layers
+                            if _rendered_cm.layers.get(ln)
+                        ]
+                        _cm_cam_pairs.sort(key=_layer_sort_key)
+                        _active_layer_name = _cm_cam_pairs[-1][0] if _cm_cam_pairs else None
+                        # Use reference bounds (first non-drill layer) as the common
+                        # alignment anchor — all SVGs placed relative to the same origin.
+                        _ref_b_cm    = _first_lyr_cm.bounds
+                        _ref_shift_x = -_ref_b_cm[0]
+                        _ref_shift_y = -_ref_b_cm[1]
+                        for _cm_cam_ln, _cm_cam_lyr in _cm_cam_pairs:
                             # Pick pre-cached data URL
                             if _is_multi_cm and _cm_cam_lyr.color_svg_urls:
                                 _cm_data_url = next(iter(_cm_cam_lyr.color_svg_urls.values()))
                             else:
                                 _cm_data_url = _cm_cam_lyr.svg_data_url
 
-                            # The CAM SVG covers the single-unit design.
-                            # Shift its bounds so the unit's lower-left aligns with local (0, 0).
-                            _cb_cm = _cm_cam_lyr.bounds   # (x0, y0, x1, y1) in board mm
-                            _shift_x = -_cb_cm[0]
-                            _shift_y = -_cb_cm[1]
-                            _im_x    = _cb_cm[0] + _shift_x          # = 0
-                            _im_y    = _cb_cm[3] + _shift_y           # = height of unit
-                            _im_w    = _cb_cm[2] - _cb_cm[0]
-                            _im_h    = _cb_cm[3] - _cb_cm[1]
+                            # Place using shared reference shift for alignment
+                            _cb_cm = _cm_cam_lyr.bounds
+                            _im_x  = _cb_cm[0] + _ref_shift_x
+                            _im_y  = _cb_cm[3] + _ref_shift_y
+                            _im_w  = _cb_cm[2] - _cb_cm[0]
+                            _im_h  = _cb_cm[3] - _cb_cm[1]
                             _cm_fig.add_layout_image(dict(
                                 source=_cm_data_url,
                                 xref="x", yref="y",
                                 x=_im_x, y=_im_y,
                                 sizex=_im_w, sizey=_im_h,
                                 sizing="stretch", layer="below",
-                                opacity=0.95 if not _is_multi_cm else 0.7,
+                                opacity=_layer_opacity(_cm_cam_lyr.layer_type, _is_multi_cm),
                             ))
                         # Lock viewport to cell dimensions (same as green rect and SVG placement)
                         from visualizer import _apply_layout as _cm_apply_layout
@@ -1424,6 +1545,107 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     )
                     _cm_s4.metric("Top Defect Type", _top_cm)
 
+    # ── Calibration Wizard ──────────────────────────────────────────────────
+    elif view_mode == "🎯 Calibration Wizard":
+        st.subheader("Fiducial Auto-Calibration Wizard")
+        st.markdown("""
+        **Instructions**: Click 3 fiducial points on the ODB++ render below, enter their
+        corresponding AOI machine coordinates, and the system computes the full affine
+        transform automatically. Store the calibration per machine ID.
+        """)
+
+        if parsed and parsed.layers:
+            from alignment import _align_affine
+
+            # Render ODB++ outline + fiducials for clicking
+            calib_fig = go.Figure()
+            outline_layer = next((l for l in parsed.layers.values() if l.layer_type == 'outline'), None)
+            if outline_layer:
+                from visualizer import _geometry_to_coords
+                for poly in outline_layer.polygons:
+                    px, py = _geometry_to_coords(poly)
+                    calib_fig.add_trace(go.Scatter(x=px, y=py, mode='lines',
+                        line=dict(color='gold', width=2), name='Board Outline', showlegend=False))
+
+            # Show known ODB++ fiducials
+            if parsed.fiducials:
+                fid_x = [f[0] for f in parsed.fiducials]
+                fid_y = [f[1] for f in parsed.fiducials]
+                calib_fig.add_trace(go.Scatter(
+                    x=fid_x, y=fid_y, mode='markers+text',
+                    marker=dict(size=15, color='cyan', symbol='diamond'),
+                    text=[f"F{i+1}" for i in range(len(parsed.fiducials))],
+                    textposition='top center',
+                    name='ODB++ Fiducials',
+                ))
+
+            bb = parsed.board_bounds
+            calib_fig.update_layout(
+                plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
+                font=dict(color='#e0e0e0'),
+                xaxis=dict(title='X (mm)', range=[bb[0]-5, bb[2]+5], scaleanchor='y'),
+                yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
+                height=500,
+            )
+            st.plotly_chart(calib_fig, width="stretch")
+
+            # Manual fiducial entry
+            st.subheader("Enter AOI Fiducial Coordinates")
+            n_fids = len(parsed.fiducials) if parsed.fiducials else 3
+            machine_id = st.text_input("Machine ID", value="AOI-01", key="calib_machine_id")
+
+            aoi_fid_entries = []
+            cols = st.columns(min(n_fids, 4))
+            for i in range(min(n_fids, 4)):
+                with cols[i]:
+                    st.caption(f"**Fiducial {i+1}**")
+                    if parsed.fiducials and i < len(parsed.fiducials):
+                        st.text(f"ODB++: ({parsed.fiducials[i][0]:.2f}, {parsed.fiducials[i][1]:.2f})")
+                    ax = st.number_input(f"AOI X{i+1} (mm)", value=0.0, key=f"calib_ax_{i}", format="%.3f")
+                    ay = st.number_input(f"AOI Y{i+1} (mm)", value=0.0, key=f"calib_ay_{i}", format="%.3f")
+                    aoi_fid_entries.append((ax, ay))
+
+            if st.button("Compute Calibration", type="primary"):
+                if parsed.fiducials and len(aoi_fid_entries) >= 2:
+                    n_use = min(len(parsed.fiducials), len(aoi_fid_entries))
+                    gerber_fids = parsed.fiducials[:n_use]
+                    aoi_fids = aoi_fid_entries[:n_use]
+
+                    # Check that AOI points are not all zeros
+                    if all(abs(x) < 1e-6 and abs(y) < 1e-6 for x, y in aoi_fids):
+                        st.error("All AOI coordinates are zero. Enter the machine-reported fiducial positions.")
+                    else:
+                        calib_result = _align_affine(gerber_fids, aoi_fids,
+                                                     parsed.board_bounds, parsed.board_bounds)
+                        st.success(f"Calibration computed: rotation={calib_result.rotation_deg:.4f}°, "
+                                   f"scale={calib_result.scale_x:.6f}")
+                        if calib_result.warnings:
+                            for w in calib_result.warnings:
+                                st.warning(w)
+
+                        # Store calibration per machine
+                        if 'calibrations' not in st.session_state:
+                            st.session_state['calibrations'] = {}
+                        st.session_state['calibrations'][machine_id] = {
+                            'matrix': calib_result.transform_matrix.tolist(),
+                            'rotation_deg': calib_result.rotation_deg,
+                            'scale_x': calib_result.scale_x,
+                            'scale_y': calib_result.scale_y,
+                        }
+                        st.info(f"Calibration stored for machine '{machine_id}'. "
+                                "It will be used automatically for subsequent panels on this machine.")
+                else:
+                    st.error("Need at least 2 ODB++ fiducials and 2 AOI fiducial entries.")
+
+            # Show stored calibrations
+            cals = st.session_state.get('calibrations', {})
+            if cals:
+                st.subheader("Stored Calibrations")
+                for mid, cal in cals.items():
+                    st.text(f"Machine '{mid}': rot={cal['rotation_deg']:.4f}°, "
+                            f"sx={cal['scale_x']:.6f}, sy={cal['scale_y']:.6f}")
+        else:
+            st.info("Upload an ODB++ archive to use the Calibration Wizard.")
 
 
 

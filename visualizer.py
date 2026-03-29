@@ -608,20 +608,13 @@ def _build_severity_map(defect_types) -> dict:
 
 def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
     """
-    Apply Plotly layout settings: dark theme, locked aspect ratio,
-    zoom/pan controls, and board-sized axis ranges.
+    Apply Plotly layout settings: pure black theme, locked aspect ratio,
+    zoom/pan controls, no axes, no grid.
     """
     bounds = config.board_bounds
-    margin_pct = 0.05  # 5% margin around board
-
-    width = bounds[2] - bounds[0]
-    height = bounds[3] - bounds[1]
-    margin_x = width * margin_pct if width > 0 else 1
-    margin_y = height * margin_pct if height > 0 else 1
 
     _AXIS_CLEAN = dict(
         title='',
-        range=[bounds[0] - margin_x, bounds[2] + margin_x],
         showgrid=False,
         zeroline=False,
         showticklabels=False,
@@ -634,15 +627,15 @@ def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
         paper_bgcolor='#000000',
         font=dict(color='#cccccc', size=12),
 
-        xaxis={**_AXIS_CLEAN},
+        xaxis={**_AXIS_CLEAN, 'range': [bounds[0], bounds[2]]},
         yaxis={**_AXIS_CLEAN,
-               'range': [bounds[1] - margin_y, bounds[3] + margin_y],
+               'range': [bounds[1], bounds[3]],
                'scaleanchor': 'x',
                'scaleratio': 1},
 
         legend=dict(
             bgcolor='rgba(0,0,0,0.85)',
-            bordercolor='rgba(0,180,70,0.3)',
+            bordercolor='rgba(0,200,80,0.30)',
             borderwidth=1,
             font=dict(size=11, color='#cccccc'),
             itemclick='toggle',
