@@ -658,7 +658,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🗺️ Commonality", "🎯 Calibration Wizard"]
+    _tabs = ["🔭 Panel Overview", "🗺️ Commonality"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -924,9 +924,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 _cam_fig = go.Figure()
                 _cam_fig.update_layout(
                     xaxis=dict(range=[-10, FRAME_WIDTH + 10], scaleanchor='y', scaleratio=1,
-                               showgrid=False, zeroline=False, color='#aaa'),
-                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False, color='#aaa'),
-                    plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
+                               showgrid=False, zeroline=False, showticklabels=False, showline=False, ticks=''),
+                    yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False,
+                               showticklabels=False, showline=False, ticks=''),
+                    plot_bgcolor='#000000', paper_bgcolor='#000000',
                     margin=dict(l=0, r=0, t=24, b=0),
                     height=720,
                 )
@@ -1006,10 +1007,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     ))
                     _design_fig.update_layout(
                         xaxis=dict(range=[-1, _cb[2] - _cb[0] + 1], scaleanchor='y', scaleratio=1,
-                                   showgrid=False, zeroline=False, color='#aaa'),
-                        yaxis=dict(range=[-1, _cb[3] - _cb[1] + 1], showgrid=False, zeroline=False, color='#aaa'),
-                        plot_bgcolor='#0a1a0a', paper_bgcolor='#111a11',
-                        margin=dict(l=0, r=0, t=0, b=0), height=600,
+                                   showgrid=False, zeroline=False, showticklabels=False, showline=False, ticks=''),
+                        yaxis=dict(range=[-1, _cb[3] - _cb[1] + 1], showgrid=False, zeroline=False,
+                                   showticklabels=False, showline=False, ticks=''),
+                        plot_bgcolor='#000000', paper_bgcolor='#000000',
+                        margin=dict(l=0, r=0, t=36, b=0), height=600,
                     )
                     _design_fig.add_shape(
                         type="rect", x0=0, y0=0,
@@ -1184,11 +1186,13 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                             _em_fig.update_layout(
                                 xaxis=dict(range=[-1, _cb_em[2] - _cb_em[0] + 1],
                                            scaleanchor='y', scaleratio=1,
-                                           showgrid=False, zeroline=False, color='#aaa'),
+                                           showgrid=False, zeroline=False,
+                                           showticklabels=False, showline=False, ticks=''),
                                 yaxis=dict(range=[-1, _cb_em[3] - _cb_em[1] + 1],
-                                           showgrid=False, zeroline=False, color='#aaa'),
-                                plot_bgcolor='#0a1a0a', paper_bgcolor='#111a11',
-                                margin=dict(l=0, r=0, t=0, b=0), height=600,
+                                           showgrid=False, zeroline=False,
+                                           showticklabels=False, showline=False, ticks=''),
+                                plot_bgcolor='#000000', paper_bgcolor='#000000',
+                                margin=dict(l=0, r=0, t=36, b=0), height=600,
                             )
                             st.plotly_chart(_em_fig, width='stretch',
                                             config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
@@ -1420,107 +1424,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     )
                     _cm_s4.metric("Top Defect Type", _top_cm)
 
-    # ── Calibration Wizard ──────────────────────────────────────────────────
-    elif view_mode == "🎯 Calibration Wizard":
-        st.subheader("Fiducial Auto-Calibration Wizard")
-        st.markdown("""
-        **Instructions**: Click 3 fiducial points on the ODB++ render below, enter their
-        corresponding AOI machine coordinates, and the system computes the full affine
-        transform automatically. Store the calibration per machine ID.
-        """)
-
-        if parsed and parsed.layers:
-            from alignment import _align_affine
-
-            # Render ODB++ outline + fiducials for clicking
-            calib_fig = go.Figure()
-            outline_layer = next((l for l in parsed.layers.values() if l.layer_type == 'outline'), None)
-            if outline_layer:
-                from visualizer import _geometry_to_coords
-                for poly in outline_layer.polygons:
-                    px, py = _geometry_to_coords(poly)
-                    calib_fig.add_trace(go.Scatter(x=px, y=py, mode='lines',
-                        line=dict(color='gold', width=2), name='Board Outline', showlegend=False))
-
-            # Show known ODB++ fiducials
-            if parsed.fiducials:
-                fid_x = [f[0] for f in parsed.fiducials]
-                fid_y = [f[1] for f in parsed.fiducials]
-                calib_fig.add_trace(go.Scatter(
-                    x=fid_x, y=fid_y, mode='markers+text',
-                    marker=dict(size=15, color='cyan', symbol='diamond'),
-                    text=[f"F{i+1}" for i in range(len(parsed.fiducials))],
-                    textposition='top center',
-                    name='ODB++ Fiducials',
-                ))
-
-            bb = parsed.board_bounds
-            calib_fig.update_layout(
-                plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
-                font=dict(color='#e0e0e0'),
-                xaxis=dict(title='X (mm)', range=[bb[0]-5, bb[2]+5], scaleanchor='y'),
-                yaxis=dict(title='Y (mm)', range=[bb[1]-5, bb[3]+5]),
-                height=500,
-            )
-            st.plotly_chart(calib_fig, width="stretch")
-
-            # Manual fiducial entry
-            st.subheader("Enter AOI Fiducial Coordinates")
-            n_fids = len(parsed.fiducials) if parsed.fiducials else 3
-            machine_id = st.text_input("Machine ID", value="AOI-01", key="calib_machine_id")
-
-            aoi_fid_entries = []
-            cols = st.columns(min(n_fids, 4))
-            for i in range(min(n_fids, 4)):
-                with cols[i]:
-                    st.caption(f"**Fiducial {i+1}**")
-                    if parsed.fiducials and i < len(parsed.fiducials):
-                        st.text(f"ODB++: ({parsed.fiducials[i][0]:.2f}, {parsed.fiducials[i][1]:.2f})")
-                    ax = st.number_input(f"AOI X{i+1} (mm)", value=0.0, key=f"calib_ax_{i}", format="%.3f")
-                    ay = st.number_input(f"AOI Y{i+1} (mm)", value=0.0, key=f"calib_ay_{i}", format="%.3f")
-                    aoi_fid_entries.append((ax, ay))
-
-            if st.button("Compute Calibration", type="primary"):
-                if parsed.fiducials and len(aoi_fid_entries) >= 2:
-                    n_use = min(len(parsed.fiducials), len(aoi_fid_entries))
-                    gerber_fids = parsed.fiducials[:n_use]
-                    aoi_fids = aoi_fid_entries[:n_use]
-
-                    # Check that AOI points are not all zeros
-                    if all(abs(x) < 1e-6 and abs(y) < 1e-6 for x, y in aoi_fids):
-                        st.error("All AOI coordinates are zero. Enter the machine-reported fiducial positions.")
-                    else:
-                        calib_result = _align_affine(gerber_fids, aoi_fids,
-                                                     parsed.board_bounds, parsed.board_bounds)
-                        st.success(f"Calibration computed: rotation={calib_result.rotation_deg:.4f}°, "
-                                   f"scale={calib_result.scale_x:.6f}")
-                        if calib_result.warnings:
-                            for w in calib_result.warnings:
-                                st.warning(w)
-
-                        # Store calibration per machine
-                        if 'calibrations' not in st.session_state:
-                            st.session_state['calibrations'] = {}
-                        st.session_state['calibrations'][machine_id] = {
-                            'matrix': calib_result.transform_matrix.tolist(),
-                            'rotation_deg': calib_result.rotation_deg,
-                            'scale_x': calib_result.scale_x,
-                            'scale_y': calib_result.scale_y,
-                        }
-                        st.info(f"Calibration stored for machine '{machine_id}'. "
-                                "It will be used automatically for subsequent panels on this machine.")
-                else:
-                    st.error("Need at least 2 ODB++ fiducials and 2 AOI fiducial entries.")
-
-            # Show stored calibrations
-            cals = st.session_state.get('calibrations', {})
-            if cals:
-                st.subheader("Stored Calibrations")
-                for mid, cal in cals.items():
-                    st.text(f"Machine '{mid}': rot={cal['rotation_deg']:.4f}°, "
-                            f"sx={cal['scale_x']:.6f}, sy={cal['scale_y']:.6f}")
-        else:
-            st.info("Upload an ODB++ archive to use the Calibration Wizard.")
 
 
 

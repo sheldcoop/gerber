@@ -619,62 +619,39 @@ def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
     margin_x = width * margin_pct if width > 0 else 1
     margin_y = height * margin_pct if height > 0 else 1
 
-    # PCB CAM-style dark theme — black substrate, green-tinted grid
-    _PLOT_BG  = '#060A06'    # near-black with slight green cast
-    _PAPER_BG = '#0D120D'
-    _GRID_CLR = 'rgba(0,200,80,0.10)'    # subtle PCB-green grid
-    _ZERO_CLR = 'rgba(0,255,100,0.25)'   # brighter zero line
-    _AXIS_CLR = '#1a2e1a'
-    _TICK_CLR = '#3a5a3a'
+    _AXIS_CLEAN = dict(
+        title='',
+        range=[bounds[0] - margin_x, bounds[2] + margin_x],
+        showgrid=False,
+        zeroline=False,
+        showticklabels=False,
+        showline=False,
+        ticks='',
+    )
 
     fig.update_layout(
-        plot_bgcolor=_PLOT_BG,
-        paper_bgcolor=_PAPER_BG,
-        font=dict(color='#b0c8b0', size=12),   # muted PCB-green text
+        plot_bgcolor='#000000',
+        paper_bgcolor='#000000',
+        font=dict(color='#cccccc', size=12),
 
-        xaxis=dict(
-            title='X (mm)',
-            range=[bounds[0] - margin_x, bounds[2] + margin_x],
-            showgrid=True,
-            gridcolor=_GRID_CLR,
-            gridwidth=1,
-            zeroline=True,
-            zerolinecolor=_ZERO_CLR,
-            zerolinewidth=1,
-            tickcolor=_TICK_CLR,
-            linecolor=_AXIS_CLR,
-            tickfont=dict(color='#6a8a6a', size=10),
-            dtick=_smart_tick(width),
-        ),
-        yaxis=dict(
-            title='Y (mm)',
-            range=[bounds[1] - margin_y, bounds[3] + margin_y],
-            scaleanchor='x',
-            scaleratio=1,
-            showgrid=True,
-            gridcolor=_GRID_CLR,
-            gridwidth=1,
-            zeroline=True,
-            zerolinecolor=_ZERO_CLR,
-            zerolinewidth=1,
-            tickcolor=_TICK_CLR,
-            linecolor=_AXIS_CLR,
-            tickfont=dict(color='#6a8a6a', size=10),
-            dtick=_smart_tick(height),
-        ),
+        xaxis={**_AXIS_CLEAN},
+        yaxis={**_AXIS_CLEAN,
+               'range': [bounds[1] - margin_y, bounds[3] + margin_y],
+               'scaleanchor': 'x',
+               'scaleratio': 1},
 
         legend=dict(
-            bgcolor='rgba(6,10,6,0.92)',
-            bordercolor='rgba(0,180,70,0.25)',
+            bgcolor='rgba(0,0,0,0.85)',
+            bordercolor='rgba(0,180,70,0.3)',
             borderwidth=1,
-            font=dict(size=11, color='#9ab89a'),
+            font=dict(size=11, color='#cccccc'),
             itemclick='toggle',
             itemdoubleclick='toggleothers',
         ),
 
         dragmode='pan',
         hovermode='closest',
-        margin=dict(l=60, r=20, t=40, b=60),
+        margin=dict(l=0, r=0, t=36, b=0),
         height=800,
     )
 
