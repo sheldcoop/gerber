@@ -1302,26 +1302,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     tuple(sorted(_side_cm)),
                 )
 
-                # ── Per-panel toggle (SOURCE_FILE) ────────────────────────────
-                _cm_all_srcs = (
-                    sorted(_cm_src['SOURCE_FILE'].unique().tolist())
-                    if 'SOURCE_FILE' in _cm_src.columns else []
-                )
-                if _cm_all_srcs:
-                    st.caption(f"**{len(_cm_all_srcs)} panels** — toggle to include/exclude:")
-                    _cm_tog_cols = st.columns(min(len(_cm_all_srcs), 8))
-                    _cm_sel_srcs: list[str] = []
-                    for _cpi, _csrc in enumerate(_cm_all_srcs):
-                        _cm_inc = _cm_tog_cols[_cpi % len(_cm_tog_cols)].toggle(
-                            f"P{_cpi + 1}", value=True,
-                            key=f"cm_panel_tog_{_cpi}",
-                            help=_csrc,
-                        )
-                        if _cm_inc:
-                            _cm_sel_srcs.append(_csrc)
-                    if _cm_sel_srcs:
-                        _cm_src = _cm_src[_cm_src['SOURCE_FILE'].isin(_cm_sel_srcs)]
-
                 # Filter to selected units only
                 _cm_src = _cm_src.copy()
                 _cm_src['_ukey'] = list(zip(
@@ -1400,12 +1380,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     # ── Coordinate normalisation (vectorized) ─────────────────
                     # Subtract each unit's effective origin so all units fold into
                     # local coords [0…cell_w] × [0…cell_h], matching CAM SVG at (0,0).
-                    # Normalise UNIT_INDEX to 0-based to match sorted-position indices.
-                    _cm_min_iy = int(aoi.all_defects['UNIT_INDEX_Y'].min())
-                    _cm_min_ix = int(aoi.all_defects['UNIT_INDEX_X'].min())
+                    # Use UNIT_INDEX directly as key — _cm_origins is indexed 0-based
+                    # by sorted panel position, so UNIT_INDEX_X=6 must look up column 6,
+                    # not column 0. Subtracting min was wrong for partial-panel files.
                     _pairs_cm = list(zip(
-                        _cm_src['UNIT_INDEX_Y'].astype(int) - _cm_min_iy,
-                        _cm_src['UNIT_INDEX_X'].astype(int) - _cm_min_ix,
+                        _cm_src['UNIT_INDEX_Y'].astype(int),
+                        _cm_src['UNIT_INDEX_X'].astype(int),
                     ))
                     _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
                     _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
@@ -1801,6 +1781,19 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.warning("Unit index columns (UNIT_INDEX_X / UNIT_INDEX_Y) not found in the AOI data.")
                 else:
                     _n_panels_total = hm_df['SOURCE_FILE'].nunique() if 'SOURCE_FILE' in hm_df.columns else 1
+
+                    # ── Verification filter ────────────────────────────────────
+                    if 'VERIFICATION' in hm_df.columns:
+                        _all_verif = sorted(hm_df['VERIFICATION'].dropna().unique().tolist())
+                        _sel_verif = st.multiselect(
+                            "Filter by verification code",
+                            options=_all_verif,
+                            default=_all_verif,
+                            key="hm_verif_filter",
+                            help="Only defects with these verification codes count toward repeatability and raw count.",
+                        )
+                        if _sel_verif:
+                            hm_df = hm_df[hm_df['VERIFICATION'].isin(_sel_verif)]
 
                     # ── Metric selector ────────────────────────────────────────
                     _grid_metric = st.radio(

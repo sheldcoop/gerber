@@ -23,7 +23,7 @@ class TestExportUnitCsv:
             'UNIT_INDEX_Y': [0, 0, 1],
             'DEFECT_TYPE': ['Short', 'Short', 'Nick'],
             'BUILDUP': [1, 1, 2],
-            'VERIFICATION': ['Y', 'N', 'N'],
+            'VERIFICATION': ['CU14', 'F', 'F'],
         })
         csv = export_unit_csv(df)
         lines = csv.strip().split('\n')

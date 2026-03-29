@@ -52,7 +52,10 @@ def generate_realistic_heatmap_data() -> None:
                     'Y_COORDINATES': float(y),
                     'UNIT_INDEX_X': int(np.random.randint(0, 6)),
                     'UNIT_INDEX_Y': int(np.random.randint(0, 6)),
-                    'VERIFICATION': np.random.choice(['N', 'Y', 'FP']),
+                    'VERIFICATION': np.random.choice(
+                        ['F', 'GE22', 'CU14', 'CU18', 'CU10', 'GE57', 'CU22'],
+                        p=[0.39, 0.21, 0.15, 0.13, 0.06, 0.03, 0.03],
+                    ),
                 })
 
         # Random scatter defects to simulate dust across the full panel
@@ -66,7 +69,7 @@ def generate_realistic_heatmap_data() -> None:
                 'Y_COORDINATES': float(y),
                 'UNIT_INDEX_X': 0,
                 'UNIT_INDEX_Y': 0,
-                'VERIFICATION': 'N',
+                'VERIFICATION': 'F',
             })
 
         panel_df = pd.DataFrame(rows)

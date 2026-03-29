@@ -95,7 +95,7 @@ def sample_aoi_df() -> pd.DataFrame:
         'SIDE': np.random.choice(['F', 'B'], size=n),
         'UNIT_INDEX_X': np.random.choice([0, 1, 2, 3], size=n),
         'UNIT_INDEX_Y': np.random.choice([0, 1, 2, 3], size=n),
-        'VERIFICATION': np.random.choice(['Y', 'N'], size=n),
+        'VERIFICATION': np.random.choice(['F', 'CU14', 'GE22', 'CU10'], size=n),
         'SOURCE_FILE': 'test_BU-01F.xlsx',
     })
 

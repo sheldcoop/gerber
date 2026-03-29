@@ -35,7 +35,10 @@ def _make_panel(real_df: pd.DataFrame, hotspots: list, spread: float) -> pd.Data
                 'Y_COORDINATES': float(y),
                 'UNIT_INDEX_X':  int(np.random.randint(0, 6)),
                 'UNIT_INDEX_Y':  int(np.random.randint(0, 6)),
-                'VERIFICATION':  np.random.choice(['N', 'Y', 'FP']),
+                'VERIFICATION':  np.random.choice(
+                    ['F', 'GE22', 'CU14', 'CU18', 'CU10', 'GE57', 'CU22'],
+                    p=[0.39, 0.21, 0.15, 0.13, 0.06, 0.03, 0.03],
+                ),
             })
 
     return pd.DataFrame(rows)

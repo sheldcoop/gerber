@@ -92,46 +92,89 @@ DEFECTS_F = ['Bridging', 'Open', 'Tombstone', 'Missing_Component',
 DEFECTS_B = ['Short', 'Void', 'Excess_Solder', 'Wicking',
              'Cold_Joint', 'Solder_Ball']
 
+# ── Verification code pools per BU × side ─────────────────────────────────────
+# Each pool reflects the realistic defect mix for that layer/side combination.
+# No 'F' — all codes are real classification codes from the inspection spec.
+#
+# BU-01  Right-edge squeegee wear
+#   Front: surface copper shorts/residue from squeegee pressure
+#   Back:  burrs and nicks from mechanical stress on back side
+# BU-02  Thermal hotspot bottom-right corner
+#   Front: copper nodules + voids from thermal expansion
+#   Back:  foreign material + ABF irregularity from thermal contamination
+# BU-03  Chronic single-pad design flaw
+#   Front: opens + process residue from insufficient design margin
+#   Back:  plating-under-resist + chemical residue from resist adhesion failure
+BG_CODES = {
+    ('BU-01', 'F'): ['CU18', 'CU22', 'CU15', 'CU25', 'GE22', 'CU10'],
+    ('BU-01', 'B'): ['CU15', 'CU10', 'CU18', 'GE01', 'GE22', 'CU41'],
+    ('BU-02', 'F'): ['CU54', 'CU14', 'GE57', 'GE22', 'CU10', 'CU94'],
+    ('BU-02', 'B'): ['GE57', 'CU54', 'BM31', 'GE22', 'CU10', 'BM01'],
+    ('BU-03', 'F'): ['CU16', 'CU17', 'GE22', 'CU10', 'GE01', 'CU20'],
+    ('BU-03', 'B'): ['CU17', 'CU19', 'GE22', 'BM01', 'CU10', 'HO31'],
+}
 
-def _emit(col: int, row: int, count: int, pool: list) -> list[dict]:
-    """Emit `count` defect rows for unit (col, row)."""
+
+def _emit(col: int, row: int, count: int, pool: list,
+          verif=None, bg_codes=None) -> list[dict]:
+    """Emit `count` defect rows for unit (col, row).
+
+    verif:    dominant verification code (85 % of rows).
+              Remaining 15 % sampled from bg_codes.
+    bg_codes: background verification code list for this BU/side.
+              Used for the 15 % remainder and for all rows when verif=None.
+              Falls back to a generic realistic mix if not provided.
+    """
     if count <= 0:
         return []
+    _bg = bg_codes or ['CU18', 'GE22', 'CU10', 'CU22', 'GE57', 'CU14',
+                       'CU15', 'CU54', 'GE01', 'BM01']
     cx, cy = _unit_center(col, row)
-    # Scatter within ±4 mm of cell centre — stays well inside 35×36 mm cell
     xs = RNG.normal(cx, 4.0, count)
     ys = RNG.normal(cy, 4.0, count)
-    return [{
-        'DEFECT_ID':     int(RNG.integers(10000, 99999)),
-        'DEFECT_TYPE':   str(RNG.choice(pool)),
-        'X_COORDINATES': round(float(x) * 1000, 1),   # microns
-        'Y_COORDINATES': round(float(y) * 1000, 1),   # microns
-        'UNIT_INDEX_X':  col,
-        'UNIT_INDEX_Y':  row,
-        'VERIFICATION':  str(RNG.choice(['N', 'Y', 'FP'], p=[0.70, 0.20, 0.10])),
-    } for x, y in zip(xs, ys)]
+    rows = []
+    for x, y in zip(xs, ys):
+        if verif is not None:
+            v = verif if RNG.random() < 0.85 else str(RNG.choice(_bg))
+        else:
+            v = str(RNG.choice(_bg))
+        rows.append({
+            'DEFECT_ID':     int(RNG.integers(10000, 99999)),
+            'DEFECT_TYPE':   str(RNG.choice(pool)),
+            'X_COORDINATES': round(float(x) * 1000, 1),
+            'Y_COORDINATES': round(float(y) * 1000, 1),
+            'UNIT_INDEX_X':  col,
+            'UNIT_INDEX_Y':  row,
+            'VERIFICATION':  v,
+        })
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BU-01 : Right-edge squeegee wear
 # ─────────────────────────────────────────────────────────────────────────────
-def _panel_bu01(panel_idx: int, pool: list) -> pd.DataFrame:
+def _panel_bu01(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
+    # Squeegee wear — dominant code differs per panel to make filter effect visible:
+    #   Front: CU18 (panels 1-2) → 40 %, CU22 (panels 3-4) → 40 %, CU25 (panel 5) → 20 %
+    #   Back:  CU15 (panels 1-2) → 40 %, CU10 (panels 3-4) → 40 %, CU18 (panel 5) → 20 %
+    _bg = BG_CODES[('BU-01', side)]
+    if side == 'F':
+        _hot_code  = {1: 'CU18', 2: 'CU18', 3: 'CU22', 4: 'CU22', 5: 'CU25'}.get(panel_idx)
+        _warm_code = {1: 'CU18', 2: 'CU22', 3: 'CU15', 4: 'CU25', 5: 'GE22'}.get(panel_idx)
+    else:
+        _hot_code  = {1: 'CU15', 2: 'CU15', 3: 'CU10', 4: 'CU10', 5: 'CU18'}.get(panel_idx)
+        _warm_code = {1: 'CU15', 2: 'CU10', 3: 'CU18', 4: 'GE22', 5: 'CU41'}.get(panel_idx)
     rows = []
     for col in range(COLS):
         for row in range(ROWS):
             if col >= 9:
-                # Hot: always fails, count varies per panel
                 n = int(RNG.integers(15, 26))
-                rows.extend(_emit(col, row, n, pool))
-
+                rows.extend(_emit(col, row, n, pool, verif=_hot_code, bg_codes=_bg))
             elif col >= 6:
-                # Warm: fails on ~50 % of panels
                 if RNG.random() < 0.55:
                     n = int(RNG.integers(5, 13))
-                    rows.extend(_emit(col, row, n, pool))
-                # else: zero defects this panel for this cell
-
-            # Cols 0–5: completely clean — no defects added
+                    rows.extend(_emit(col, row, n, pool, verif=_warm_code, bg_codes=_bg))
+            # Cols 0–5: clean
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         'DEFECT_ID','DEFECT_TYPE','X_COORDINATES','Y_COORDINATES',
@@ -141,27 +184,31 @@ def _panel_bu01(panel_idx: int, pool: list) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # BU-02 : Thermal hot-spot at bottom-right corner
 # ─────────────────────────────────────────────────────────────────────────────
-def _panel_bu02(panel_idx: int, pool: list) -> pd.DataFrame:
+def _panel_bu02(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
+    # Thermal hotspot — copper nodules front, FM + ABF back:
+    #   Front: CU54 (panels 1-3) → 60 %, CU14 (panels 4-5) → 40 %
+    #   Back:  GE57 (panels 1-2) → 40 %, CU54 (panels 3-4) → 40 %, BM31 (panel 5) → 20 %
+    _bg = BG_CODES[('BU-02', side)]
+    if side == 'F':
+        _hot_code  = {1: 'CU54', 2: 'CU54', 3: 'CU54', 4: 'CU14', 5: 'CU14'}.get(panel_idx)
+        _warm_code = {1: 'CU54', 2: 'CU10', 3: 'CU14', 4: 'GE22', 5: 'CU94'}.get(panel_idx)
+    else:
+        _hot_code  = {1: 'GE57', 2: 'GE57', 3: 'CU54', 4: 'CU54', 5: 'BM31'}.get(panel_idx)
+        _warm_code = {1: 'GE57', 2: 'CU54', 3: 'BM31', 4: 'GE22', 5: 'BM01'}.get(panel_idx)
     rows = []
     for col in range(COLS):
         for row in range(ROWS):
             if row <= 2 and col >= 8:
-                # Hot corner: always fails
                 n = int(RNG.integers(20, 36))
-                rows.extend(_emit(col, row, n, pool))
-
+                rows.extend(_emit(col, row, n, pool, verif=_hot_code, bg_codes=_bg))
             elif row <= 3 and col >= 6:
-                # Warm zone: fails ~65 % of panels
                 if RNG.random() < 0.65:
                     n = int(RNG.integers(5, 16))
-                    rows.extend(_emit(col, row, n, pool))
-
+                    rows.extend(_emit(col, row, n, pool, verif=_warm_code, bg_codes=_bg))
             elif row <= 4 and col >= 7:
-                # Outer warm ring: fails ~30 % of panels
                 if RNG.random() < 0.30:
                     n = int(RNG.integers(2, 8))
-                    rows.extend(_emit(col, row, n, pool))
-
+                    rows.extend(_emit(col, row, n, pool, verif=_warm_code, bg_codes=_bg))
             # Rest: clean
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
@@ -172,24 +219,38 @@ def _panel_bu02(panel_idx: int, pool: list) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # BU-03 : Chronic single-pad flaw — one always-hot unit + a few neighbours
 # ─────────────────────────────────────────────────────────────────────────────
-def _panel_bu03(panel_idx: int, pool: list) -> pd.DataFrame:
+def _panel_bu03(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
+    # Design flaw — opens + residue front, plating/chemical back:
+    #   Front: CU16 (panels 1-3) → 60 %, GE22 (panels 4-5) → 40 %
+    #   Back:  CU17 (panels 1-3) → 60 %, CU19 (panels 4-5) → 40 %
+    _bg = BG_CODES[('BU-03', side)]
+    if side == 'F':
+        _chronic_code = {1: 'CU16', 2: 'CU16', 3: 'CU16', 4: 'GE22', 5: 'GE22'}.get(panel_idx)
+        _sec_code     = {1: 'CU17', 2: 'CU16', 3: 'GE22', 4: 'CU10', 5: 'GE01'}.get(panel_idx)
+    else:
+        _chronic_code = {1: 'CU17', 2: 'CU17', 3: 'CU17', 4: 'CU19', 5: 'CU19'}.get(panel_idx)
+        _sec_code     = {1: 'CU17', 2: 'CU19', 3: 'GE22', 4: 'BM01', 5: 'HO31'}.get(panel_idx)
     rows = []
 
     # Primary chronic unit — every panel, many defects
-    rows.extend(_emit(5, 9, int(RNG.integers(20, 31)), pool))
+    rows.extend(_emit(5, 9, int(RNG.integers(20, 31)), pool,
+                      verif=_chronic_code, bg_codes=_bg))
 
     # Strong secondary — 80 % hit rate
     if RNG.random() < 0.80:
-        rows.extend(_emit(6, 8, int(RNG.integers(8, 16)), pool))
+        rows.extend(_emit(6, 8, int(RNG.integers(8, 16)), pool,
+                          verif=_sec_code, bg_codes=_bg))
 
     # Weaker tertiary — 60 % hit rate
     if RNG.random() < 0.60:
-        rows.extend(_emit(4, 10, int(RNG.integers(3, 9)), pool))
+        rows.extend(_emit(4, 10, int(RNG.integers(3, 9)), pool,
+                          verif=_sec_code, bg_codes=_bg))
 
     # Occasional neighbours — 25 % each
     for nc, nr in [(5, 8), (6, 9), (4, 9), (5, 10)]:
         if RNG.random() < 0.25:
-            rows.extend(_emit(nc, nr, int(RNG.integers(1, 5)), pool))
+            rows.extend(_emit(nc, nr, int(RNG.integers(1, 5)), pool,
+                              bg_codes=_bg))
 
     # Rest of panel: truly clean
 
@@ -221,7 +282,7 @@ def generate() -> None:
 
         for side_code, pool in SIDE_CONFIG:
             for p in range(1, N_PANELS + 1):
-                df = gen_fn(p, pool)
+                df = gen_fn(p, pool, side=side_code)
                 fname = f"{bu_name}{side_code}_Panel_{p:02d}.xlsx"
                 fpath = os.path.join(bu_dir, fname)
                 df.to_excel(fpath, sheet_name='Defects', index=False)

@@ -66,7 +66,7 @@ def export_unit_csv(df: pd.DataFrame) -> str:
         verified = 0
         unverified = len(group)
         if has_verif:
-            verified = int((group['VERIFICATION'].str.upper() == 'Y').sum())
+            verified = int((group['VERIFICATION'].str.upper() != 'F').sum())
             unverified = len(group) - verified
 
         rows.append({
