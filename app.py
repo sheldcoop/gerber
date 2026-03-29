@@ -635,12 +635,13 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         st.session_state['last_alignment_result'] = alignment
     elif aoi and aoi.has_data:
         defect_df = aoi.all_defects.copy()
+        _d_off_x = align_args.get('manual_offset_x', 0.0)
+        _d_off_y = align_args.get('manual_offset_y', 0.0)
         if 'X_MM' not in defect_df.columns and 'X' in defect_df.columns:
             defect_df['X_MM'] = defect_df['X'] / 1000.0
             defect_df['Y_MM'] = defect_df['Y'] / 1000.0
-        # Fix: DataFrame.get() returns None for missing columns, not the fallback scalar
-        defect_df['ALIGNED_X'] = defect_df['X_MM'] if 'X_MM' in defect_df.columns else 0.0
-        defect_df['ALIGNED_Y'] = defect_df['Y_MM'] if 'Y_MM' in defect_df.columns else 0.0
+        defect_df['ALIGNED_X'] = (defect_df['X_MM'] if 'X_MM' in defect_df.columns else 0.0) + _d_off_x
+        defect_df['ALIGNED_Y'] = (defect_df['Y_MM'] if 'Y_MM' in defect_df.columns else 0.0) + _d_off_y
         alignment = None
     else:
         # Default empty DataFrame if no AOI uploaded but SVGs are present
@@ -742,27 +743,38 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         st.markdown("### Panel Defect Map")
         if aoi and aoi.has_data:
             panel_df = aoi.all_defects.copy()
+            _p_off_x = align_args.get('manual_offset_x', 0.0)
+            _p_off_y = align_args.get('manual_offset_y', 0.0)
             if 'X_MM' not in panel_df.columns and 'X' in panel_df.columns:
-                panel_df['ALIGNED_X'] = panel_df['X'] / 1000.0
-                panel_df['ALIGNED_Y'] = panel_df['Y'] / 1000.0
+                panel_df['ALIGNED_X'] = panel_df['X'] / 1000.0 + _p_off_x
+                panel_df['ALIGNED_Y'] = panel_df['Y'] / 1000.0 + _p_off_y
             else:
-                panel_df['ALIGNED_X'] = panel_df['X_MM'] if 'X_MM' in panel_df.columns else 0.0
-                panel_df['ALIGNED_Y'] = panel_df['Y_MM'] if 'Y_MM' in panel_df.columns else 0.0
+                panel_df['ALIGNED_X'] = (panel_df['X_MM'] if 'X_MM' in panel_df.columns else 0.0) + _p_off_x
+                panel_df['ALIGNED_Y'] = (panel_df['Y_MM'] if 'Y_MM' in panel_df.columns else 0.0) + _p_off_y
 
             if align_args.get('flip_y', False) and not panel_df.empty:
                 panel_df['ALIGNED_Y'] = panel_df['ALIGNED_Y'].max() - panel_df['ALIGNED_Y']
 
             panel_config = OverlayConfig(min_feature_size=0.1)  # LOD: suppress sub-0.1mm traces at panel zoom
 
-            # Full-panel bounds for the substrate background grid
+            # Quadrant grid geometry (for grid overlay lines only)
             quad_bounds = get_panel_quadrant_bounds(
                 st.session_state.get('quad_rows_input', 6),
                 st.session_state.get('quad_cols_input', 6),
                 dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
                 dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
             )
-            ax1, ay1, ax2, ay2 = quad_bounds['frame']
-            panel_config.board_bounds = (ax1 - 10, ay1 - 10, ax2 + 10, ay2 + 10)
+
+            # Viewport: use ODB++ panel frame when TGZ is loaded (same space as CAM PNG
+            # and AOI X_MM/Y_MM). Fall back to geometry-engine bounds when no TGZ.
+            _rp_for_bounds = st.session_state.get('rendered_odb')
+            if _rp_for_bounds and _rp_for_bounds.panel_layout:
+                _vpw = _rp_for_bounds.panel_layout.panel_width
+                _vph = _rp_for_bounds.panel_layout.panel_height
+                panel_config.board_bounds = (-10, -10, _vpw + 10, _vph + 10)
+            else:
+                ax1, ay1, ax2, ay2 = quad_bounds['frame']
+                panel_config.board_bounds = (ax1 - 10, ay1 - 10, ax2 + 10, ay2 + 10)
 
             # Read active scope filters from capsule UI
             panel_config.color_mode    = st.session_state.get('color_mode_select', 'by_type')
@@ -835,8 +847,16 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.session_state['_clustered_df'] = clustered_df
 
             # ── Professional PCB substrate panel background ───────────────
+            # Use ODB++ panel dimensions when TGZ is loaded (matches CAM PNG exactly).
+            # Fall back to geometry-engine frame bounds when no TGZ.
+            if _rp_for_bounds and _rp_for_bounds.panel_layout:
+                frame_bx1, frame_by1 = 0.0, 0.0
+                frame_bx2 = _rp_for_bounds.panel_layout.panel_width
+                frame_by2 = _rp_for_bounds.panel_layout.panel_height
+            else:
+                frame_bx1, frame_by1, frame_bx2, frame_by2 = quad_bounds['frame']
+
             # Dark green solder-mask base for the whole frame
-            frame_bx1, frame_by1, frame_bx2, frame_by2 = quad_bounds['frame']
             panel_fig.add_shape(
                 type="rect",
                 x0=frame_bx1 - 8, y0=frame_by1 - 8,
@@ -1186,9 +1206,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
                     _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
 
+                    _cm_off_x = align_args.get('manual_offset_x', 0.0)
+                    _cm_off_y = align_args.get('manual_offset_y', 0.0)
                     _cm_plot = _cm_src.copy()
-                    _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr
-                    _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr
+                    _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr + _cm_off_x
+                    _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr + _cm_off_y
 
                     # ── Build figure ──────────────────────────────────────────
                     _cm_cfg = OverlayConfig()
@@ -1243,14 +1265,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                 sizing="stretch", layer="below",
                                 opacity=0.95 if not _is_multi_cm else 0.7,
                             ))
-                        # Tighten viewport to the actual CAM bounds
-                        _cb0 = next(iter(_rendered_cm.layers.values())).bounds
-                        _cm_cfg.board_bounds = (
-                            _cb0[0] + _shift_x - 1.0,
-                            _cb0[1] + _shift_y - 1.0,
-                            _cb0[2] + _shift_x + 1.0,
-                            _cb0[3] + _shift_y + 1.0,
-                        )
+                        # Lock viewport to cell dimensions (same as green rect and SVG placement)
                         from visualizer import _apply_layout as _cm_apply_layout
                         _cm_apply_layout(_cm_fig, _cm_cfg)
 
