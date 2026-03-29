@@ -1272,8 +1272,26 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     _cam_min_x = _first_lyr_cm.bounds[0]
                     _cam_min_y = _first_lyr_cm.bounds[1]
                 else:
-                    # No TGZ loaded — origins unknown, defects will show at raw coords
-                    _cm_origins = {}
+                    # No TGZ — derive unit origins from sidebar geometry (same formula
+                    # as alignment.py so sample data aligns correctly without CAM)
+                    _no_tgz_ctx = calculate_geometry(_q_rows_cm, _q_cols_cm, _d_gap_x_cm, _d_gap_y_cm)
+                    _cam_cell_w = _no_tgz_ctx.cell_width
+                    _cam_cell_h = _no_tgz_ctx.cell_height
+                    _all_orig_pos_nt: list[tuple[float, float]] = []
+                    for _qox_nt, _qoy_nt in _no_tgz_ctx.quadrant_origins.values():
+                        for _rr_nt in range(_q_rows_cm):
+                            for _cc_nt in range(_q_cols_cm):
+                                _all_orig_pos_nt.append((
+                                    _qox_nt + INTER_UNIT_GAP + _cc_nt * _no_tgz_ctx.stride_x,
+                                    _qoy_nt + INTER_UNIT_GAP + _rr_nt * _no_tgz_ctx.stride_y,
+                                ))
+                    _uo_xs_nt = sorted(set(round(x, 2) for x, _ in _all_orig_pos_nt))
+                    _uo_ys_nt = sorted(set(round(y, 2) for _, y in _all_orig_pos_nt))
+                    _cm_origins = {
+                        (ri, ci): (_uo_xs_nt[ci], _uo_ys_nt[ri])
+                        for ri in range(len(_uo_ys_nt))
+                        for ci in range(len(_uo_xs_nt))
+                    }
 
                 # ── Scope-filter AOI data (cached) ────────────────────────────
                 _bu_cm   = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
@@ -1283,6 +1301,26 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     tuple(sorted(_bu_cm)) if _bu_cm else (),
                     tuple(sorted(_side_cm)),
                 )
+
+                # ── Per-panel toggle (SOURCE_FILE) ────────────────────────────
+                _cm_all_srcs = (
+                    sorted(_cm_src['SOURCE_FILE'].unique().tolist())
+                    if 'SOURCE_FILE' in _cm_src.columns else []
+                )
+                if _cm_all_srcs:
+                    st.caption(f"**{len(_cm_all_srcs)} panels** — toggle to include/exclude:")
+                    _cm_tog_cols = st.columns(min(len(_cm_all_srcs), 8))
+                    _cm_sel_srcs: list[str] = []
+                    for _cpi, _csrc in enumerate(_cm_all_srcs):
+                        _cm_inc = _cm_tog_cols[_cpi % len(_cm_tog_cols)].toggle(
+                            f"P{_cpi + 1}", value=True,
+                            key=f"cm_panel_tog_{_cpi}",
+                            help=_csrc,
+                        )
+                        if _cm_inc:
+                            _cm_sel_srcs.append(_csrc)
+                    if _cm_sel_srcs:
+                        _cm_src = _cm_src[_cm_src['SOURCE_FILE'].isin(_cm_sel_srcs)]
 
                 # Filter to selected units only
                 _cm_src = _cm_src.copy()
@@ -1393,8 +1431,9 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
                     _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
 
-                    # ── Background: CAM (Gerbonara) ──────────────────────────
-                    _rendered_cm  = st.session_state.get('rendered_odb')
+                    # ── Background: CAM (Gerbonara) or plain cell outline ─────
+                    _rendered_cm      = st.session_state.get('rendered_odb')
+                    _active_layer_name = None
 
                     if _rendered_cm and _rendered_cm.layers:
                         # Pick checked layers only — if none checked, show no background
@@ -1439,6 +1478,16 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                 opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
                             ))
                         # Lock viewport to cell dimensions (same as green rect and SVG placement)
+                        from visualizer import _apply_layout as _cm_apply_layout
+                        _cm_apply_layout(_cm_fig, _cm_cfg)
+                    else:
+                        # No TGZ — draw unit cell outline as spatial reference
+                        _cm_fig.add_shape(
+                            type="rect", x0=0, y0=0, x1=_cam_cell_w, y1=_cam_cell_h,
+                            line=dict(color="rgba(0,180,80,0.5)", width=1.5),
+                            fillcolor="rgba(0,0,0,0)",
+                            layer="below",
+                        )
                         from visualizer import _apply_layout as _cm_apply_layout
                         _cm_apply_layout(_cm_fig, _cm_cfg)
 
@@ -2282,62 +2331,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 except ImportError:
                     st.warning("scikit-learn required: pip install scikit-learn")
 
-    # ---- Job Registration & Trend Analysis ----
-    if aoi and aoi.has_data:
-        with st.expander("📈 Job Registry & Trend Analysis", expanded=False):
-            from job_registry import register_job, list_jobs, get_job_density_summary
-            import hashlib as _hl
-
-            reg_col1, reg_col2, reg_col3, reg_col4 = st.columns([3, 3, 2, 2])
-            job_id = reg_col1.text_input("Job ID", value="", key="reg_job_id", placeholder="e.g. LOT-2026-0327")
-            panel_id = reg_col2.text_input("Panel ID", value="", key="reg_panel_id", placeholder="e.g. Panel-01")
-            date_val = reg_col3.date_input("Date", key="reg_date")
-            if reg_col4.button("Register Job", width="stretch") and job_id:
-                _hash = _hl.md5(aoi.all_defects.to_csv().encode()).hexdigest()
-                ok = register_job(job_id, panel_id, str(date_val), _hash, aoi.all_defects)
-                if ok:
-                    st.success(f"Registered job {job_id}/{panel_id}")
-                else:
-                    st.info(f"Job {job_id}/{panel_id} already registered")
-
-            st.divider()
-            st.subheader("Trend Analysis")
-            jobs_df = list_jobs()
-            if jobs_df.empty:
-                st.info("No jobs registered yet. Register the current inspection above to start trending.")
-            else:
-                st.dataframe(jobs_df[['job_id', 'panel_id', 'date']].drop_duplicates(),
-                             width="stretch", hide_index=True)
-
-                density = get_job_density_summary()
-                if not density.empty:
-                    # Aggregate: total defects per job
-                    job_totals = density.groupby(['job_id', 'date'])['total_defects'].sum().reset_index()
-                    import plotly.express as px
-                    trend_fig = px.bar(
-                        job_totals, x='date', y='total_defects', color='job_id',
-                        title="Defect Count by Job",
-                        labels={'total_defects': 'Total Defects', 'date': 'Date'},
-                    )
-                    trend_fig.update_layout(
-                        plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
-                        font=dict(color='#e0e0e0'),
-                    )
-                    st.plotly_chart(trend_fig, width="stretch")
-
-                    # Heatmap: defect density per unit position
-                    unit_density = density.groupby(['unit_row', 'unit_col'])['total_defects'].sum().reset_index()
-                    if not unit_density.empty:
-                        heatmap_fig = px.density_heatmap(
-                            unit_density, x='unit_col', y='unit_row', z='total_defects',
-                            title="Defect Density Heatmap (All Jobs)",
-                            labels={'unit_col': 'Unit Column', 'unit_row': 'Unit Row'},
-                        )
-                        heatmap_fig.update_layout(
-                            plot_bgcolor='#111111', paper_bgcolor='#1a1a1a',
-                            font=dict(color='#e0e0e0'),
-                        )
-                        st.plotly_chart(heatmap_fig, width="stretch")
 
 else:
     # Landing page
