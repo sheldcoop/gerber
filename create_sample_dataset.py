@@ -174,7 +174,10 @@ def _panel_bu01(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
                 if RNG.random() < 0.55:
                     n = int(RNG.integers(5, 13))
                     rows.extend(_emit(col, row, n, pool, verif=_warm_code, bg_codes=_bg))
-            # Cols 0–5: clean
+            # Background noise — all units including "clean" cols 0–5.
+            # Low hit rate + count so systematic patterns still dominate.
+            if RNG.random() < 0.20:
+                rows.extend(_emit(col, row, int(RNG.integers(1, 4)), pool, bg_codes=_bg))
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         'DEFECT_ID','DEFECT_TYPE','X_COORDINATES','Y_COORDINATES',
@@ -209,7 +212,10 @@ def _panel_bu02(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
                 if RNG.random() < 0.30:
                     n = int(RNG.integers(2, 8))
                     rows.extend(_emit(col, row, n, pool, verif=_warm_code, bg_codes=_bg))
-            # Rest: clean
+            # Background noise across all units — thermal panels still have
+            # random contamination and nicks outside the hot corner.
+            if RNG.random() < 0.18:
+                rows.extend(_emit(col, row, int(RNG.integers(1, 4)), pool, bg_codes=_bg))
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         'DEFECT_ID','DEFECT_TYPE','X_COORDINATES','Y_COORDINATES',
@@ -252,7 +258,12 @@ def _panel_bu03(panel_idx: int, pool: list, side: str = 'F') -> pd.DataFrame:
             rows.extend(_emit(nc, nr, int(RNG.integers(1, 5)), pool,
                               bg_codes=_bg))
 
-    # Rest of panel: truly clean
+    # Background noise across all units — design-flaw panels still have
+    # random scatter defects everywhere; the chronic cluster just dominates.
+    for col in range(COLS):
+        for row in range(ROWS):
+            if RNG.random() < 0.15:
+                rows.extend(_emit(col, row, int(RNG.integers(1, 3)), pool, bg_codes=_bg))
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         'DEFECT_ID','DEFECT_TYPE','X_COORDINATES','Y_COORDINATES',
