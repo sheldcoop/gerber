@@ -30,7 +30,7 @@ from typing import Optional
 
 from shapely.geometry import Point, Polygon, LineString
 from shapely.geometry import box as shapely_box
-from shapely.affinity import rotate as shapely_rotate
+from shapely.affinity import rotate as shapely_rotate, scale as shapely_scale
 from shapely.ops import unary_union
 
 
@@ -45,6 +45,7 @@ class _ODBSymbol:
     size_x: float # primary size: diameter (round), side (square), width (rect/oval)
     size_y: float # secondary size: height for rect/oval; equals size_x otherwise
     raw_desc: str = '' # original descriptor string
+    corner_r: float = 0.0  # corner radius for rounded_rect
 
 
 @dataclass
@@ -493,7 +494,7 @@ def _parse_symbol_descriptor(desc: str) -> _ODBSymbol:
     if desc.startswith('special_') or desc.startswith('sc_join'):
         return _ODBSymbol('skip', 0.0, 0.0, desc)
 
-    if desc.startswith('r') and not desc.startswith('rect'):
+    if desc.startswith('r') and not desc.startswith('rect') and not desc.startswith('rounded') and not desc.startswith('rr'):
         try:
             d = float(desc[1:])
             return _ODBSymbol('round', d, d, desc)
@@ -512,14 +513,71 @@ def _parse_symbol_descriptor(desc: str) -> _ODBSymbol:
             d = float(parts[1])
             return _ODBSymbol('donut', D, d, desc)
         except (IndexError, ValueError): pass
-    elif desc.startswith('oval'):
+    elif desc.startswith('oval') or desc.startswith('oblong'):
         try:
-            parts = desc[4:].split('x')
+            offset = 4 if desc.startswith('oval') else 6
+            parts = desc[offset:].split('x')
             w = float(parts[0])
             h = float(parts[1])
             return _ODBSymbol('oval', w, h, desc)
         except (IndexError, ValueError): pass
-    elif desc.startswith('s') and not desc.startswith('square') and not desc.startswith('special') and not desc.startswith('sc_join'):
+    elif desc.startswith('rr') or desc.startswith('rounded_rect'):
+        # Rounded rectangle: rr<w>x<h>x<r> or rounded_rect<w>x<h>x<r>
+        try:
+            offset = 2 if desc.startswith('rr') else 12
+            parts = desc[offset:].split('x')
+            w = float(parts[0])
+            h = float(parts[1])
+            r = float(parts[2]) if len(parts) > 2 else min(w, h) * 0.2
+            return _ODBSymbol('rounded_rect', w, h, desc, corner_r=r)
+        except (IndexError, ValueError): pass
+    elif desc.startswith('octagon') or desc.startswith('oct'):
+        try:
+            offset = 7 if desc.startswith('octagon') else 3
+            d = float(desc[offset:])
+            return _ODBSymbol('octagon', d, d, desc)
+        except ValueError: pass
+    elif desc.startswith('hexagon') or desc.startswith('hex'):
+        try:
+            offset = 7 if desc.startswith('hexagon') else 3
+            d = float(desc[offset:])
+            return _ODBSymbol('hexagon', d, d, desc)
+        except ValueError: pass
+    elif desc.startswith('triangle') or desc.startswith('tri'):
+        try:
+            offset = 8 if desc.startswith('triangle') else 3
+            d = float(desc[offset:])
+            return _ODBSymbol('triangle', d, d, desc)
+        except ValueError: pass
+    elif desc.startswith('thermal'):
+        # thermal<outer>x<inner>x<spoke_w>x<n_spokes> — thermal relief pad
+        try:
+            parts = desc[7:].split('x')
+            outer = float(parts[0])
+            inner = float(parts[1]) if len(parts) > 1 else outer * 0.6
+            return _ODBSymbol('thermal', outer, inner, desc)
+        except (IndexError, ValueError): pass
+    elif desc.startswith('cross'):
+        try:
+            parts = desc[5:].split('x')
+            w = float(parts[0])
+            h = float(parts[1]) if len(parts) > 1 else w
+            return _ODBSymbol('cross', w, h, desc)
+        except (IndexError, ValueError): pass
+    elif desc.startswith('ellipse'):
+        try:
+            parts = desc[7:].split('x')
+            w = float(parts[0])
+            h = float(parts[1])
+            return _ODBSymbol('ellipse', w, h, desc)
+        except (IndexError, ValueError): pass
+    elif desc.startswith('sq') or desc.startswith('square'):
+        try:
+            offset = 2 if desc.startswith('sq') else 6
+            d = float(desc[offset:])
+            return _ODBSymbol('square', d, d, desc)
+        except ValueError: pass
+    elif desc.startswith('s') and not desc.startswith('special') and not desc.startswith('sc_join'):
         try:
             d = float(desc[1:])
             return _ODBSymbol('square', d, d, desc)
@@ -530,8 +588,13 @@ def _parse_symbol_descriptor(desc: str) -> _ODBSymbol:
             return _ODBSymbol('diamond', d, d, desc)
         except ValueError: pass
 
-    # Default fallback
-    return _ODBSymbol('unknown', 0.1, 0.1, desc)
+    # Fallback: extract any numbers from descriptor for a best-guess bounding shape
+    import re as _re
+    _nums = [float(n) for n in _re.findall(r'\d+\.?\d*', desc) if float(n) > 0]
+    if _nums:
+        _sz = max(_nums[0], _nums[1]) if len(_nums) >= 2 else _nums[0]
+        return _ODBSymbol('round', _sz, _sz, desc)
+    return _ODBSymbol('round', 0.2, 0.2, desc)
 
 
 def _parse_symbol_table(lines: list) -> dict:
@@ -687,9 +750,7 @@ def _symbol_to_geometry(x: float, y: float, sym: _ODBSymbol, rotation_deg: float
             radius = sym.size_x / 2.0
             if radius <= 0:
                 return None
-            # Keep resolution low — dense boards rasterize layers to PNG anyway,
-            # and even for vector rendering 6 segments is indistinguishable at zoom.
-            res = 4 if radius < 0.5 else 6
+            res = 8 if radius < 0.5 else 16
             return Point(x, y).buffer(radius, resolution=res)
 
         elif sym.shape == 'square':
@@ -701,16 +762,80 @@ def _symbol_to_geometry(x: float, y: float, sym: _ODBSymbol, rotation_deg: float
             geom = shapely_box(x - w/2, y - h/2, x + w/2, y + h/2)
 
         elif sym.shape == 'oval':
-            # Obround: rectangle with semicircular ends
+            # True obround: two semicircles joined by a rectangle
             w, h = sym.size_x, sym.size_y
             r = min(w, h) / 2.0
-            rect = shapely_box(x - w/2, y - h/2, x + w/2, y + h/2)
-            geom = rect.buffer(r * 0.01).simplify(0.001)  # cosmetic rounding
+            if w >= h:
+                # Horizontal capsule
+                rect = shapely_box(x - (w/2 - r), y - r, x + (w/2 - r), y + r)
+                c1 = Point(x - (w/2 - r), y).buffer(r, resolution=8)
+                c2 = Point(x + (w/2 - r), y).buffer(r, resolution=8)
+            else:
+                # Vertical capsule
+                rect = shapely_box(x - r, y - (h/2 - r), x + r, y + (h/2 - r))
+                c1 = Point(x, y - (h/2 - r)).buffer(r, resolution=8)
+                c2 = Point(x, y + (h/2 - r)).buffer(r, resolution=8)
+            geom = rect.union(c1).union(c2)
+
+        elif sym.shape == 'rounded_rect':
+            w, h = sym.size_x, sym.size_y
+            r = min(sym.corner_r, min(w, h) / 2.0)
+            if r <= 0:
+                geom = shapely_box(x - w/2, y - h/2, x + w/2, y + h/2)
+            else:
+                inner = shapely_box(x - w/2 + r, y - h/2 + r, x + w/2 - r, y + h/2 - r)
+                geom = inner.buffer(r, resolution=4)
 
         elif sym.shape == 'diamond':
             s = sym.size_x / 2.0
             pts = [(x, y + s), (x + s, y), (x, y - s), (x - s, y)]
             geom = Polygon(pts)
+
+        elif sym.shape == 'octagon':
+            d = sym.size_x / 2.0
+            pts = [(x + d * math.cos(math.pi / 8 + i * math.pi / 4),
+                    y + d * math.sin(math.pi / 8 + i * math.pi / 4))
+                   for i in range(8)]
+            geom = Polygon(pts)
+
+        elif sym.shape == 'hexagon':
+            d = sym.size_x / 2.0
+            pts = [(x + d * math.cos(i * math.pi / 3),
+                    y + d * math.sin(i * math.pi / 3))
+                   for i in range(6)]
+            geom = Polygon(pts)
+
+        elif sym.shape == 'triangle':
+            d = sym.size_x / 2.0
+            pts = [(x + d * math.cos(math.pi / 2 + i * 2 * math.pi / 3),
+                    y + d * math.sin(math.pi / 2 + i * 2 * math.pi / 3))
+                   for i in range(3)]
+            geom = Polygon(pts)
+
+        elif sym.shape == 'ellipse':
+            # Approximate as scaled circle
+            w, h = sym.size_x, sym.size_y
+            circle = Point(x, y).buffer(0.5, resolution=16)
+            geom = shapely_scale(circle, w, h, origin=(x, y))
+
+        elif sym.shape == 'thermal':
+            # Thermal relief: outer ring minus inner circle minus 4 spokes
+            outer = Point(x, y).buffer(sym.size_x / 2.0, resolution=16)
+            inner = Point(x, y).buffer(sym.size_y / 2.0, resolution=16)
+            ring = outer.difference(inner)
+            spoke_w = max((sym.size_x - sym.size_y) * 0.15, 0.02)
+            h_spoke = shapely_box(x - sym.size_x/2, y - spoke_w/2,
+                                  x + sym.size_x/2, y + spoke_w/2)
+            v_spoke = shapely_box(x - spoke_w/2, y - sym.size_x/2,
+                                  x + spoke_w/2, y + sym.size_x/2)
+            geom = ring.difference(h_spoke).difference(v_spoke)
+
+        elif sym.shape == 'cross':
+            w, h = sym.size_x, sym.size_y
+            arm_w = min(w, h) * 0.25
+            h_bar = shapely_box(x - w/2, y - arm_w/2, x + w/2, y + arm_w/2)
+            v_bar = shapely_box(x - arm_w/2, y - h/2, x + arm_w/2, y + h/2)
+            geom = h_bar.union(v_bar)
 
         elif sym.shape == 'donut':
             outer = Point(x, y).buffer(sym.size_x / 2.0, resolution=16)
@@ -733,12 +858,14 @@ def _symbol_to_geometry(x: float, y: float, sym: _ODBSymbol, rotation_deg: float
 
 
 def _odb_arc_to_points(x1: float, y1: float, x2: float, y2: float,
-                        xc: float, yc: float, num_segments: int = 16) -> list:
+                        xc: float, yc: float,
+                        cw: bool = False,
+                        num_segments: int = 16) -> list:
     """
     Approximate a circular arc (start→end around center) with line points.
 
-    ODB++ arc contours are counterclockwise by default. We compute the CCW
-    sweep angle and sample evenly along it.
+    cw=False → counter-clockwise (ODB++ default when no direction flag).
+    cw=True  → clockwise (when OC line has Y/CW flag).
     """
     r = math.sqrt((x1 - xc)**2 + (y1 - yc)**2)
     if r < 1e-9:
@@ -747,12 +874,17 @@ def _odb_arc_to_points(x1: float, y1: float, x2: float, y2: float,
     a_start = math.atan2(y1 - yc, x1 - xc)
     a_end   = math.atan2(y2 - yc, x2 - xc)
 
-    # Ensure CCW sweep (positive direction)
-    if a_end <= a_start:
-        a_end += 2 * math.pi
+    if cw:
+        # Clockwise: sweep must be negative
+        if a_end >= a_start:
+            a_end -= 2 * math.pi
+    else:
+        # Counter-clockwise: sweep must be positive
+        if a_end <= a_start:
+            a_end += 2 * math.pi
 
     sweep = a_end - a_start
-    n = max(4, int(abs(sweep) / (2 * math.pi) * num_segments))
+    n = max(8, int(abs(sweep) / (2 * math.pi) * num_segments))
 
     pts = []
     for k in range(1, n + 1):
@@ -891,14 +1023,20 @@ def _parse_surface_block(surface_lines: list, uf: float):
                 current.append((x, y))
 
         elif cmd == 'OC':
-            # Arc: OC x_end y_end x_center y_center
+            # Arc: OC x_end y_end x_center y_center [cw_flag]
+            # Optional 5th token: Y/CW/1 = clockwise, N/CCW/0 = counter-clockwise
             if len(parts) >= 5 and current:
                 x_end = float(parts[1]) * uf
                 y_end = float(parts[2]) * uf
                 xc    = float(parts[3]) * uf
                 yc    = float(parts[4]) * uf
+                cw_flag = False
+                if len(parts) >= 6:
+                    _d = parts[5].split(';')[0].strip().upper()
+                    cw_flag = _d in ('Y', 'CW', '1')
                 x_start, y_start = current[-1]
-                arc_pts = _odb_arc_to_points(x_start, y_start, x_end, y_end, xc, yc)
+                arc_pts = _odb_arc_to_points(x_start, y_start, x_end, y_end,
+                                              xc, yc, cw=cw_flag)
                 current.extend(arc_pts)
 
         elif cmd == 'OE':

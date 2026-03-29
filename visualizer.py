@@ -522,7 +522,10 @@ def _add_defect_traces(
         ))
 
     # Determine grouping column and color palette
-    if config.color_mode == 'by_buildup' and 'BUILDUP' in filtered.columns:
+    if config.color_mode == 'by_source' and 'SOURCE_FILE' in filtered.columns:
+        group_col = 'SOURCE_FILE'
+        palette = DEFECT_TYPE_COLORS
+    elif config.color_mode == 'by_buildup' and 'BUILDUP' in filtered.columns:
         group_col = 'BUILDUP'
         palette = BUILDUP_COLORS
     elif config.color_mode == 'by_severity' and 'DEFECT_TYPE' in filtered.columns:
@@ -769,6 +772,57 @@ def build_defect_only_figure(
 
     if defect_df is not None and not defect_df.empty:
         _add_defect_traces(fig, defect_df, config)
+
+    _apply_layout(fig, config)
+    return fig
+
+
+def build_heatmap_figure(
+    defect_df: pd.DataFrame,
+    config: OverlayConfig,
+) -> go.Figure:
+    """
+    Build a Plotly figure with a density heatmap of AOI defects.
+    """
+    fig = go.Figure()
+
+    if defect_df is not None and not defect_df.empty and 'ALIGNED_X' in defect_df.columns:
+        # Apply filters
+        mask = pd.Series(True, index=defect_df.index)
+
+        if config.defect_types:
+            mask &= defect_df['DEFECT_TYPE'].isin(config.defect_types)
+
+        if config.buildup_filter and 'BUILDUP' in defect_df.columns:
+            mask &= defect_df['BUILDUP'].isin(config.buildup_filter)
+
+        if config.side_filter != 'Both' and 'SIDE' in defect_df.columns:
+            side_code = 'F' if config.side_filter == 'Front' else 'B'
+            mask &= defect_df['SIDE'] == side_code
+
+        filtered = defect_df[mask].copy()
+
+        if not filtered.empty:
+            # Custom transparent-to-hot colorscale so the "0 density" background is invisible
+            hot_transparent = [
+                [0.0, "rgba(0,0,0,0)"],         # Transparent where there are no defects
+                [0.2, "rgba(178,34,34,0.4)"],   # Dark red
+                [0.5, "rgba(255,69,0,0.7)"],    # Orange/Red
+                [0.8, "rgba(255,215,0,0.9)"],   # Yellow/Gold
+                [1.0, "rgba(255,255,255,1.0)"]  # White hot center
+            ]
+
+            fig.add_trace(go.Histogram2dContour(
+                x=filtered['ALIGNED_X'],
+                y=filtered['ALIGNED_Y'],
+                colorscale=hot_transparent,
+                contours=dict(showlines=False),
+                opacity=0.8,
+                showscale=False,
+                ncontours=30,
+                name='Defect Density Heatmap',
+                hoverinfo='skip'
+            ))
 
     _apply_layout(fig, config)
     return fig
