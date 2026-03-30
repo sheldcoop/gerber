@@ -166,10 +166,10 @@ def render_panelization_data(parsed, aoi, align_args):
             if not _sample.empty and _sel_row < len(_uniq_y) and _sel_col < len(_uniq_x):
                 _ux_sel = _uniq_x[_sel_col]
                 _uy_sel = _uniq_y[_sel_row]
-                _sample['X_MM - unit_X'] = (_sample['X_MM'] - _ux_sel).round(3)
-                _sample['Y_MM - unit_Y'] = (_sample['Y_MM'] - _uy_sel).round(3)
-                _sample['In range X?'] = _sample['X_MM - unit_X'].between(0, uw)
-                _sample['In range Y?'] = _sample['Y_MM - unit_Y'].between(0, uh)
+                _sample['X_MM - unit_origin_X'] = (_sample['X_MM'] - _ux_sel).round(3)
+                _sample['Y_MM - unit_origin_Y'] = (_sample['Y_MM'] - _uy_sel).round(3)
+                _sample['In range X?'] = _sample['X_MM - unit_origin_X'].between(0, uw)
+                _sample['In range Y?'] = _sample['Y_MM - unit_origin_Y'].between(0, uh)
                 _sample = _sample.round(3)
 
                 _all_ok_x = _sample['In range X?'].all()
@@ -184,7 +184,7 @@ def render_panelization_data(parsed, aoi, align_args):
                     )
 
                 st.dataframe(
-                    _sample[['X_MM', 'Y_MM', 'X_MM - unit_X', 'Y_MM - unit_Y', 'In range X?', 'In range Y?']],
+                    _sample[['X_MM', 'Y_MM', 'X_MM - unit_origin_X', 'Y_MM - unit_origin_Y', 'In range X?', 'In range Y?']],
                     use_container_width=True, hide_index=True
                 )
                 st.caption(
