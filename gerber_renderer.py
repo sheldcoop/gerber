@@ -205,7 +205,7 @@ def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) ->
         Base64 PNG data URL, or '' on failure.
     """
     import io
-    import cairosvg
+    import     uv add cairosvg --index https://pypi.org/simplecairosvg
     from PIL import Image
 
     pw, ph = panel_layout.panel_width, panel_layout.panel_height
