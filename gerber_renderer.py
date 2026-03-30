@@ -542,9 +542,10 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         raw_max_y = max(p[1] for p in unique) + uh
         content_w = raw_max_x - raw_min_x
         content_h = raw_max_y - raw_min_y
-        # Use ODB++ panel profile dimensions; fall back to content size (no margin)
-        pw = panel_width  if panel_width  is not None else content_w
-        ph = panel_height if panel_height is not None else content_h
+        # Use ODB++ panel profile dimensions; fall back to 510×515 physical frame
+        # (the AOI machine measures from the physical panel edge; we must match that)
+        pw = panel_width  if panel_width  is not None else 510.0
+        ph = panel_height if panel_height is not None else 515.0
         shift_x = (pw - content_w) / 2.0 - raw_min_x
         shift_y = (ph - content_h) / 2.0 - raw_min_y
         unique = [(px + shift_x, py + shift_y) for px, py in unique]
