@@ -32,7 +32,7 @@ from alignment import (
     get_panel_quadrant_bounds,
     calculate_geometry, FRAME_WIDTH, FRAME_HEIGHT, INTER_UNIT_GAP,
 )
-from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
+from visualizer import build_defect_only_figure, build_heatmap_figure, OverlayConfig, _apply_layout
 import plotly.graph_objects as go
 
 
@@ -1755,3 +1755,44 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
                 except ImportError:
                     st.warning("scikit-learn required: pip install scikit-learn")
+
+    # ── Panel Heatmap Tab ───────────────────────────────────────────────────
+    elif view_mode == "🔥 Panel Heatmap":
+        st.markdown("### 🔥 Panel Heatmap")
+        st.caption("Density visualization of defects across the entire panel to identify systemic hotspots.")
+
+        if aoi and aoi.has_data:
+            # We want to use the full panel coordinates, similar to "Panel Overview"
+            if alignment:
+                 hm_df = defect_df.copy()
+            else:
+                 config = CoordinateTransformerConfig(
+                      manual_offset_x=align_args.get('manual_offset_x', 0.0),
+                      manual_offset_y=align_args.get('manual_offset_y', 0.0),
+                 )
+                 transformer = CoordinateTransformer(config)
+                 hm_df = transformer.apply(aoi.all_defects)
+
+            if st.session_state.get('rendered_odb') and st.session_state.get('rendered_odb').panel_layout:
+                pb_w = st.session_state.get('rendered_odb').panel_layout.panel_width
+                pb_h = st.session_state.get('rendered_odb').panel_layout.panel_height
+                bounds = (-10, -10, pb_w + 10, pb_h + 10)
+            else:
+                ax1, ay1, ax2, ay2 = get_panel_quadrant_bounds(
+                    st.session_state.get('quad_rows_input', 6),
+                    st.session_state.get('quad_cols_input', 6),
+                    dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
+                    dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
+                )['frame']
+                bounds = (ax1 - 10, ay1 - 10, ax2 + 10, ay2 + 10)
+
+            hm_config = OverlayConfig(board_bounds=bounds)
+            hm_config.defect_types   = st.session_state.get('defect_type_select', aoi.defect_types)
+            hm_config.buildup_filter = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
+            side_active = st.session_state.get('side_cap_select', 'All')
+            hm_config.side_filter    = 'Both' if side_active == 'All' else side_active
+
+            hm_fig = build_heatmap_figure(hm_df, hm_config)
+            st.plotly_chart(hm_fig, width='stretch', config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
+        else:
+            st.info("Upload AOI defect data to view the Panel Heatmap.")
