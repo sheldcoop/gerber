@@ -1485,9 +1485,6 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     "Click any cell in the grid to drill into Unit Commonality for that position."
                 )
             
-        else:
-            st.info("Upload AOI defect data to view the Panel Heatmap.")
-
     # ---- Defect Summary Panel ----
     if aoi and aoi.has_data:
         with st.expander("📊 Defect Summary", expanded=False):
