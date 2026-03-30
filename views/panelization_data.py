@@ -21,15 +21,17 @@ def render_panelization_data(parsed, aoi, align_args):
     _c1, _c2, _c3, _c4, _c5 = st.columns(5)
     _c1.metric("Panel Width",  f"{pl.panel_width:.2f} mm")
     _c2.metric("Panel Height", f"{pl.panel_height:.2f} mm")
-    _c3.metric("Unit Width",   f"{uw:.3f} mm")
-    _c4.metric("Unit Height",  f"{uh:.3f} mm")
+    _c3.metric("Unit Width (profile)", f"{uw:.3f} mm",
+               help="From ODB++ board profile — the physical board edge. Used for centering and alignment.")
+    _c4.metric("Unit Height (profile)", f"{uh:.3f} mm",
+               help="From ODB++ board profile — the physical board edge. Used for centering and alignment.")
     _c5.metric("Total Units",  pl.total_units)
 
     _c6, _c7, _c8 = st.columns(3)
     _c6.metric("Rows", pl.rows)
     _c7.metric("Cols", pl.cols)
 
-    # Copper bounds from first non-drill layer
+    # Copper bounds: first non-drill layer vs aggregate
     _first_lyr = next(
         (l for l in _rodb.layers.values() if l.layer_type != 'drill'),
         next(iter(_rodb.layers.values()), None)
@@ -38,7 +40,18 @@ def render_panelization_data(parsed, aoi, align_args):
         _cb = _first_lyr.bounds
         _cop_w = _cb[2] - _cb[0]
         _cop_h = _cb[3] - _cb[1]
-        _c8.metric("Copper Extent", f"{_cop_w:.2f} × {_cop_h:.2f} mm")
+        _bb = _rodb.board_bounds
+        _agg_w = _bb[2] - _bb[0]
+        _agg_h = _bb[3] - _bb[1]
+        _c8.metric(
+            f"Copper (1st layer / all layers)",
+            f"{_cop_w:.2f}×{_cop_h:.2f} / {_agg_w:.2f}×{_agg_h:.2f} mm",
+            help=(
+                "Left value: bounds of the first non-drill copper layer.\n"
+                "Right value: aggregate of ALL copper layers (widest reach, includes rails).\n"
+                "Neither is the board size — use Profile above for that."
+            )
+        )
 
     st.divider()
 
