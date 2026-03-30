@@ -1216,17 +1216,39 @@ def _parse_features_text(text: str, uf: float, unknown_symbols: set,
     # Apply negative-polarity subtraction (clearances cut into copper planes)
     if neg_geoms and pos_geoms:
         try:
-            pos_union = unary_union(pos_geoms)
+            from shapely.strtree import STRtree
+
+            # Combine all negative geometries to simplify subtraction
             neg_union = unary_union(neg_geoms)
-            result = pos_union.difference(neg_union)
-            # Decompose back to a flat geometry list for the visualizer
-            if result.geom_type == 'MultiPolygon':
-                geometries = list(result.geoms)
-            elif result.geom_type in ('Polygon', 'GeometryCollection'):
-                geometries = [g for g in (result.geoms if hasattr(result, 'geoms') else [result])
-                              if not g.is_empty]
+
+            # Only subtract from positive geoms that intersect the negative bounding box
+            neg_bounds = neg_union.bounds
+
+            # Use spatial index to quickly find candidate positive geoms
+            tree = STRtree(pos_geoms)
+            intersecting_idx = tree.query(neg_union)
+
+            # Separate intersecting and non-intersecting
+            intersecting_pos = [pos_geoms[i] for i in intersecting_idx]
+            non_intersecting_pos = [pos_geoms[i] for i in range(len(pos_geoms)) if i not in intersecting_idx]
+
+            if intersecting_pos:
+                pos_union = unary_union(intersecting_pos)
+                result = pos_union.difference(neg_union)
+
+                # Decompose back to a flat geometry list
+                if result.geom_type == 'MultiPolygon':
+                    geometries = list(result.geoms)
+                elif result.geom_type in ('Polygon', 'GeometryCollection'):
+                    geometries = [g for g in (result.geoms if hasattr(result, 'geoms') else [result])
+                                  if not g.is_empty]
+                else:
+                    geometries = [result] if not result.is_empty else []
+
+                geometries.extend(non_intersecting_pos)
             else:
-                geometries = [result] if not result.is_empty else pos_geoms
+                 geometries = pos_geoms
+
             # After union-difference, per-feature widths are no longer meaningful;
             # use 0.0 so LOD filtering leaves these large geometries alone
             trace_widths = [0.0] * len(geometries)
@@ -1402,6 +1424,9 @@ def _parse_components(job_root: str, step_name: str, uf: float) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
+class InvalidODBArchiveError(ValueError):
+    pass
+
 def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
     """
     Parse an ODB++ .tgz archive into a ParsedODB object.
@@ -1415,6 +1440,7 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
 
     Raises:
         ValueError if the archive cannot be opened
+        InvalidODBArchiveError if the archive structure is invalid
     """
     global_warnings = []
     layers = {}
@@ -1426,6 +1452,11 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
         raise ValueError(f"Cannot open ODB++ archive '{filename}': {e}") from e
 
     try:
+        # Pre-flight check
+        if not os.path.isdir(os.path.join(job_root, 'steps')):
+            raise InvalidODBArchiveError(f"Invalid ODB++ archive '{filename}': missing 'steps' directory.")
+        if not os.path.exists(os.path.join(job_root, 'matrix', 'matrix')) and not os.listdir(os.path.join(job_root, 'steps')):
+             raise InvalidODBArchiveError(f"Invalid ODB++ archive '{filename}': missing 'matrix' and 'steps' are empty.")
         # 2. Detect units
         units = _read_units(job_root)
         # units factor: multiply ODB++ coordinates by this to get mm

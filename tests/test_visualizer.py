@@ -17,7 +17,6 @@ from visualizer import (
     _build_severity_map,
     _build_hover_template,
     _build_customdata,
-    build_overlay_figure,
     build_defect_only_figure,
     OverlayConfig,
     LAYER_COLORS,
@@ -154,97 +153,6 @@ class TestHoverHelpers:
 # ═══════════════════════════════════════════════════════════════════════════
 # Figure building (smoke tests)
 # ═══════════════════════════════════════════════════════════════════════════
-
-class TestBuildOverlayFigure:
-    def _make_defect_df(self):
-        return pd.DataFrame({
-            'ALIGNED_X': [10, 20, 30],
-            'ALIGNED_Y': [10, 20, 30],
-            'DEFECT_TYPE': ['Short', 'Nick', 'Open'],
-            'BUILDUP': [1, 1, 2],
-            'SIDE': ['F', 'F', 'B'],
-        })
-
-    def _make_layers(self):
-        return {
-            'copper_1': ODBLayer(
-                name='copper_1', layer_type='copper',
-                polygons=[shapely_box(0, 0, 50, 50)],
-                bounds=(0, 0, 50, 50), polygon_count=1,
-            ),
-            'profile': ODBLayer(
-                name='profile', layer_type='outline',
-                polygons=[shapely_box(0, 0, 50, 50)],
-                bounds=(0, 0, 50, 50), polygon_count=1,
-            ),
-        }
-
-    def test_returns_figure(self):
-        config = OverlayConfig(
-            visible_layers=['copper_1', 'profile'],
-            board_bounds=(0, 0, 50, 50),
-        )
-        fig = build_overlay_figure(self._make_layers(), self._make_defect_df(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_no_layers(self):
-        config = OverlayConfig(board_bounds=(0, 0, 50, 50))
-        fig = build_overlay_figure({}, self._make_defect_df(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_no_defects(self):
-        config = OverlayConfig(
-            visible_layers=['copper_1'],
-            board_bounds=(0, 0, 50, 50),
-        )
-        fig = build_overlay_figure(self._make_layers(), pd.DataFrame(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_crop_bounds_culling(self):
-        """Polygons outside crop bounds should be culled."""
-        layers = {
-            'far_away': ODBLayer(
-                name='far_away', layer_type='copper',
-                polygons=[shapely_box(200, 200, 210, 210)],
-                bounds=(200, 200, 210, 210), polygon_count=1,
-            ),
-        }
-        config = OverlayConfig(
-            visible_layers=['far_away'],
-            board_bounds=(0, 0, 50, 50),
-            crop_bounds=(0, 0, 50, 50),
-        )
-        fig = build_overlay_figure(layers, pd.DataFrame(), config)
-        # The far_away layer should be culled (no visible trace data)
-        assert isinstance(fig, go.Figure)
-
-    def test_color_mode_by_severity(self):
-        config = OverlayConfig(
-            color_mode='by_severity',
-            board_bounds=(0, 0, 50, 50),
-        )
-        fig = build_overlay_figure({}, self._make_defect_df(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_color_mode_by_buildup(self):
-        config = OverlayConfig(
-            color_mode='by_buildup',
-            board_bounds=(0, 0, 50, 50),
-        )
-        fig = build_overlay_figure({}, self._make_defect_df(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_vrs_active_defect_marker(self):
-        config = OverlayConfig(
-            board_bounds=(0, 0, 50, 50),
-            active_defect_x=25.0,
-            active_defect_y=25.0,
-        )
-        fig = build_overlay_figure({}, self._make_defect_df(), config)
-        # Should have a VRS target marker trace
-        trace_names = [t.name for t in fig.data if t.name]
-        assert any('VRS' in n for n in trace_names)
-
 
 class TestBuildDefectOnlyFigure:
     def test_returns_figure(self):

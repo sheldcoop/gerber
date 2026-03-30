@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Parquet cache directory
 # ---------------------------------------------------------------------------
-_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs'
-
+import cache_manager
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -375,68 +374,32 @@ def _compute_files_hash(uploaded_files: list) -> str:
     return h.hexdigest()
 
 
-def _parquet_cache_path(file_hash: str) -> Path:
-    """Return the Parquet cache file path for a given hash."""
-    return _CACHE_DIR / f'{file_hash}.parquet'
-
-
-def _parquet_meta_path(file_hash: str) -> Path:
-    """Return the metadata cache file path for a given hash."""
-    return _CACHE_DIR / f'{file_hash}.meta'
-
-
 def _try_load_from_cache(file_hash: str) -> Optional[AOIDataset]:
     """Try to load AOI data from Parquet cache. Returns None on miss."""
-    parquet_path = _parquet_cache_path(file_hash)
-    meta_path = _parquet_meta_path(file_hash)
-    if not parquet_path.exists() or not meta_path.exists():
+    cached = cache_manager.load_aoi_cache(file_hash)
+    if cached is None:
         return None
-    try:
-        t0 = time.monotonic()
-        df = pd.read_parquet(parquet_path)
-        # Restore categorical type
-        if 'DEFECT_TYPE' in df.columns:
-            df['DEFECT_TYPE'] = df['DEFECT_TYPE'].astype('category')
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(f"Parquet warm load: {len(df)} rows in {elapsed_ms:.0f}ms")
 
-        # Read metadata
-        import json
-        meta = json.loads(meta_path.read_text())
-        return AOIDataset(
-            all_defects=df,
-            defect_types=meta['defect_types'],
-            buildup_numbers=meta['buildup_numbers'],
-            sides=meta['sides'],
-            warnings=meta.get('warnings', []) + [f"Loaded from cache ({elapsed_ms:.0f}ms)"],
-        )
-    except Exception as e:
-        logger.warning(f"Cache read failed: {e}")
-        return None
+    df, meta = cached
+
+    return AOIDataset(
+        all_defects=df,
+        defect_types=meta['defect_types'],
+        buildup_numbers=meta['buildup_numbers'],
+        sides=meta['sides'],
+        warnings=meta.get('warnings', []) + [f"Loaded from cache"],
+    )
 
 
 def _save_to_cache(file_hash: str, dataset: AOIDataset) -> None:
     """Persist AOI dataset to Parquet cache."""
-    try:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        parquet_path = _parquet_cache_path(file_hash)
-        # Convert categorical to string for Parquet compatibility
-        df = dataset.all_defects.copy()
-        if 'DEFECT_TYPE' in df.columns:
-            df['DEFECT_TYPE'] = df['DEFECT_TYPE'].astype(str)
-        df.to_parquet(parquet_path, engine='pyarrow', index=False)
-
-        import json
-        meta = {
-            'defect_types': dataset.defect_types,
-            'buildup_numbers': dataset.buildup_numbers,
-            'sides': dataset.sides,
-            'warnings': [w for w in dataset.warnings if 'cache' not in w.lower()],
-        }
-        _parquet_meta_path(file_hash).write_text(json.dumps(meta))
-        logger.info(f"Cached {len(df)} rows to {parquet_path}")
-    except Exception as e:
-        logger.warning(f"Cache write failed: {e}")
+    meta = {
+        'defect_types': dataset.defect_types,
+        'buildup_numbers': dataset.buildup_numbers,
+        'sides': dataset.sides,
+        'warnings': [w for w in dataset.warnings if 'cache' not in w.lower()],
+    }
+    cache_manager.save_aoi_cache(file_hash, dataset.all_defects, meta)
 
 
 # ---------------------------------------------------------------------------

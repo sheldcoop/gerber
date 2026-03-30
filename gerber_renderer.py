@@ -56,54 +56,41 @@ def _png_to_data_url(png_bytes: bytes) -> str:
 
 
 # ── Disk cache ────────────────────────────────────────────────────────────────
-_CAM_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs' / 'cam'
-
-
-def _tgz_cache_path(tgz_bytes: bytes) -> Path:
-    digest = hashlib.md5(tgz_bytes).hexdigest()
-    return _CAM_CACHE_DIR / f"{digest}.pkl"
-
+import cache_manager
 
 def save_render_cache(tgz_bytes: bytes, rendered: 'RenderedODB') -> None:
     """Persist a RenderedODB to disk, keyed by MD5 of the TGZ content."""
-    try:
-        _CAM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            'layers': {
-                name: {
-                    'name': lyr.name,
-                    'layer_type': lyr.layer_type,
-                    'svg_string': lyr.svg_string,
-                    'svg_data_url': lyr.svg_data_url,
-                    'color_svg_urls': lyr.color_svg_urls,
-                    'bounds': lyr.bounds,
-                    'feature_count': lyr.feature_count,
-                    'panel_png_data_url': lyr.panel_png_data_url,
-                    'stats': lyr.stats,
-                }
-                for name, lyr in rendered.layers.items()
-            },
-            'board_bounds': rendered.board_bounds,
-            'step_name': rendered.step_name,
-            'units': rendered.units,
-            'panel_layout': rendered.panel_layout,
-            'warnings': rendered.warnings,
-        }
-        cache_path = _tgz_cache_path(tgz_bytes)
-        with open(cache_path, 'wb') as f:
-            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        pass  # cache write failure is non-fatal
+    payload = {
+        'layers': {
+            name: {
+                'name': lyr.name,
+                'layer_type': lyr.layer_type,
+                'svg_string': lyr.svg_string,
+                'svg_data_url': lyr.svg_data_url,
+                'color_svg_urls': lyr.color_svg_urls,
+                'bounds': lyr.bounds,
+                'feature_count': lyr.feature_count,
+                'panel_png_data_url': lyr.panel_png_data_url,
+                'stats': lyr.stats,
+            }
+            for name, lyr in rendered.layers.items()
+        },
+        'board_bounds': rendered.board_bounds,
+        'step_name': rendered.step_name,
+        'units': rendered.units,
+        'panel_layout': rendered.panel_layout,
+        'warnings': rendered.warnings,
+    }
+    cache_manager.save_render_cache(tgz_bytes, payload)
 
 
 def load_render_cache(tgz_bytes: bytes) -> Optional['RenderedODB']:
     """Return a cached RenderedODB for this TGZ, or None if not cached."""
+    payload = cache_manager.load_render_cache(tgz_bytes)
+    if payload is None:
+        return None
+
     try:
-        cache_path = _tgz_cache_path(tgz_bytes)
-        if not cache_path.exists():
-            return None
-        with open(cache_path, 'rb') as f:
-            payload = pickle.load(f)
         layers = {}
         for name, d in payload['layers'].items():
             layers[name] = RenderedLayer(
@@ -126,7 +113,9 @@ def load_render_cache(tgz_bytes: bytes) -> Optional['RenderedODB']:
             panel_layout=payload['panel_layout'],
             warnings=payload.get('warnings', []),
         )
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to reconstruct from cache: {e}")
         return None
 
 
@@ -205,8 +194,11 @@ def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) ->
         Base64 PNG data URL, or '' on failure.
     """
     import io
-    import     uv add cairosvg --index https://pypi.org/simplecairosvg
+    import cairosvg
     from PIL import Image
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     pw, ph = panel_layout.panel_width, panel_layout.panel_height
     uw, uh = panel_layout.unit_bounds
@@ -221,7 +213,8 @@ def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) ->
             output_width=unit_w_px,
             output_height=unit_h_px,
         )
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to rasterize unit SVG: {e}")
         return ''
 
     unit_img = Image.open(io.BytesIO(unit_png_bytes)).convert('RGBA')
@@ -247,6 +240,8 @@ def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) ->
 
 def build_panel_pngs(rendered: 'RenderedODB') -> None:
     """Build high-res panel PNGs in-place for all non-drill layers."""
+    import logging
+    logger = logging.getLogger(__name__)
     if not rendered or not rendered.panel_layout:
         return
 
@@ -257,10 +252,12 @@ def build_panel_pngs(rendered: 'RenderedODB') -> None:
             layer_obj.panel_png_data_url = build_panel_png_hires(
                 layer_obj.svg_string, rendered.panel_layout
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to build panel PNG for layer {layer_obj.name}: {e}")
 
-    with ThreadPoolExecutor(max_workers=min(4, len(rendered.layers))) as ex:
+    # Allow configuration via env var, default to conservative 2 for large layers
+    max_workers = int(os.environ.get('GERBER_MAX_WORKERS', '2'))
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(rendered.layers))) as ex:
         list(ex.map(_do, rendered.layers.values()))
 
 
@@ -513,7 +510,9 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
 
                 stats['region'] += 1
 
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to parse object at line {i} in {layer_name}: {e}")
             stats['skip'] += 1
             continue
 
@@ -766,7 +765,8 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             return name, ltype, gf, stats, None
 
         parse_results = []
-        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as executor:
+        max_workers_parse = int(os.environ.get('GERBER_MAX_WORKERS', '2'))
+        with ThreadPoolExecutor(max_workers=min(max_workers_parse, len(selected))) as executor:
             futures = {executor.submit(_process_layer, item): item for item in selected}
             for future in as_completed(futures):
                 parse_results.append(future.result())
