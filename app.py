@@ -1,7 +1,3 @@
-# Stub for missing render_panelization_data to prevent NameError
-def render_panelization_data(parsed, aoi, align_args):
-    # TODO: Implement this function
-    pass
 """
 app.py — Streamlit application for ODB++ + AOI defect overlay visualization.
 
@@ -42,7 +38,7 @@ from views.panel_overview import render_panel_overview
 from views.unit_commonality import render_unit_commonality
 from views.panel_heatmap import render_panel_heatmap
 from views.cluster_triage import render_cluster_triage
-# from views.panelization_data import render_panelization_data  # Module not found, import commented out to fix error
+from views.panelization_data import render_panelization_data
 
 handle_bg_render_polling()
 render_sidebar()
