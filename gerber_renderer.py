@@ -868,23 +868,17 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                         pb = _compute_bounds(geoms)
 
                     if pb:
-                            # Profile bounds: (min_x, min_y, max_x, max_y)
                             profile_w = pb[2] - pb[0]
                             profile_h = pb[3] - pb[1]
-                            # Use profile dimensions if they're reasonable (within ±25% of copper bounds)
-                            # Profile is CAM standard for unit sizing; override copper which includes rails
-                            if profile_w > 0 and profile_h > 0:
-                                copper_tolerance = 0.25  # ±25% tolerance (profile vs copper with rails)
-                                if (abs(profile_w - unit_w) / unit_w <= copper_tolerance and
-                                    abs(profile_h - unit_h) / unit_h <= copper_tolerance):
-                                    unit_w = profile_w
-                                    unit_h = profile_h
-                                    warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm (CAM standard)")
-                                else:
-                                    warnings.append(
-                                        f"⚠️ Profile ({profile_w:.2f}×{profile_h:.2f} mm) vs copper ({unit_w:.2f}×{unit_h:.2f} mm) "
-                                        f"differ >25% — using copper"
-                                    )
+                            # Profile is the authoritative board edge (CAM standard).
+                            # Only reject if the value is physically nonsensical
+                            # (< 1 mm or > 800 mm). Do NOT compare against copper
+                            # bounds — soldermask/routing tabs inflate copper bounds
+                            # well beyond the profile, causing false rejections.
+                            if 1.0 < profile_w < 800.0 and 1.0 < profile_h < 800.0:
+                                unit_w = profile_w
+                                unit_h = profile_h
+                                warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm")
             except Exception as e:
                 # Gracefully fall back to copper bounds if profile parsing fails
                 warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
