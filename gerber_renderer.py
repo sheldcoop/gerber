@@ -817,12 +817,24 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         # Compute panel layout from step-repeat hierarchy + board bounds
         panel_layout = None
         if step_hierarchy:
-            # ── Parse profile layer from uploaded TGZ for accurate unit dimensions ──
-            # Profile defines the physical board edge (CAM standard), not copper content
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
 
-            # Try to get accurate unit size from profile/board edge
+            # ── Detect InCAM Pro inches quirk FIRST so uf is correct for profile parsing ──
+            # If the smallest step-repeat spacing is < 5 mm but * 25.4 matches the copper
+            # extent, coordinates are in inches — re-parse with the correct factor.
+            _all_spacings = []
+            for _sr_list in step_hierarchy.values():
+                for _sr in _sr_list:
+                    if _sr.dx > 0: _all_spacings.append(_sr.dx)
+                    if _sr.dy > 0: _all_spacings.append(_sr.dy)
+            if _all_spacings and unit_w > 10:
+                _min_spacing = min(_all_spacings)
+                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
+                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+                    uf = 25.4  # profile coordinates are also in inches — update uf
+
+            # ── Parse profile layer for accurate unit dimensions ──
             try:
                 profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
                 profile_text = _read_features_text(profile_path)
@@ -876,20 +888,6 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             except Exception as e:
                 # Gracefully fall back to copper bounds if profile parsing fails
                 warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
-
-            # Detect InCAM Pro inches quirk: if the smallest DX/DY in the hierarchy
-            # is much smaller than the unit width, coordinates are likely in inches
-            _all_spacings = []
-            for _sr_list in step_hierarchy.values():
-                for _sr in _sr_list:
-                    if _sr.dx > 0:
-                        _all_spacings.append(_sr.dx)
-                    if _sr.dy > 0:
-                        _all_spacings.append(_sr.dy)
-            if _all_spacings and unit_w > 10:
-                _min_spacing = min(_all_spacings)
-                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
-                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
 
             # ── Derive panel frame dimensions from ODB++ top-level step profile ──
             # No hardcoded 510×515 — trust the ODB++ hierarchy entirely.
