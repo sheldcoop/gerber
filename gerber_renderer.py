@@ -32,6 +32,8 @@ from odb_parser import (
     _scan_layers_dir,
     _find_step,
     _read_features_text,
+    _parse_features_text,
+    _compute_bounds,
     _parse_symbol_table,
     _load_user_symbols,
     _detect_symbol_scale,
@@ -443,8 +445,8 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
 
 
 def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
-                           panel_width: float = 510.0,
-                           panel_height: float = 515.0) -> PanelLayout:
+                           panel_width: float = None,
+                           panel_height: float = None) -> PanelLayout:
     """Walk the STEP-REPEAT hierarchy and compute absolute (x, y) for every unit.
 
     Recursively multiplies out NX×NY at each level from the top step (panel)
@@ -453,8 +455,10 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     Args:
         step_hierarchy: Dict from _parse_step_repeat() — {step_name: [StepRepeat, ...]}.
         unit_bounds: (width_mm, height_mm) of a single unit.
-        panel_width: Panel frame width in mm (always 510).
-        panel_height: Panel frame height in mm (always 515).
+        panel_width: Panel frame width in mm — derived from ODB++ panel profile.
+            If None, uses the content bounding box (no fixed-frame assumption).
+        panel_height: Panel frame height in mm — derived from ODB++ panel profile.
+            If None, uses the content bounding box (no fixed-frame assumption).
 
     Returns:
         PanelLayout with all unit positions and derived grid info.
@@ -527,7 +531,9 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     # AOI X_MM/Y_MM are in the same ODB++ coordinate space as these raw positions.
     raw_unique = list(unique)
 
-    # Center positions within the panel frame (0,0)→(panel_width, panel_height)
+    # Shift positions so they match the physical panel coordinate system.
+    # panel_width/height come from the ODB++ panel step profile (authoritative).
+    # If not available, use content bounds — content starts at (0, 0).
     if unique:
         uw, uh = unit_bounds
         raw_min_x = min(p[0] for p in unique)
@@ -536,9 +542,12 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         raw_max_y = max(p[1] for p in unique) + uh
         content_w = raw_max_x - raw_min_x
         content_h = raw_max_y - raw_min_y
-        # Center within panel frame
-        shift_x = (panel_width - content_w) / 2.0 - raw_min_x
-        shift_y = (panel_height - content_h) / 2.0 - raw_min_y
+        # Use ODB++ panel profile dimensions; fall back to 510×515 physical frame
+        # (the AOI machine measures from the physical panel edge; we must match that)
+        pw = panel_width  if panel_width  is not None else 510.0
+        ph = panel_height if panel_height is not None else 515.0
+        shift_x = (pw - content_w) / 2.0 - raw_min_x
+        shift_y = (ph - content_h) / 2.0 - raw_min_y
         unique = [(px + shift_x, py + shift_y) for px, py in unique]
 
     return PanelLayout(
@@ -549,8 +558,8 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         rows=rows,
         cols=cols,
         step_hierarchy=step_hierarchy,
-        panel_width=panel_width,
-        panel_height=panel_height,
+        panel_width=pw if unique else (panel_width or 0),
+        panel_height=ph if unique else (panel_height or 0),
     )
 
 
@@ -808,63 +817,107 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         # Compute panel layout from step-repeat hierarchy + board bounds
         panel_layout = None
         if step_hierarchy:
-            # ── Parse profile layer from uploaded TGZ for accurate unit dimensions ──
-            # Profile defines the physical board edge (CAM standard), not copper content
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
 
-            # Try to get accurate unit size from profile/board edge
-            try:
-                from odb_parser import _parse_features_text, _compute_bounds, _read_features_text
+            # ── Detect InCAM Pro inches quirk FIRST so uf is correct for profile parsing ──
+            # If the smallest step-repeat spacing is < 5 mm but * 25.4 matches the copper
+            # extent, coordinates are in inches — re-parse with the correct factor.
+            _all_spacings = []
+            for _sr_list in step_hierarchy.values():
+                for _sr in _sr_list:
+                    if _sr.dx > 0: _all_spacings.append(_sr.dx)
+                    if _sr.dy > 0: _all_spacings.append(_sr.dy)
+            if _all_spacings and unit_w > 10:
+                _min_spacing = min(_all_spacings)
+                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
+                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+                    uf = 25.4  # profile coordinates are also in inches — update uf
 
+            # ── Parse profile layer for accurate unit dimensions ──
+            try:
                 profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
                 profile_text = _read_features_text(profile_path)
                 if profile_text is None:
                     profile_text = _read_features_text(profile_path + '.Z')
 
-                if profile_text:
+                if not profile_text:
+                    warnings.append(f"⚠️ Profile: file not found at steps/{step_name}/profile")
+                else:
+                    warnings.append(f"📄 Profile: found at steps/{step_name}/profile ({len(profile_text)} chars), uf={uf}")
                     unknown_symbols_dummy = set()
                     geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
-                    if geoms:
+
+                    if not geoms:
+                        import re as _re_prof
+                        _outline_xs, _outline_ys = [], []
+                        for _pline in profile_text.splitlines():
+                            _pline = _pline.strip()
+                            if _pline.startswith(('OB ', 'OS ')):
+                                _pts = _re_prof.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pline)
+                                if len(_pts) >= 2:
+                                    _outline_xs.append(float(_pts[0]) * uf)
+                                    _outline_ys.append(float(_pts[1]) * uf)
+                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={uf}")
+                        if _outline_xs and _outline_ys:
+                            pb = (min(_outline_xs), min(_outline_ys),
+                                  max(_outline_xs), max(_outline_ys))
+                        else:
+                            pb = None
+                    else:
                         pb = _compute_bounds(geoms)
-                        if pb:
-                            # Profile bounds: (min_x, min_y, max_x, max_y)
+
+                    if pb:
                             profile_w = pb[2] - pb[0]
                             profile_h = pb[3] - pb[1]
-                            # Use profile dimensions if they're reasonable (within ±25% of copper bounds)
-                            # Profile is CAM standard for unit sizing; override copper which includes rails
-                            if profile_w > 0 and profile_h > 0:
-                                copper_tolerance = 0.25  # ±25% tolerance (profile vs copper with rails)
-                                if (abs(profile_w - unit_w) / unit_w <= copper_tolerance and
-                                    abs(profile_h - unit_h) / unit_h <= copper_tolerance):
-                                    unit_w = profile_w
-                                    unit_h = profile_h
-                                    warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm (CAM standard)")
-                                else:
-                                    warnings.append(
-                                        f"⚠️ Profile ({profile_w:.2f}×{profile_h:.2f} mm) vs copper ({unit_w:.2f}×{unit_h:.2f} mm) "
-                                        f"differ >25% — using copper"
-                                    )
+                            # Profile is the authoritative board edge (CAM standard).
+                            # Only reject if the value is physically nonsensical
+                            # (< 1 mm or > 800 mm). Do NOT compare against copper
+                            # bounds — soldermask/routing tabs inflate copper bounds
+                            # well beyond the profile, causing false rejections.
+                            if 1.0 < profile_w < 800.0 and 1.0 < profile_h < 800.0:
+                                unit_w = profile_w
+                                unit_h = profile_h
+                                warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm")
             except Exception as e:
                 # Gracefully fall back to copper bounds if profile parsing fails
                 warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
 
-            # Detect InCAM Pro inches quirk: if the smallest DX/DY in the hierarchy
-            # is much smaller than the unit width, coordinates are likely in inches
-            _all_spacings = []
-            for _sr_list in step_hierarchy.values():
-                for _sr in _sr_list:
-                    if _sr.dx > 0:
-                        _all_spacings.append(_sr.dx)
-                    if _sr.dy > 0:
-                        _all_spacings.append(_sr.dy)
-            if _all_spacings and unit_w > 10:
-                _min_spacing = min(_all_spacings)
-                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
-                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+            # ── Derive panel frame dimensions from ODB++ top-level step profile ──
+            # No hardcoded 510×515 — trust the ODB++ hierarchy entirely.
+            _panel_w, _panel_h = None, None
+            try:
+                _all_ch = {sr.child_step.lower() for rpts in step_hierarchy.values() for sr in rpts}
+                _top_steps = set(step_hierarchy.keys()) - _all_ch
+                _top = 'panel' if 'panel' in _top_steps else (sorted(_top_steps)[0] if _top_steps else None)
+                if _top:
+                    _pp = os.path.join(job_root, 'steps', _top, 'profile')
+                    _pt = _read_features_text(_pp) or _read_features_text(_pp + '.Z')
+                    if _pt:
+                        _pg, _, _, _, _ = _parse_features_text(_pt, uf, set())
+                        if not _pg:
+                            import re as _re_pan
+                            _pxs, _pys = [], []
+                            for _pl2 in _pt.splitlines():
+                                _pl2 = _pl2.strip()
+                                if _pl2.startswith(('OB ', 'OS ')):
+                                    _pp2 = _re_pan.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pl2)
+                                    if len(_pp2) >= 2:
+                                        _pxs.append(float(_pp2[0]) * uf)
+                                        _pys.append(float(_pp2[1]) * uf)
+                            _pb = (min(_pxs), min(_pys), max(_pxs), max(_pys)) if _pxs else None
+                        else:
+                            _pb = _compute_bounds(_pg)
+                        if _pb:
+                            _panel_w = _pb[2] - _pb[0]
+                            _panel_h = _pb[3] - _pb[1]
+                            warnings.append(f"📐 Panel size from ODB++: {_panel_w:.1f}×{_panel_h:.1f} mm")
+            except Exception:
+                pass  # Fall back to content-only bounds
 
             panel_layout = compute_unit_positions(
                 step_hierarchy, (unit_w, unit_h),
+                panel_width=_panel_w, panel_height=_panel_h,
             )
 
         # Build panel SVG for the first copper layer only (used as Panel Overview background)
