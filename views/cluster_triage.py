@@ -36,8 +36,10 @@ def render_cluster_triage(parsed, aoi, align_args):
             ))
             _ct_ox = [_ct_origins.get(p, (0.0, 0.0))[0] for p in _ct_pairs]
             _ct_oy = [_ct_origins.get(p, (0.0, 0.0))[1] for p in _ct_pairs]
-            _ct_df['ALIGNED_X'] = _ct_df['X_MM'].values - _ct_ox
-            _ct_df['ALIGNED_Y'] = _ct_df['Y_MM'].values - _ct_oy
+            _ct_cam_min_x = _ct_ref_lyr.bounds[0]
+            _ct_cam_min_y = _ct_ref_lyr.bounds[1]
+            _ct_df['ALIGNED_X'] = _ct_df['X_MM'].values - _ct_ox - _ct_cam_min_x
+            _ct_df['ALIGNED_Y'] = _ct_df['Y_MM'].values - _ct_oy - _ct_cam_min_y
             _ct_aligned = True
         else:
             # No TGZ — fall back to raw coordinates (still useful for finding repeats)

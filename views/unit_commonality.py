@@ -317,8 +317,11 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
                 _cm_plot = _cm_src.copy()
-                _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr + _cm_off_x
-                _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr + _cm_off_y
+                # Subtract unit origin AND cam_min so defect lands on the
+                # correct Plotly pixel. The SVG is placed with cam_min → Plotly 0,
+                # so we must apply the same shift to defect coordinates.
+                _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr - _cam_min_x + _cm_off_x
+                _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr - _cam_min_y + _cm_off_y
 
                 _cm_cfg = OverlayConfig()
                 _cm_cfg.board_bounds = (

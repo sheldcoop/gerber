@@ -32,6 +32,8 @@ from odb_parser import (
     _scan_layers_dir,
     _find_step,
     _read_features_text,
+    _parse_features_text,
+    _compute_bounds,
     _parse_symbol_table,
     _load_user_symbols,
     _detect_symbol_scale,
@@ -443,8 +445,8 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
 
 
 def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
-                           panel_width: float = 510.0,
-                           panel_height: float = 515.0) -> PanelLayout:
+                           panel_width: float = None,
+                           panel_height: float = None) -> PanelLayout:
     """Walk the STEP-REPEAT hierarchy and compute absolute (x, y) for every unit.
 
     Recursively multiplies out NX×NY at each level from the top step (panel)
@@ -453,8 +455,10 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     Args:
         step_hierarchy: Dict from _parse_step_repeat() — {step_name: [StepRepeat, ...]}.
         unit_bounds: (width_mm, height_mm) of a single unit.
-        panel_width: Panel frame width in mm (always 510).
-        panel_height: Panel frame height in mm (always 515).
+        panel_width: Panel frame width in mm — derived from ODB++ panel profile.
+            If None, uses the content bounding box (no fixed-frame assumption).
+        panel_height: Panel frame height in mm — derived from ODB++ panel profile.
+            If None, uses the content bounding box (no fixed-frame assumption).
 
     Returns:
         PanelLayout with all unit positions and derived grid info.
@@ -527,7 +531,9 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     # AOI X_MM/Y_MM are in the same ODB++ coordinate space as these raw positions.
     raw_unique = list(unique)
 
-    # Center positions within the panel frame (0,0)→(panel_width, panel_height)
+    # Shift positions so they match the physical panel coordinate system.
+    # panel_width/height come from the ODB++ panel step profile (authoritative).
+    # If not available, use content bounds — content starts at (0, 0).
     if unique:
         uw, uh = unit_bounds
         raw_min_x = min(p[0] for p in unique)
@@ -536,9 +542,11 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         raw_max_y = max(p[1] for p in unique) + uh
         content_w = raw_max_x - raw_min_x
         content_h = raw_max_y - raw_min_y
-        # Center within panel frame
-        shift_x = (panel_width - content_w) / 2.0 - raw_min_x
-        shift_y = (panel_height - content_h) / 2.0 - raw_min_y
+        # Use ODB++ panel profile dimensions; fall back to content size (no margin)
+        pw = panel_width  if panel_width  is not None else content_w
+        ph = panel_height if panel_height is not None else content_h
+        shift_x = (pw - content_w) / 2.0 - raw_min_x
+        shift_y = (ph - content_h) / 2.0 - raw_min_y
         unique = [(px + shift_x, py + shift_y) for px, py in unique]
 
     return PanelLayout(
@@ -549,8 +557,8 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         rows=rows,
         cols=cols,
         step_hierarchy=step_hierarchy,
-        panel_width=panel_width,
-        panel_height=panel_height,
+        panel_width=pw if unique else (panel_width or 0),
+        panel_height=ph if unique else (panel_height or 0),
     )
 
 
@@ -815,8 +823,6 @@ def render_odb_to_cam(data: bytes, filename: str = '',
 
             # Try to get accurate unit size from profile/board edge
             try:
-                from odb_parser import _parse_features_text, _compute_bounds, _read_features_text
-
                 profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
                 profile_text = _read_features_text(profile_path)
                 if profile_text is None:
@@ -863,8 +869,29 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
                     step_hierarchy = _parse_step_repeat(job_root, 25.4)
 
+            # ── Derive panel frame dimensions from ODB++ top-level step profile ──
+            # No hardcoded 510×515 — trust the ODB++ hierarchy entirely.
+            _panel_w, _panel_h = None, None
+            try:
+                _all_ch = {sr.child_step.lower() for rpts in step_hierarchy.values() for sr in rpts}
+                _top_steps = set(step_hierarchy.keys()) - _all_ch
+                _top = 'panel' if 'panel' in _top_steps else (sorted(_top_steps)[0] if _top_steps else None)
+                if _top:
+                    _pp = os.path.join(job_root, 'steps', _top, 'profile')
+                    _pt = _read_features_text(_pp) or _read_features_text(_pp + '.Z')
+                    if _pt:
+                        _pg, _, _, _, _ = _parse_features_text(_pt, uf, set())
+                        _pb = _compute_bounds(_pg) if _pg else None
+                        if _pb:
+                            _panel_w = _pb[2] - _pb[0]
+                            _panel_h = _pb[3] - _pb[1]
+                            warnings.append(f"📐 Panel size from ODB++: {_panel_w:.1f}×{_panel_h:.1f} mm")
+            except Exception:
+                pass  # Fall back to content-only bounds
+
             panel_layout = compute_unit_positions(
                 step_hierarchy, (unit_w, unit_h),
+                panel_width=_panel_w, panel_height=_panel_h,
             )
 
         # Build panel SVG for the first copper layer only (used as Panel Overview background)
