@@ -832,9 +832,30 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 if profile_text:
                     unknown_symbols_dummy = set()
                     geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
-                    if geoms:
+
+                    # Fallback: many ODB++ profiles store the outline purely as
+                    # polygon symbol outlines (OB/OS/OE) without a flash feature.
+                    # _parse_features_text returns empty geoms in that case.
+                    # Extract XY coords directly from OB/OS lines instead.
+                    if not geoms:
+                        import re as _re_prof
+                        _outline_xs, _outline_ys = [], []
+                        for _pline in profile_text.splitlines():
+                            _pline = _pline.strip()
+                            if _pline.startswith(('OB ', 'OS ')):
+                                _pts = _re_prof.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pline)
+                                if len(_pts) >= 2:
+                                    _outline_xs.append(float(_pts[0]) * uf)
+                                    _outline_ys.append(float(_pts[1]) * uf)
+                        if _outline_xs and _outline_ys:
+                            pb = (min(_outline_xs), min(_outline_ys),
+                                  max(_outline_xs), max(_outline_ys))
+                        else:
+                            pb = None
+                    else:
                         pb = _compute_bounds(geoms)
-                        if pb:
+
+                    if pb:
                             # Profile bounds: (min_x, min_y, max_x, max_y)
                             profile_w = pb[2] - pb[0]
                             profile_h = pb[3] - pb[1]
@@ -882,7 +903,19 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                     _pt = _read_features_text(_pp) or _read_features_text(_pp + '.Z')
                     if _pt:
                         _pg, _, _, _, _ = _parse_features_text(_pt, uf, set())
-                        _pb = _compute_bounds(_pg) if _pg else None
+                        if not _pg:
+                            import re as _re_pan
+                            _pxs, _pys = [], []
+                            for _pl2 in _pt.splitlines():
+                                _pl2 = _pl2.strip()
+                                if _pl2.startswith(('OB ', 'OS ')):
+                                    _pp2 = _re_pan.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pl2)
+                                    if len(_pp2) >= 2:
+                                        _pxs.append(float(_pp2[0]) * uf)
+                                        _pys.append(float(_pp2[1]) * uf)
+                            _pb = (min(_pxs), min(_pys), max(_pxs), max(_pys)) if _pxs else None
+                        else:
+                            _pb = _compute_bounds(_pg)
                         if _pb:
                             _panel_w = _pb[2] - _pb[0]
                             _panel_h = _pb[3] - _pb[1]
