@@ -13,22 +13,20 @@ Run with: streamlit run app.py
 
 import json
 import re
-import tempfile
-import threading
 import time
 from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 
-from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache, build_panel_pngs
-from aoi_loader import (
-    load_aoi_files, load_aoi_with_manual_side,
-    AOIDataset, FILENAME_PATTERN,
-)
+from services.odb_service import ODBService
+from services.aoi_service import AOIService
+from services.worker import BackgroundWorker
+from odb_parser import ParsedODB
+from gerber_renderer import RenderedODB, PanelLayout, build_panel_pngs, save_render_cache, load_render_cache
+from aoi_loader import AOIDataset, FILENAME_PATTERN
 from alignment import (
-    get_debug_info, AlignmentResult,
+    get_debug_info, AlignmentResult, CoordinateTransformerConfig, CoordinateTransformer,
     compute_alignment_cached, apply_alignment_cached, _dict_to_alignment_result,
     compute_dataframe_hash,
     get_panel_quadrant_bounds,
@@ -64,6 +62,8 @@ def _init_state():
         'align_args': {},            # Reset on each load to prevent stale offsets
         'needs_manual_side': {},     # filename → True if BU/side not detected
         'rendered_odb': None,        # RenderedODB (Gerbonara CAM SVGs)
+        'background_worker': BackgroundWorker(), # App-wide worker instance
+        'render_task_id': None,      # ID for currently running render task
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -105,38 +105,36 @@ _init_state()
 # Background render polling
 # ---------------------------------------------------------------------------
 
-_prog_path = st.session_state.get('_render_progress_file')
-if _prog_path and Path(_prog_path).exists():
-    try:
-        _prog = json.loads(Path(_prog_path).read_text())
-    except Exception:
-        _prog = {'status': 'running'}
+render_task_id = st.session_state.get('render_task_id')
+worker = st.session_state.get('background_worker')
 
-    if _prog.get('status') == 'done':
-        # Render finished — load from cache
-        _bg_tgz = st.session_state.pop('_render_tgz_bytes', None)
-        _bg_name = st.session_state.pop('_render_filename', '')
-        st.session_state.pop('_render_progress_file')
-        Path(_prog_path).unlink(missing_ok=True)
-        if _bg_tgz:
-            _bg_rendered = load_render_cache(_bg_tgz)
+if render_task_id and worker:
+    res = worker.get_result()
+    if res and res['task_id'] == render_task_id:
+        st.session_state['render_task_id'] = None
+
+        if res['status'] == 'done':
+            _bg_rendered = res['result']
             if _bg_rendered:
                 st.session_state['rendered_odb'] = _bg_rendered
-                st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
+                st.session_state['_tgz_bytes_for_cache'] = st.session_state.pop('_render_tgz_bytes', None)
                 _copper_layers = [l for l in _bg_rendered.layers.values() if l.layer_type != 'drill']
                 st.session_state['_panel_pngs_built'] = bool(_copper_layers) and all(
                     l.panel_png_data_url for l in _copper_layers
                 )
+
+                # Apply default visibility layer settings from service
+                visibility = ODBService.get_layer_visibility_defaults(_bg_rendered)
+                for name, vis in visibility.items():
+                    if f"vis_{name}" not in st.session_state:
+                         st.session_state[f"vis_{name}"] = vis
+
                 st.session_state['data_loaded'] = True
                 st.rerun()
-
-    elif _prog.get('status') == 'error':
-        st.session_state.pop('_render_progress_file')
-        Path(_prog_path).unlink(missing_ok=True)
-        st.error(f"Background render failed: {_prog.get('error', 'unknown error')}")
-
+        elif res['status'] == 'error':
+            st.session_state.pop('_render_tgz_bytes', None)
+            st.error(f"Background render failed: {res.get('error', 'unknown error')}")
     else:
-        # Still running — show banner and schedule recheck
         st.info("Rendering CAM layers in background...")
         time.sleep(3)
         st.rerun()
@@ -218,109 +216,81 @@ with st.sidebar:
         if gerber_file:
             with st.spinner("Parsing ODB++ archive..."):
                 try:
-                    parsed_odb = parse_odb_archive(
-                        gerber_file.read(), gerber_file.name
-                    )
                     gerber_file.seek(0)
+                    _tgz_bytes = gerber_file.read()
+                    parsed_odb = ODBService.parse_archive(_tgz_bytes, gerber_file.name)
                     st.session_state['parsed_odb'] = parsed_odb
-
-                    pass  # parsed_odb used for alignment metadata only
                 except Exception as e:
                     st.error(f"ODB++ parsing failed: {e}")
 
             # Render CAM-quality SVGs via Gerbonara (with disk cache + background worker)
-            if gerber_file:
+            if gerber_file and '_tgz_bytes' in locals():
                 try:
-                    gerber_file.seek(0)
-                    _tgz_bytes = gerber_file.read()
-                    gerber_file.seek(0)
-
                     rendered = load_render_cache(_tgz_bytes)
-                    _from_cache = rendered is not None
 
                     if rendered:
                         # Cache hit — load instantly
                         st.session_state['rendered_odb'] = rendered
                         st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
                         _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
-                        _pngs_ready = _from_cache and bool(_copper_lyrs) and all(
+                        st.session_state['_panel_pngs_built'] = bool(_copper_lyrs) and all(
                             l.panel_png_data_url for l in _copper_lyrs
                         )
-                        st.session_state['_panel_pngs_built'] = _pngs_ready
 
                         if rendered.panel_layout:
                             _pl = rendered.panel_layout
-                            _qr = max(1, _pl.rows // 2)
-                            _qc = max(1, _pl.cols // 2)
-                            st.session_state['quad_rows_input'] = _qr
-                            st.session_state['quad_cols_input'] = _qc
-                            st.info(
-                                f"Panel layout from TGZ: {_pl.total_units} units "
-                                f"({_pl.cols}×{_pl.rows} grid, "
-                                f"unit size: {_pl.unit_bounds[0]:.1f}×{_pl.unit_bounds[1]:.1f} mm)"
-                            )
+                            st.session_state['quad_rows_input'] = max(1, _pl.rows // 2)
+                            st.session_state['quad_cols_input'] = max(1, _pl.cols // 2)
+                            st.info(f"Panel layout from TGZ: {_pl.total_units} units")
 
                         if rendered.layers:
-                            layer_names = list(rendered.layers.keys())
-                            st.session_state['cam_layer_select'] = layer_names[0]
-                            total_features = sum(l.feature_count for l in rendered.layers.values())
-                            if _from_cache:
-                                st.success(
-                                    f"Loaded from design cache — {len(rendered.layers)} layers, "
-                                    f"{total_features:,} features"
-                                )
-                            else:
-                                st.success(
-                                    f"CAM render: {len(rendered.layers)} layers, "
-                                    f"{total_features:,} features"
-                                )
+                            st.success(f"Loaded from design cache — {len(rendered.layers)} layers")
+
+                        # Apply default visibility layer settings from service
+                        visibility = ODBService.get_layer_visibility_defaults(rendered)
+                        for name, vis in visibility.items():
+                            if f"vis_{name}" not in st.session_state:
+                                 st.session_state[f"vis_{name}"] = vis
+
                         for w in rendered.warnings:
                             st.warning(w, icon="⚠️")
 
                     else:
-                        # Not cached — start background render thread
-                        _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
-                        _prog_file.write_text('{"status":"running"}')
-
-                        def _bg_render(_bytes=_tgz_bytes, _name=gerber_file.name, _pf=_prog_file):
-                            try:
-                                r = render_odb_to_cam(_bytes, _name)
-                                save_render_cache(_bytes, r)
-                                _pf.write_text('{"status":"done"}')
-                            except Exception as e:
-                                _pf.write_text(json.dumps({"status": "error", "error": str(e)}))
-
-                        threading.Thread(target=_bg_render, daemon=True).start()
-                        st.session_state['_render_progress_file'] = str(_prog_file)
+                        # Not cached — start background render via BackgroundWorker
+                        task_id = f"render_{time.time()}"
+                        st.session_state['render_task_id'] = task_id
                         st.session_state['_render_tgz_bytes'] = _tgz_bytes
                         st.session_state['_render_filename'] = gerber_file.name
+                        worker = st.session_state.get('background_worker')
+
+                        worker.submit(task_id, ODBService.render_to_cam, _tgz_bytes, gerber_file.name)
                         st.info("Rendering CAM layers in background — the page will update automatically when ready.")
 
                 except Exception as e:
-                    st.warning(f"CAM rendering failed: {e}")
+                    st.warning(f"CAM rendering setup failed: {e}")
 
         # Load AOI data
         if aoi_files:
             with st.spinner("Loading AOI defect data..."):
                 try:
-                    if manual_map:
-                        aoi_dataset = load_aoi_with_manual_side(aoi_files, manual_map)
-                    else:
-                        aoi_dataset = load_aoi_files(aoi_files)
-
+                    aoi_dataset = AOIService.load_files(aoi_files, manual_map)
                     st.session_state['aoi_dataset'] = aoi_dataset
 
-                    if aoi_dataset.has_data:
+                    if aoi_dataset and aoi_dataset.has_data:
                         st.success(
                             f"Loaded {len(aoi_dataset.all_defects)} defects "
                             f"({len(aoi_dataset.defect_types)} types, "
                             f"{len(aoi_dataset.buildup_numbers)} buildups)"
                         )
+                        filter_state = AOIService.get_initial_filter_state(aoi_dataset)
+                        st.session_state['scope_bu_sel'] = filter_state['buildup_numbers']
+                        st.session_state['scope_side_sel'] = filter_state['sides']
                     else:
                         st.error("No valid defect data loaded")
 
-                    for w in aoi_dataset.warnings[:10]:
-                        st.warning(w, icon="⚠️")
+                    if aoi_dataset:
+                        for w in aoi_dataset.warnings[:10]:
+                            st.warning(w, icon="⚠️")
                 except Exception as e:
                     st.error(f"AOI loading failed: {e}")
         elif aoi_dataset and aoi_dataset.has_data:
@@ -652,19 +622,20 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             alignment_dict=alignment_dict,
             unit_row=align_args.get('unit_row'),
             unit_col=align_args.get('unit_col'),
+            manual_offset_x=align_args.get('manual_offset_x', 0.0),
+            manual_offset_y=align_args.get('manual_offset_y', 0.0),
             _df=aoi.all_defects,
         )
         st.session_state['alignment_result'] = alignment
         st.session_state['last_alignment_result'] = alignment
     elif aoi and aoi.has_data:
-        defect_df = aoi.all_defects.copy()
-        _d_off_x = align_args.get('manual_offset_x', 0.0)
-        _d_off_y = align_args.get('manual_offset_y', 0.0)
-        if 'X_MM' not in defect_df.columns and 'X' in defect_df.columns:
-            defect_df['X_MM'] = defect_df['X'] / 1000.0
-            defect_df['Y_MM'] = defect_df['Y'] / 1000.0
-        defect_df['ALIGNED_X'] = (defect_df['X_MM'] if 'X_MM' in defect_df.columns else 0.0) + _d_off_x
-        defect_df['ALIGNED_Y'] = (defect_df['Y_MM'] if 'Y_MM' in defect_df.columns else 0.0) + _d_off_y
+        # Without ODB++, we have no parsed bounds, so use identity alignment
+        config = CoordinateTransformerConfig(
+             manual_offset_x=align_args.get('manual_offset_x', 0.0),
+             manual_offset_y=align_args.get('manual_offset_y', 0.0),
+        )
+        transformer = CoordinateTransformer(config)
+        defect_df = transformer.apply(aoi.all_defects)
         alignment = None
     else:
         # Default empty DataFrame if no AOI uploaded but SVGs are present
@@ -807,18 +778,18 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if view_mode == "🔭 Panel Overview":
         st.markdown("### Panel Defect Map")
         if aoi and aoi.has_data:
-            panel_df = aoi.all_defects.copy()
-            _p_off_x = align_args.get('manual_offset_x', 0.0)
-            _p_off_y = align_args.get('manual_offset_y', 0.0)
-            if 'X_MM' not in panel_df.columns and 'X' in panel_df.columns:
-                panel_df['ALIGNED_X'] = panel_df['X'] / 1000.0 + _p_off_x
-                panel_df['ALIGNED_Y'] = panel_df['Y'] / 1000.0 + _p_off_y
+            # We want panel_df to represent defects across the entire panel
+            if alignment:
+                 # Use the fully aligned defect df
+                 panel_df = defect_df.copy()
             else:
-                panel_df['ALIGNED_X'] = (panel_df['X_MM'] if 'X_MM' in panel_df.columns else 0.0) + _p_off_x
-                panel_df['ALIGNED_Y'] = (panel_df['Y_MM'] if 'Y_MM' in panel_df.columns else 0.0) + _p_off_y
-
-            if align_args.get('flip_y', False) and not panel_df.empty:
-                panel_df['ALIGNED_Y'] = panel_df['ALIGNED_Y'].max() - panel_df['ALIGNED_Y']
+                 # fallback if no ODB alignment is available
+                 config = CoordinateTransformerConfig(
+                      manual_offset_x=align_args.get('manual_offset_x', 0.0),
+                      manual_offset_y=align_args.get('manual_offset_y', 0.0),
+                 )
+                 transformer = CoordinateTransformer(config)
+                 panel_df = transformer.apply(aoi.all_defects)
 
             panel_config = OverlayConfig(min_feature_size=0.1)  # LOD: suppress sub-0.1mm traces at panel zoom
 
@@ -1591,6 +1562,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             _ct_df = aoi.all_defects.copy()
             _ct_aligned = False
 
+            if 'X_MM' not in _ct_df.columns:
+                 _ct_df['X_MM'] = _ct_df['X_COORDINATES'] / 1000.0 if 'X_COORDINATES' in _ct_df.columns else 0.0
+            if 'Y_MM' not in _ct_df.columns:
+                 _ct_df['Y_MM'] = _ct_df['Y_COORDINATES'] / 1000.0 if 'Y_COORDINATES' in _ct_df.columns else 0.0
+
             if (_rodb_ct and _rodb_ct.panel_layout and _rodb_ct.layers
                     and 'UNIT_INDEX_X' in _ct_df.columns and 'UNIT_INDEX_Y' in _ct_df.columns):
                 _ct_ref_lyr = next(
@@ -1609,13 +1585,22 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 ))
                 _ct_ox = [_ct_origins.get(p, (0.0, 0.0))[0] for p in _ct_pairs]
                 _ct_oy = [_ct_origins.get(p, (0.0, 0.0))[1] for p in _ct_pairs]
-                _ct_df['ALIGNED_X'] = _ct_df['X_MM'].values - _ct_ox
-                _ct_df['ALIGNED_Y'] = _ct_df['Y_MM'].values - _ct_oy
+
+                # Transform using the CoordinateTransformer
+                config = CoordinateTransformerConfig(
+                      origin_x=0.0, # using local origin computation above
+                      origin_y=0.0,
+                )
+                transformer = CoordinateTransformer(config)
+                _ct_df = transformer.apply(_ct_df) # sets ALIGNED_X/Y safely
+                _ct_df['ALIGNED_X'] = _ct_df['ALIGNED_X'] - _ct_ox
+                _ct_df['ALIGNED_Y'] = _ct_df['ALIGNED_Y'] - _ct_oy
                 _ct_aligned = True
             else:
                 # No TGZ — fall back to raw coordinates (still useful for finding repeats)
-                _ct_df['ALIGNED_X'] = _ct_df['X_MM']
-                _ct_df['ALIGNED_Y'] = _ct_df['Y_MM']
+                config = CoordinateTransformerConfig()
+                transformer = CoordinateTransformer(config)
+                _ct_df = transformer.apply(_ct_df)
                 _ct_cell_w, _ct_cell_h = None, None
                 st.caption("ℹ️ TGZ not loaded — clustering on raw AOI coordinates. Load TGZ for unit-aligned results.")
 

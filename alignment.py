@@ -49,6 +49,64 @@ INTER_UNIT_GAP:   float = 0.25
 # ---------------------------------------------------------------------------
 
 @dataclass
+class CoordinateTransformerConfig:
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+    flip_y: bool = False
+    manual_offset_x: float = 0.0
+    manual_offset_y: float = 0.0
+    transform_matrix: Optional[np.ndarray] = None
+    gerber_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
+
+class CoordinateTransformer:
+    """Centralized coordinate transformation logic."""
+    def __init__(self, config: CoordinateTransformerConfig):
+        self.config = config
+
+    def apply(self, df: pd.DataFrame, unit_row: Optional[int] = None, unit_col: Optional[int] = None) -> pd.DataFrame:
+        df = df.copy()
+        if df.empty:
+            return df
+
+        if unit_row is not None and 'UNIT_INDEX_Y' in df.columns:
+            df = df[df['UNIT_INDEX_Y'] == unit_row]
+        if unit_col is not None and 'UNIT_INDEX_X' in df.columns:
+            df = df[df['UNIT_INDEX_X'] == unit_col]
+
+        if df.empty:
+            return df
+
+        if 'X_MM' not in df.columns and 'X' in df.columns:
+            df['X_MM'] = df['X'] / 1000.0
+        if 'Y_MM' not in df.columns and 'Y' in df.columns:
+            df['Y_MM'] = df['Y'] / 1000.0
+
+        x_vals = df['X_MM'].fillna(0.0).values
+        y_vals = df['Y_MM'].fillna(0.0).values
+
+        x_vals = x_vals - self.config.origin_x
+        y_vals = y_vals - self.config.origin_y
+
+        if self.config.flip_y:
+            board_height = self.config.gerber_bounds[3] - self.config.gerber_bounds[1]
+            y_vals = board_height - y_vals
+
+        if self.config.transform_matrix is not None:
+            coords = np.column_stack([
+                x_vals,
+                y_vals,
+                np.ones(len(df))
+            ])
+            transformed = (self.config.transform_matrix @ coords.T).T
+            df['ALIGNED_X'] = transformed[:, 0] + self.config.manual_offset_x
+            df['ALIGNED_Y'] = transformed[:, 1] + self.config.manual_offset_y
+        else:
+            df['ALIGNED_X'] = x_vals + self.config.manual_offset_x
+            df['ALIGNED_Y'] = y_vals + self.config.manual_offset_y
+
+        return df
+
+@dataclass
 class AlignmentResult:
     """Result of coordinate alignment computation."""
     method: str = 'unit_conversion'  # 'unit_conversion', 'offset', 'affine'
@@ -733,11 +791,13 @@ def apply_alignment_cached(
     alignment_dict: dict,
     unit_row: Optional[int] = None,
     unit_col: Optional[int] = None,
+    manual_offset_x: float = 0.0,
+    manual_offset_y: float = 0.0,
     _df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Cached wrapper for apply_alignment."""
     result = _dict_to_alignment_result(alignment_dict)
-    return apply_alignment(_df, result, unit_row=unit_row, unit_col=unit_col)
+    return apply_alignment(_df, result, unit_row=unit_row, unit_col=unit_col, manual_offset_x=manual_offset_x, manual_offset_y=manual_offset_y)
 
 
 def compute_dataframe_hash(df: pd.DataFrame) -> str:
@@ -749,60 +809,26 @@ def apply_alignment(
     df: pd.DataFrame, 
     result: AlignmentResult, 
     unit_row: Optional[int] = None, 
-    unit_col: Optional[int] = None
+    unit_col: Optional[int] = None,
+    manual_offset_x: float = 0.0,
+    manual_offset_y: float = 0.0,
 ) -> pd.DataFrame:
     """
-    Apply alignment transformation to AOI defect coordinates.
+    Apply alignment transformation to AOI defect coordinates using CoordinateTransformer.
 
     Adds ALIGNED_X and ALIGNED_Y columns to the DataFrame.
     """
-    df = df.copy()
-    if df.empty:
-        return df
-
-    # STEP 5: Filter single unit vs panel
-    if unit_row is not None and 'UNIT_INDEX_Y' in df.columns:
-        df = df[df['UNIT_INDEX_Y'] == unit_row]
-    if unit_col is not None and 'UNIT_INDEX_X' in df.columns:
-        df = df[df['UNIT_INDEX_X'] == unit_col]
-
-    if df.empty:
-        return df
-
-    # STEP 1: Unit conversion (ensure source is in mm)
-    if 'X_MM' not in df.columns and 'X' in df.columns:
-        df['X_MM'] = df['X'] / 1000.0
-    if 'Y_MM' not in df.columns and 'Y' in df.columns:
-        df['Y_MM'] = df['Y'] / 1000.0
-
-    x_vals = df['X_MM'].fillna(0.0).values
-    y_vals = df['Y_MM'].fillna(0.0).values
-
-    # STEP 2: Design origin alignment
-    x_vals = x_vals - result.origin_x
-    y_vals = y_vals - result.origin_y
-
-    # STEP 4: Y axis flip (do this before affine to match geometry orientation)
-    if result.flip_y:
-        board_height = result.gerber_bounds[3] - result.gerber_bounds[1]
-        y_vals = board_height - y_vals
-
-    if result.transform_matrix is not None:
-        # STEP 3: Apply full affine transform
-        coords = np.column_stack([
-            x_vals,
-            y_vals,
-            np.ones(len(df))
-        ])
-        transformed = (result.transform_matrix @ coords.T).T
-        df['ALIGNED_X'] = transformed[:, 0]
-        df['ALIGNED_Y'] = transformed[:, 1]
-    else:
-        # Since ODB++ is visually shifted, we just keep the exact physical AOI coordinates
-        df['ALIGNED_X'] = x_vals
-        df['ALIGNED_Y'] = y_vals
-
-    return df
+    config = CoordinateTransformerConfig(
+        origin_x=result.origin_x,
+        origin_y=result.origin_y,
+        flip_y=result.flip_y,
+        manual_offset_x=manual_offset_x,
+        manual_offset_y=manual_offset_y,
+        transform_matrix=result.transform_matrix,
+        gerber_bounds=result.gerber_bounds
+    )
+    transformer = CoordinateTransformer(config)
+    return transformer.apply(df, unit_row=unit_row, unit_col=unit_col)
 
 
 def get_debug_info(result: AlignmentResult) -> dict:
