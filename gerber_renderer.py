@@ -808,8 +808,47 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         # Compute panel layout from step-repeat hierarchy + board bounds
         panel_layout = None
         if step_hierarchy:
+            # ── Parse profile layer from uploaded TGZ for accurate unit dimensions ──
+            # Profile defines the physical board edge (CAM standard), not copper content
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
+
+            # Try to get accurate unit size from profile/board edge
+            try:
+                from odb_parser import _parse_features_text, _compute_bounds, _read_features_text
+                import os
+
+                profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
+                profile_text = _read_features_text(profile_path)
+                if profile_text is None:
+                    profile_text = _read_features_text(profile_path + '.Z')
+
+                if profile_text:
+                    unknown_symbols_dummy = set()
+                    geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    if geoms:
+                        pb = _compute_bounds(geoms)
+                        if pb:
+                            # Profile bounds: (min_x, min_y, max_x, max_y)
+                            profile_w = pb[2] - pb[0]
+                            profile_h = pb[3] - pb[1]
+                            # Use profile dimensions if they're reasonable (within ±25% of copper bounds)
+                            # Profile is CAM standard for unit sizing; override copper which includes rails
+                            if profile_w > 0 and profile_h > 0:
+                                copper_tolerance = 0.25  # ±25% tolerance (profile vs copper with rails)
+                                if (abs(profile_w - unit_w) / unit_w <= copper_tolerance and
+                                    abs(profile_h - unit_h) / unit_h <= copper_tolerance):
+                                    unit_w = profile_w
+                                    unit_h = profile_h
+                                    warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm (CAM standard)")
+                                else:
+                                    warnings.append(
+                                        f"⚠️ Profile ({profile_w:.2f}×{profile_h:.2f} mm) vs copper ({unit_w:.2f}×{unit_h:.2f} mm) "
+                                        f"differ >25% — using copper"
+                                    )
+            except Exception as e:
+                # Gracefully fall back to copper bounds if profile parsing fails
+                warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
 
             # Detect InCAM Pro inches quirk: if the smallest DX/DY in the hierarchy
             # is much smaller than the unit width, coordinates are likely in inches
