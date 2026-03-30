@@ -816,7 +816,6 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             # Try to get accurate unit size from profile/board edge
             try:
                 from odb_parser import _parse_features_text, _compute_bounds, _read_features_text
-                import os
 
                 profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
                 profile_text = _read_features_text(profile_path)
