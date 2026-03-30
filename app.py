@@ -22,7 +22,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive, ParsedODB
-from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache, build_panel_pngs
+from gerber_renderer import render_odb_to_cam, RenderedODB, PanelLayout, save_render_cache, load_render_cache, build_panel_svg
 from aoi_loader import (
     load_aoi_files, load_aoi_with_manual_side,
     AOIDataset, FILENAME_PATTERN,
@@ -124,8 +124,8 @@ if _prog_path and Path(_prog_path).exists():
                 st.session_state['rendered_odb'] = _bg_rendered
                 st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
                 _copper_layers = [l for l in _bg_rendered.layers.values() if l.layer_type != 'drill']
-                st.session_state['_panel_pngs_built'] = bool(_copper_layers) and all(
-                    l.panel_png_data_url for l in _copper_layers
+                st.session_state['_panel_svgs_built'] = bool(_copper_layers) and all(
+                    l.panel_svg_data_url for l in _copper_layers
                 )
                 st.session_state['data_loaded'] = True
                 st.rerun()
@@ -243,10 +243,10 @@ with st.sidebar:
                         st.session_state['rendered_odb'] = rendered
                         st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
                         _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
-                        _pngs_ready = _from_cache and bool(_copper_lyrs) and all(
-                            l.panel_png_data_url for l in _copper_lyrs
+                        _svgs_ready = _from_cache and bool(_copper_lyrs) and all(
+                            l.panel_svg_data_url for l in _copper_lyrs
                         )
-                        st.session_state['_panel_pngs_built'] = _pngs_ready
+                        st.session_state['_panel_svgs_built'] = _svgs_ready
 
                         if rendered.panel_layout:
                             _pl = rendered.panel_layout
@@ -833,7 +833,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             _rendered_panel = st.session_state.get('rendered_odb')
             if _rendered_panel and _rendered_panel.panel_layout:
                 # Pick which layer to display (first checked layer only — if none checked, show nothing)
-                _panel_png_url = None
+                _panel_svg_url = None
                 _panel_bg_name = None
                 _want_layer = None
                 _all_checked_panel = [
@@ -841,29 +841,29 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     if st.session_state.get(f"vis_{_ln}", False)
                 ]
                 if _all_checked_panel:
-                    _want_layer = _all_checked_panel[0]   # PNG can only show one layer
-                # Build panel PNG only for the selected layer (on-demand, one layer at a time)
+                    _want_layer = _all_checked_panel[0]   # Background can only show one layer
+                # Build panel SVG only for the selected layer (on-demand, one layer at a time)
                 if _want_layer:
                     _want_lyr_obj = _rendered_panel.layers[_want_layer]
-                    if not _want_lyr_obj.panel_png_data_url:
+                    if not _want_lyr_obj.panel_svg_data_url:
                         with st.spinner(f"Building panel image for {_want_layer}..."):
-                            from gerber_renderer import build_panel_png_hires
+                            from gerber_renderer import build_panel_svg
                             try:
-                                _want_lyr_obj.panel_png_data_url = build_panel_png_hires(
+                                _want_lyr_obj.panel_svg_data_url = build_panel_svg(
                                     _want_lyr_obj.svg_string, _rendered_panel.panel_layout
                                 )
                             except Exception:
                                 pass
                             _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                            if _tgz_b and _want_lyr_obj.panel_png_data_url:
+                            if _tgz_b and _want_lyr_obj.panel_svg_data_url:
                                 save_render_cache(_tgz_b, _rendered_panel)
-                    if _want_lyr_obj.panel_png_data_url:
-                        _panel_png_url = _want_lyr_obj.panel_png_data_url
+                    if _want_lyr_obj.panel_svg_data_url:
+                        _panel_svg_url = _want_lyr_obj.panel_svg_data_url
                         _panel_bg_name = _want_layer
 
-                if _panel_png_url:
+                if _panel_svg_url:
                     panel_fig.update_layout(images=[dict(
-                        source=_panel_png_url,
+                        source=_panel_svg_url,
                         xref="x", yref="y",
                         x=0, y=FRAME_HEIGHT,
                         sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
@@ -965,7 +965,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     st.rerun()
 
         elif st.session_state.get('rendered_odb') and st.session_state.get('bg_source') == 'CAM (Gerbonara)':
-            # CAM-only mode: no AOI data, but TGZ is rendered — show tiled panel PNG
+            # CAM-only mode: no AOI data, but TGZ is rendered — show tiled panel SVG
             _rodb = st.session_state['rendered_odb']
             _pl_cam = _rodb.panel_layout
             if _pl_cam and _rodb.layers:
@@ -991,8 +991,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                        x1=_px + _uw_cam, y1=_py + _uh_cam,
                                        fillcolor="rgba(0,180,100,0.07)",
                                        line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
-                # Use pre-cached panel PNG for the checked layer only (no fallback)
-                _panel_png = None
+                # Use pre-cached panel SVG for the checked layer only (no fallback)
+                _panel_svg = None
                 _sel_ln2 = None
                 for _ln2 in _rodb.layers:
                     if st.session_state.get(f"vis_{_ln2}", False):
@@ -1001,26 +1001,26 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
                 if _sel_ln2:
                     _sel_lyr2 = _rodb.layers[_sel_ln2]
-                    if not _sel_lyr2.panel_png_data_url:
+                    if not _sel_lyr2.panel_svg_data_url:
                         with st.spinner(f"Building panel image for {_sel_ln2}..."):
-                            from gerber_renderer import build_panel_png_hires
+                            from gerber_renderer import build_panel_svg
                             try:
-                                _sel_lyr2.panel_png_data_url = build_panel_png_hires(
+                                _sel_lyr2.panel_svg_data_url = build_panel_svg(
                                     _sel_lyr2.svg_string, _pl_cam
                                 )
                             except Exception:
                                 pass
                             _tgz_b2 = st.session_state.get('_tgz_bytes_for_cache')
-                            if _tgz_b2 and _sel_lyr2.panel_png_data_url:
+                            if _tgz_b2 and _sel_lyr2.panel_svg_data_url:
                                 save_render_cache(_tgz_b2, _rodb)
-                    _panel_png = _sel_lyr2.panel_png_data_url
+                    _panel_svg = _sel_lyr2.panel_svg_data_url
 
-                if not _panel_png:
+                if not _panel_svg:
                     st.caption("☝️ Select a layer in the sidebar to display the panel image.")
 
-                if _panel_png:
+                if _panel_svg:
                     _cam_fig.update_layout(images=[dict(
-                        source=_panel_png,
+                        source=_panel_svg,
                         xref="x", yref="y",
                         x=0, y=FRAME_HEIGHT,
                         sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
@@ -1701,27 +1701,27 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 ),
             )
 
-            # ── Helper: load / build panel PNG background ──────────────────────
-            def _get_panel_png_url(rp):
+            # ── Helper: load / build panel SVG background ──────────────────────
+            def _get_panel_svg_url(rp):
                 if not (rp and rp.panel_layout):
                     return None
                 _checked = [ln for ln in rp.layers if st.session_state.get(f"vis_{ln}", False)]
                 if not _checked:
                     return None
                 lyr_obj = rp.layers[_checked[0]]
-                if not lyr_obj.panel_png_data_url:
+                if not lyr_obj.panel_svg_data_url:
                     with st.spinner("Building panel background..."):
-                        from gerber_renderer import build_panel_png_hires
+                        from gerber_renderer import build_panel_svg
                         try:
-                            lyr_obj.panel_png_data_url = build_panel_png_hires(
+                            lyr_obj.panel_svg_data_url = build_panel_svg(
                                 lyr_obj.svg_string, rp.panel_layout
                             )
                         except Exception:
                             pass
                         _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                        if _tgz_b and lyr_obj.panel_png_data_url:
+                        if _tgz_b and lyr_obj.panel_svg_data_url:
                             save_render_cache(_tgz_b, rp)
-                return lyr_obj.panel_png_data_url
+                return lyr_obj.panel_svg_data_url
 
             if _rp_for_bounds and _rp_for_bounds.panel_layout:
                 frame_bx1, frame_by1 = 0.0, 0.0
@@ -1735,10 +1735,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                 from visualizer import build_heatmap_figure
                 hm_fig = build_heatmap_figure(hm_df, hm_config)
 
-                _png_url = _get_panel_png_url(_rp_for_bounds)
-                if _png_url:
+                _svg_url = _get_panel_svg_url(_rp_for_bounds)
+                if _svg_url:
                     hm_fig.update_layout(images=[dict(
-                        source=_png_url, xref="x", yref="y",
+                        source=_svg_url, xref="x", yref="y",
                         x=0, y=FRAME_HEIGHT, sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
                         sizing="stretch", layer="below", opacity=1.0,
                     )])
@@ -1905,10 +1905,10 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                     ))
 
                     # ── Panel background (dimmed so grid is readable) ──────────
-                    _png_url = _get_panel_png_url(_rp_for_bounds)
-                    if _png_url and _use_mm:
+                    _svg_url = _get_panel_svg_url(_rp_for_bounds)
+                    if _svg_url and _use_mm:
                         _grid_fig.update_layout(images=[dict(
-                            source=_png_url, xref="x", yref="y",
+                            source=_svg_url, xref="x", yref="y",
                             x=frame_bx1, y=frame_by2,
                             sizex=frame_bx2 - frame_bx1, sizey=frame_by2 - frame_by1,
                             sizing="stretch", layer="below", opacity=0.25,
