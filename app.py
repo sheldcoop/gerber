@@ -1390,11 +1390,242 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                 font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
                                 xref="x", yref="y",
                             )
+                            _em_fig.update_layout(
+                                xaxis=dict(range=[-1, _cam_cell_w + 1], scaleanchor='y', scaleratio=1,
+                                           showgrid=False, zeroline=False, showticklabels=False),
+                                yaxis=dict(range=[-1, _cam_cell_h + 1], showgrid=False,
+                                           zeroline=False, showticklabels=False),
+                                plot_bgcolor='#000000', paper_bgcolor='#000000',
+                                font=dict(color='#cccccc'),
+                                margin=dict(l=0, r=0, t=36, b=0), height=600,
+                            )
                             st.plotly_chart(_em_fig, width='stretch',
-                                           
                                             config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
                 else:
-                    st.info("No defects found for the selected units. Upload AOI data for analysis.")
+                    # ── Coordinate normalisation (vectorized) ─────────────────
+                    # Subtract each unit's effective origin so all units fold into
+                    # local coords [0…cell_w] × [0…cell_h], matching CAM SVG at (0,0).
+                    _pairs_cm = list(zip(
+                        _cm_src['UNIT_INDEX_Y'].astype(int),
+                        _cm_src['UNIT_INDEX_X'].astype(int),
+                    ))
+                    _ox_arr = [_cm_origins.get(p, (0.0, 0.0))[0] for p in _pairs_cm]
+                    _oy_arr = [_cm_origins.get(p, (0.0, 0.0))[1] for p in _pairs_cm]
+
+                    _cm_off_x = align_args.get('manual_offset_x', 0.0)
+                    _cm_off_y = align_args.get('manual_offset_y', 0.0)
+                    _cm_plot = _cm_src.copy()
+                    _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr + _cm_off_x
+                    _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr + _cm_off_y
+
+                    # ── Build figure ──────────────────────────────────────────
+                    _cm_cfg = OverlayConfig()
+                    _cm_cfg.board_bounds = (
+                        -1.0, -1.0,
+                        _cam_cell_w + 1.0,
+                        _cam_cell_h + 1.0,
+                    )
+                    _cm_cfg.color_mode    = st.session_state.get('color_mode_select', 'by_type')
+                    _cm_cfg.marker_style  = st.session_state.get('marker_style_select', 'dot')
+                    _cm_cfg.buildup_filter = _bu_cm
+                    _cm_cfg.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
+                    _cm_cfg.side_filter   = 'Both'
+
+                    _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
+
+                    # ── Background: CAM (Gerbonara) or plain cell outline ─────
+                    _rendered_cm      = st.session_state.get('rendered_odb')
+                    _active_layer_name = None
+
+                    if _rendered_cm and _rendered_cm.layers:
+                        # Pick checked layers only — if none checked, show no background
+                        _cm_cam_layers = [
+                            n for n in _rendered_cm.layers
+                            if st.session_state.get(f"vis_{n}", False)
+                        ]
+
+                        _is_multi_cm = len(_cm_cam_layers) > 1
+                        # Sort: drill/laser rendered first (back), copper last (front)
+                        _cm_cam_pairs = [
+                            (ln, _rendered_cm.layers[ln])
+                            for ln in _cm_cam_layers
+                            if _rendered_cm.layers.get(ln)
+                        ]
+                        _cm_cam_pairs.sort(key=_layer_sort_key)
+                        _active_layer_name = _cm_cam_pairs[-1][0] if _cm_cam_pairs else None
+
+                        _ref_b_cm    = _first_lyr_cm.bounds
+                        _ref_shift_x = -_ref_b_cm[0]
+                        _ref_shift_y = -_ref_b_cm[1]
+
+                        for _cm_cam_ln, _cm_cam_lyr in _cm_cam_pairs:
+                            # Use vector SVGs for single unit
+                            if _is_multi_cm and _cm_cam_lyr.color_svg_urls:
+                                _cm_data_url = next(iter(_cm_cam_lyr.color_svg_urls.values()))
+                            else:
+                                _cm_data_url = _get_svg_url(_cm_cam_lyr)
+
+                            _cb_cm = _cm_cam_lyr.bounds
+                            _im_x  = _cb_cm[0] + _ref_shift_x
+                            _im_y  = _cb_cm[3] + _ref_shift_y
+                            _im_w  = _cb_cm[2] - _cb_cm[0]
+                            _im_h  = _cb_cm[3] - _cb_cm[1]
+
+                            _cm_fig.add_layout_image(dict(
+                                source=_cm_data_url,
+                                xref="x", yref="y",
+                                x=_im_x, y=_im_y,
+                                sizex=_im_w, sizey=_im_h,
+                                sizing="stretch", layer="below",
+                                opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
+                            ))
+
+                        from visualizer import _apply_layout as _cm_apply_layout
+                        _cm_apply_layout(_cm_fig, _cm_cfg)
+                    else:
+                        # No TGZ — draw unit cell outline as spatial reference
+                        _cm_fig.add_shape(
+                            type="rect", x0=0, y0=0, x1=_cam_cell_w, y1=_cam_cell_h,
+                            line=dict(color="rgba(0,180,80,0.5)", width=1.5),
+                            fillcolor="rgba(0,0,0,0)",
+                            layer="below",
+                        )
+                        from visualizer import _apply_layout as _cm_apply_layout
+                        _cm_apply_layout(_cm_fig, _cm_cfg)
+
+                    # ── Subtle mm grid ────────────────────────────────────────
+                    _grid_step = 5.0  # 5mm grid
+                    import math as _math
+                    _gx = _grid_step
+                    while _gx < _cam_cell_w:
+                        _cm_fig.add_shape(type="line",
+                            x0=_gx, y0=0, x1=_gx, y1=_cam_cell_h,
+                            line=dict(color="rgba(255,255,255,0.06)", width=1),
+                            layer="below")
+                        _gx += _grid_step
+                    _gy = _grid_step
+                    while _gy < _cam_cell_h:
+                        _cm_fig.add_shape(type="line",
+                            x0=0, y0=_gy, x1=_cam_cell_w, y1=_gy,
+                            line=dict(color="rgba(255,255,255,0.06)", width=1),
+                            layer="below")
+                        _gy += _grid_step
+
+                    # ── Dimension annotations (width × height) ────────────────
+                    _cm_fig.add_annotation(
+                        x=_cam_cell_w / 2, y=-_cam_cell_h * 0.045,
+                        text=f"W: {_cam_cell_w:.2f} mm",
+                        showarrow=False,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
+                    )
+                    _cm_fig.add_annotation(
+                        x=-_cam_cell_w * 0.045, y=_cam_cell_h / 2,
+                        text=f"H: {_cam_cell_h:.2f} mm",
+                        showarrow=False, textangle=-90,
+                        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
+                        xref="x", yref="y",
+                    )
+
+                    # ── Layer name label (top-centre, green) ─────────────────
+                    if _active_layer_name:
+                        _cm_fig.add_annotation(
+                            x=_cam_cell_w / 2, y=_cam_cell_h + _cam_cell_h * 0.04,
+                            text=f"Layer: {_active_layer_name}",
+                            showarrow=False, xanchor="center", yanchor="bottom",
+                            font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
+                            xref="x", yref="y",
+                        )
+
+                    # ── Hotspot ring (densest cluster centre) ─────────────────
+                    if len(_cm_plot) >= 5:
+                        try:
+                            from sklearn.neighbors import KernelDensity
+                            import numpy as _np2
+                            _hs_xy = _cm_plot[['ALIGNED_X', 'ALIGNED_Y']].dropna().values
+                            if len(_hs_xy) >= 5:
+                                _kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
+                                _kde.fit(_hs_xy)
+                                _nx, _ny = 40, 40
+                                _gxv = _np2.linspace(0, _cam_cell_w, _nx)
+                                _gyv = _np2.linspace(0, _cam_cell_h, _ny)
+                                _gxx, _gyy = _np2.meshgrid(_gxv, _gyv)
+                                _grid_pts = _np2.column_stack([_gxx.ravel(), _gyy.ravel()])
+                                _dens = _np2.exp(_kde.score_samples(_grid_pts)).reshape(_ny, _nx)
+                                _peak_idx = _np2.unravel_index(_dens.argmax(), _dens.shape)
+                                _hs_cx = float(_gxv[_peak_idx[1]])
+                                _hs_cy = float(_gyv[_peak_idx[0]])
+                                _hs_r  = min(_cam_cell_w, _cam_cell_h) * 0.06
+                                _cm_fig.add_shape(type="circle",
+                                    x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
+                                    x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
+                                    line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
+                                    fillcolor="rgba(255,80,80,0.08)", layer="above")
+                                _cm_fig.add_annotation(
+                                    x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
+                                    text="hotspot", showarrow=False,
+                                    font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
+                                    xref="x", yref="y",
+                                )
+                        except Exception:
+                            pass  # sklearn not available or not enough data
+
+                    # ── Heatmap toggle ────────────────────────────────────────
+                    _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
+                                              help="Overlay a 2D defect density heatmap instead of individual dots",
+                                              key="cm_heatmap_toggle")
+                    if _show_heatmap and len(_cm_plot) >= 3:
+                        try:
+                            import numpy as _np3
+                            _hm_x = _cm_plot['ALIGNED_X'].dropna().values
+                            _hm_y = _cm_plot['ALIGNED_Y'].dropna().values
+                            _hm_nx, _hm_ny = 60, 60
+                            _hm_gx = _np3.linspace(0, _cam_cell_w, _hm_nx)
+                            _hm_gy = _np3.linspace(0, _cam_cell_h, _hm_ny)
+                            _hm_z, _, _ = _np3.histogram2d(_hm_y, _hm_x,
+                                bins=[_hm_ny, _hm_nx],
+                                range=[[0, _cam_cell_h], [0, _cam_cell_w]])
+                            from scipy.ndimage import gaussian_filter as _gf
+                            _hm_z = _gf(_hm_z.astype(float), sigma=2.0)
+                            _cm_fig.add_trace(go.Heatmap(
+                                z=_hm_z,
+                                x=_hm_gx, y=_hm_gy,
+                                colorscale='Hot',
+                                opacity=0.55,
+                                showscale=False,
+                                hoverinfo='skip',
+                            ))
+                        except Exception:
+                            st.warning("Heatmap requires scipy. Install with: pip install scipy")
+
+                    # ── "N defects from M units" subtitle ────────────────────
+                    _n_def = len(_cm_plot)
+                    _n_units = len(_cm_sel_units)
+                    _cm_fig.update_layout(
+                        title=dict(
+                            text=f"{_n_def} defects · {_n_units} units · avg {_n_def/_n_units:.1f}/unit",
+                            font=dict(color="rgba(180,180,180,0.8)", size=12, family="monospace"),
+                            x=0.5, xanchor="center",
+                        )
+                    )
+
+                    st.plotly_chart(
+                        _cm_fig,
+                        width='stretch',
+                        config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
+                    )
+
+                    # ── Stats ─────────────────────────────────────────────────
+                    _cm_s1, _cm_s2, _cm_s3, _cm_s4 = st.columns(4)
+                    _cm_s1.metric("Units Selected", len(_cm_sel_units))
+                    _cm_s2.metric("Defects Shown",  len(_cm_plot))
+                    _cm_s3.metric("Avg / Unit",     f"{len(_cm_plot)/len(_cm_sel_units):.1f}")
+                    _top_cm = (
+                        str(_cm_plot['DEFECT_TYPE'].value_counts().index[0])
+                        if 'DEFECT_TYPE' in _cm_plot.columns and not _cm_plot.empty
+                        else '—'
+                    )
+                    _cm_s4.metric("Top Defect Type", _top_cm)
 
                 st.divider()
 
