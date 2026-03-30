@@ -1429,10 +1429,27 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
                 # ── Position effect bar charts ─────────────────────────────
                 st.markdown("**Position Effect Analysis**")
+                
+                # Prepare row/column defect counts for Position Effect charts
+                _cm_row_inds = sorted(set(r for r, c in _all_cm_pairs))
+                _cm_col_inds = sorted(set(c for r, c in _all_cm_pairs))
+                _n_rows = len(_cm_row_inds)
+                _n_cols = len(_cm_col_inds)
+
+                if not _cm_src.empty:
+                    _col_counts = _cm_src.groupby('UNIT_INDEX_X', observed=True).size()
+                    _row_counts = _cm_src.groupby('UNIT_INDEX_Y', observed=True).size()
+                else:
+                    _col_counts = pd.Series(dtype=int)
+                    _row_counts = pd.Series(dtype=int)
+
+                _col_sums = pd.Series([_col_counts.get(c, 0) for c in _cm_col_inds])
+                _row_sums = pd.Series([_row_counts.get(r, 0) for r in _cm_row_inds])
+
                 _bar_c1, _bar_c2 = st.columns(2)
 
                 _bar_col_fig = go.Figure(go.Bar(
-                    x=[f"C{_i}" for _i in range(_n_cols)],
+                    x=[f"C{c}" for c in _cm_col_inds],
                     y=_col_sums.tolist(),
                     marker_color=[
                         f"rgba(220,{max(0,180-int(_v/_col_sums.max()*180))},0,0.85)"
@@ -1455,7 +1472,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                                      config={'displayModeBar': False})
 
                 _bar_row_fig = go.Figure(go.Bar(
-                    x=[f"R{_i}" for _i in range(_n_rows)],
+                    x=[f"R{r}" for r in _cm_row_inds],
                     y=_row_sums.tolist(),
                     marker_color=[
                         f"rgba(220,{max(0,180-int(_v/_row_sums.max()*180))},0,0.85)"
