@@ -841,14 +841,13 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 if profile_text is None:
                     profile_text = _read_features_text(profile_path + '.Z')
 
-                if profile_text:
+                if not profile_text:
+                    warnings.append(f"⚠️ Profile: file not found at steps/{step_name}/profile")
+                else:
+                    warnings.append(f"📄 Profile: found at steps/{step_name}/profile ({len(profile_text)} chars), uf={uf}")
                     unknown_symbols_dummy = set()
                     geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
 
-                    # Fallback: many ODB++ profiles store the outline purely as
-                    # polygon symbol outlines (OB/OS/OE) without a flash feature.
-                    # _parse_features_text returns empty geoms in that case.
-                    # Extract XY coords directly from OB/OS lines instead.
                     if not geoms:
                         import re as _re_prof
                         _outline_xs, _outline_ys = [], []
@@ -859,6 +858,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                                 if len(_pts) >= 2:
                                     _outline_xs.append(float(_pts[0]) * uf)
                                     _outline_ys.append(float(_pts[1]) * uf)
+                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={uf}")
                         if _outline_xs and _outline_ys:
                             pb = (min(_outline_xs), min(_outline_ys),
                                   max(_outline_xs), max(_outline_ys))
