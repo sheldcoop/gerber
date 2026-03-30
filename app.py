@@ -38,6 +38,7 @@ from views.panel_overview import render_panel_overview
 from views.unit_commonality import render_unit_commonality
 from views.panel_heatmap import render_panel_heatmap
 from views.cluster_triage import render_cluster_triage
+from views.panelization_data import render_panelization_data
 
 handle_bg_render_polling()
 render_sidebar()
@@ -105,7 +106,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if st.session_state.get('_pending_view'):
         st.session_state['_view_mode'] = st.session_state.pop('_pending_view')
 
-    _tabs = ["🔭 Panel Overview", "🗺️ Unit Commonality", "🔬 Cluster Triage", "🔥 Panel Heatmap"]
+    _tabs = ["🔭 Panel Overview", "🗺️ Unit Commonality", "🔬 Cluster Triage", "🔥 Panel Heatmap", "📊 Panelization Data"]
     _tab_cols = st.columns(len(_tabs), gap="small")
     for _i, _label in enumerate(_tabs):
         _is_active = (st.session_state['_view_mode'] == _label)
@@ -216,6 +217,9 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
     elif view_mode == "🔬 Cluster Triage":
         render_cluster_triage(parsed, aoi, align_args)
+
+    elif view_mode == "📊 Panelization Data":
+        render_panelization_data(parsed, aoi, align_args)
 
     # ---- Defect Summary Panel ----
     if aoi and aoi.has_data:
