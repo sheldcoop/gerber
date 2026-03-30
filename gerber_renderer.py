@@ -49,12 +49,6 @@ def _svg_to_data_url_fast(svg_str: str) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
-def _png_to_data_url(png_bytes: bytes) -> str:
-    """Convert PNG bytes to base64 data URL."""
-    b64 = base64.b64encode(png_bytes).decode('ascii')
-    return f"data:image/png;base64,{b64}"
-
-
 # ── Disk cache ────────────────────────────────────────────────────────────────
 _CAM_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs' / 'cam'
 
@@ -78,7 +72,7 @@ def save_render_cache(tgz_bytes: bytes, rendered: 'RenderedODB') -> None:
                     'color_svg_urls': lyr.color_svg_urls,
                     'bounds': lyr.bounds,
                     'feature_count': lyr.feature_count,
-                    'panel_png_data_url': lyr.panel_png_data_url,
+                    'panel_svg_data_url': lyr.panel_svg_data_url,
                     'stats': lyr.stats,
                 }
                 for name, lyr in rendered.layers.items()
@@ -115,7 +109,7 @@ def load_render_cache(tgz_bytes: bytes) -> Optional['RenderedODB']:
                 gerber_file=None,
                 bounds=d['bounds'],
                 feature_count=d['feature_count'],
-                panel_png_data_url=d['panel_png_data_url'],
+                panel_svg_data_url=d.get('panel_svg_data_url', ''),
                 stats=d['stats'],
             )
         return RenderedODB(
@@ -191,79 +185,6 @@ def build_panel_svg(svg_string: str, panel_layout) -> str:
     return _svg_to_data_url_fast(composite)
 
 
-def build_panel_png_hires(svg_string: str, panel_layout, px_per_mm: int = 16) -> str:
-    """Build a high-resolution panel PNG by tiling the unit raster.
-
-    Strategy (fast):
-      1. Rasterize the single-unit SVG once with cairosvg → small unit PNG
-      2. Open with PIL and paste it N times on a panel canvas (pixel copy)
-
-    This is orders of magnitude faster than asking cairosvg to render a
-    composite SVG with N × (unit feature count) elements.
-
-    Returns:
-        Base64 PNG data URL, or '' on failure.
-    """
-    import io
-    import cairosvg
-    from PIL import Image
-
-    pw, ph = panel_layout.panel_width, panel_layout.panel_height
-    uw, uh = panel_layout.unit_bounds
-
-    unit_w_px = max(1, round(uw * px_per_mm))
-    unit_h_px = max(1, round(uh * px_per_mm))
-
-    # Step 1: rasterize the single unit SVG
-    try:
-        unit_png_bytes = cairosvg.svg2png(
-            bytestring=svg_string.encode('utf-8'),
-            output_width=unit_w_px,
-            output_height=unit_h_px,
-        )
-    except Exception:
-        return ''
-
-    unit_img = Image.open(io.BytesIO(unit_png_bytes)).convert('RGBA')
-
-    # Step 2: create panel canvas (Y-down, background = #060A06)
-    panel_w_px = max(1, round(pw * px_per_mm))
-    panel_h_px = max(1, round(ph * px_per_mm))
-    panel_img = Image.new('RGBA', (panel_w_px, panel_h_px), (6, 10, 6, 255))
-
-    # Step 3: paste unit PNG at each position (pixel copy — milliseconds)
-    for x_mm, y_mm in panel_layout.unit_positions:
-        # x_mm, y_mm = bottom-left corner of unit in panel coords (Y-up)
-        # PNG is Y-down: top of unit = ph - y_mm - uh
-        px = round(x_mm * px_per_mm)
-        py = round((ph - y_mm - uh) * px_per_mm)
-        panel_img.paste(unit_img, (px, py))
-
-    # Step 4: encode to PNG bytes
-    buf = io.BytesIO()
-    panel_img.save(buf, format='PNG', optimize=False, compress_level=1)
-    return _png_to_data_url(buf.getvalue())
-
-
-def build_panel_pngs(rendered: 'RenderedODB') -> None:
-    """Build high-res panel PNGs in-place for all non-drill layers."""
-    if not rendered or not rendered.panel_layout:
-        return
-
-    def _do(layer_obj):
-        if layer_obj.layer_type == 'drill' or layer_obj.panel_png_data_url:
-            return
-        try:
-            layer_obj.panel_png_data_url = build_panel_png_hires(
-                layer_obj.svg_string, rendered.panel_layout
-            )
-        except Exception:
-            pass
-
-    with ThreadPoolExecutor(max_workers=min(4, len(rendered.layers))) as ex:
-        list(ex.map(_do, rendered.layers.values()))
-
-
 # Pre-defined color palette for stacking
 LAYER_COLORS = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644',
                 '#44ccaa', '#cc4466', '#44cccc']
@@ -280,14 +201,14 @@ class RenderedLayer:
     gerber_file: GerberFile
     bounds: tuple                # (min_x, min_y, max_x, max_y) in mm
     feature_count: int
-    panel_png_data_url: str = '' # pre-rendered panel tile PNG (144 units, rasterized)
+    panel_svg_data_url: str = '' # pre-rendered panel tile SVG (composite SVG data url)
     stats: dict = field(default_factory=dict)
 
 
 @dataclass
 class PanelLayout:
     """Panel tiling layout derived from TGZ STEP-REPEAT data."""
-    unit_positions: list          # [(x_mm, y_mm), ...] centered for panel PNG display
+    unit_positions: list          # [(x_mm, y_mm), ...] centered for panel SVG display
     unit_bounds: tuple            # (width_mm, height_mm) of a single unit
     total_units: int
     rows: int                     # effective total rows across entire panel
@@ -887,8 +808,46 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         # Compute panel layout from step-repeat hierarchy + board bounds
         panel_layout = None
         if step_hierarchy:
+            # ── Parse profile layer from uploaded TGZ for accurate unit dimensions ──
+            # Profile defines the physical board edge (CAM standard), not copper content
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
+
+            # Try to get accurate unit size from profile/board edge
+            try:
+                from odb_parser import _parse_features_text, _compute_bounds, _read_features_text
+
+                profile_path = os.path.join(job_root, 'steps', step_name, 'profile')
+                profile_text = _read_features_text(profile_path)
+                if profile_text is None:
+                    profile_text = _read_features_text(profile_path + '.Z')
+
+                if profile_text:
+                    unknown_symbols_dummy = set()
+                    geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    if geoms:
+                        pb = _compute_bounds(geoms)
+                        if pb:
+                            # Profile bounds: (min_x, min_y, max_x, max_y)
+                            profile_w = pb[2] - pb[0]
+                            profile_h = pb[3] - pb[1]
+                            # Use profile dimensions if they're reasonable (within ±25% of copper bounds)
+                            # Profile is CAM standard for unit sizing; override copper which includes rails
+                            if profile_w > 0 and profile_h > 0:
+                                copper_tolerance = 0.25  # ±25% tolerance (profile vs copper with rails)
+                                if (abs(profile_w - unit_w) / unit_w <= copper_tolerance and
+                                    abs(profile_h - unit_h) / unit_h <= copper_tolerance):
+                                    unit_w = profile_w
+                                    unit_h = profile_h
+                                    warnings.append(f"✅ Unit size from board profile: {unit_w:.2f}×{unit_h:.2f} mm (CAM standard)")
+                                else:
+                                    warnings.append(
+                                        f"⚠️ Profile ({profile_w:.2f}×{profile_h:.2f} mm) vs copper ({unit_w:.2f}×{unit_h:.2f} mm) "
+                                        f"differ >25% — using copper"
+                                    )
+            except Exception as e:
+                # Gracefully fall back to copper bounds if profile parsing fails
+                warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
 
             # Detect InCAM Pro inches quirk: if the smallest DX/DY in the hierarchy
             # is much smaller than the unit width, coordinates are likely in inches
@@ -908,8 +867,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
                 step_hierarchy, (unit_w, unit_h),
             )
 
-        # Build panel PNG for the first copper layer only (used as Panel Overview
-        # background). Remaining layers are built lazily via build_panel_pngs().
+        # Build panel SVG for the first copper layer only (used as Panel Overview background)
         if panel_layout and rendered_layers:
             _first_copper = next(
                 (lo for lo in rendered_layers.values() if lo.layer_type != 'drill'),
@@ -917,7 +875,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             )
             if _first_copper:
                 try:
-                    _first_copper.panel_png_data_url = build_panel_png_hires(
+                    _first_copper.panel_svg_data_url = build_panel_svg(
                         _first_copper.svg_string, panel_layout
                     )
                 except Exception:
