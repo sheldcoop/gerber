@@ -27,8 +27,9 @@ from odb_parser import (
     _find_step,
 )
 
-from core.cache import save_render_cache, load_render_cache
+from core.cache import save_render_cache, load_render_cache  # re-exported for callers
 from core.pipeline import _render_pipeline, LAYER_COLORS
+from core.panel_builder import build_panel_svg  # re-exported for views that import it here
 
 
 # Pre-defined color palette for stacking (also used by pipeline.py)
