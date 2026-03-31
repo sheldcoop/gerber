@@ -586,10 +586,17 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         uf = 25.4 if units == 'inch' else 1.0
 
         steps_dir = os.path.join(job_root, 'steps')
-        step_name = 'unit' if os.path.isdir(os.path.join(steps_dir, 'unit')) else _find_step(job_root)
 
-        # Parse step-repeat hierarchy for panel tiling
+        # Parse step-repeat hierarchy first so we can find the leaf step dynamically
         step_hierarchy = _parse_step_repeat(job_root, uf)
+
+        # Leaf step = appears as a child in hierarchy but has no step-repeat entries
+        # of its own (panel → qtr_panel → cluster → unit: 'unit' is the leaf)
+        _all_ch = {sr.child_step.lower() for rpts in step_hierarchy.values() for sr in rpts}
+        _leaves = [s for s in _all_ch if s not in step_hierarchy]
+        step_name = (_leaves[0] if _leaves else
+                     'unit' if os.path.isdir(os.path.join(steps_dir, 'unit')) else
+                     _find_step(job_root))
 
         user_sym_map = _load_user_symbols(job_root, uf)
         matrix_layers = _parse_matrix(job_root)
