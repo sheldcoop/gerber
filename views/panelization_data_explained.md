@@ -93,53 +93,93 @@ The application performs a crucial **centering** operation to convert the ODB++ 
 
 This process ensures that the entire grid of PCBs is perfectly centered on the panel frame, matching how it's physically manufactured and inspected.
 
-### Example Calculation Walkthrough
+### Example Calculation Walkthrough: Deriving Total Content Size
 
-Let's trace exactly how the app calculates the display coordinates for five consecutive units in Row 0: `(0,0)` to `(0,4)`.
+This section provides a detailed breakdown of how the application calculates the `Total Content Width` and `Total Content Height` by using the raw data from the **Step-Repeat Hierarchy** table.
 
-**Panel & Content Dimensions (from ODB++):**
-- Panel Size: `510.0 x 515.0 mm`
-- Unit Size: `33.5 x 33.5 mm`
-- Unit Pitch X: `34.3008 mm`
+#### Step 1: Calculate Total Content Width (`448.004 mm`)
 
-**Step 1: Calculate Total Content Width & Height**
-First, the app finds the raw distance from the leftmost unit to the rightmost unit, and adds the physical width of one unit to get the total "content block" size.
+The goal is to find the total horizontal distance from the left edge of the very first unit to the right edge of the very last unit.
 
-*   **X-Axis (Width)**:
-    *   Left quadrant spans 5 unit pitches: `5 × 34.3008 = 171.504 mm`
-    *   Middle gap between quadrants: `243.0 mm`
-    *   Span from first to last unit origin: `171.504 + 243.0 = 414.504 mm`
-    *   Total Width = Span + Unit Width = `414.504 + 33.500 = 448.004 mm`
+1.  **Find the number of gaps and the pitch between units.**
+    We look at the `cluster → UNIT` row in the **Step-Repeat Hierarchy** table:
 
-*   **Y-Axis (Height)**:
-    *   A quadrant spans 2 cluster pitches (`2 × 79.0 = 158.0 mm`) and 1 unit pitch (`34.3008 mm`) = `192.3008 mm`
-    *   Middle gap between top and bottom halves: `244.0 mm`
-    *   Span from bottom to top unit origin: `192.3008 + 244.0 = 436.3008 mm`
-    *   Total Height = Span + Unit Height = `436.3008 + 33.500 = 469.8008 mm` (rounds to `469.801`)
+| Parent Step | Child Step | ... | Repeat X (nx) | ... | Pitch X (mm) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `cluster` | `UNIT` | ... | **6** | ... | **34.3008** |
 
-**Step 2: Calculate the Centering Margin**
-The app centers the total content block onto the physical panel.
+    -   `Repeat X (nx) = 6` tells us there are **6 units** arranged horizontally inside each `cluster`.
+    -   The number of gaps between 6 units is `6 - 1 = 5`. **This is where the `5` comes from.**
+    -   `Pitch X (mm) = 34.3008` is the distance between the start of one unit and the start of the next.
+    -   So, the span of the units inside one quadrant's worth of columns is `5 gaps × 34.3008 mm/gap = 171.504 mm`.
 
-- **Left Margin (X-axis)**: `(510.0 - 448.004) / 2 = 30.998 mm`
-- **Bottom Margin (Y-axis)**: `(515.0 - 469.801) / 2 = 22.5995 mm` (rounds to `22.6 mm`)
+2.  **Find the large gap between the left and right halves of the panel.**
+    We look at the `panel → QTR_PANEL` row:
 
-**Step 3: Calculate the Unit Positions (Row 0, Cols 0 to 4)**
-Since all these units are in Row 0, they all sit at the bottom edge. Their Y-coordinate is exactly the Bottom Margin: **`22.6 mm`**.
+| Parent Step | Child Step | ... | Pitch X (mm) |
+| :--- | :--- | :--- | :--- |
+| `panel` | `QTR_PANEL` | ... | **243.0** |
 
-For the X-coordinates, we start at the Left Margin and add the `34.3008 mm` unit pitch for each subsequent column:
+    -   `Pitch X (mm) = 243.0` is the large gap between the left-side quadrants and the right-side quadrants.
 
--   **Unit (0, 0)**
-    -   `X = Left Margin = 30.998 mm`
--   **Unit (0, 1)**
-    -   `X = 30.998 + 34.3008 = 65.2988 mm` (rounds to `65.299`)
--   **Unit (0, 2)**
-    -   `X = 65.2988 + 34.3008 = 99.5996 mm` (rounds to `99.600`)
--   **Unit (0, 3)**
-    -   `X = 99.5996 + 34.3008 = 133.9004 mm` (rounds to `133.900`)
--   **Unit (0, 4)**
-    -   `X = 133.9004 + 34.3008 = 168.2012 mm` (rounds to `168.201`)
+3.  **Combine the spans and add the final unit's width.**
+    -   `Span of origins = (span of units in left half) + (middle gap) = 171.504 + 243.0 = 414.504 mm`. This is the distance from the origin of the first unit to the origin of the last unit.
+    -   To get the total width of the *content*, we must add the physical width of the last unit itself.
+    -   `Total Content Width = 414.504 mm + 33.500 mm (Unit Width) = **448.004 mm**`.
 
-These calculated values (`30.998, 65.299, 99.6, 133.9, 168.201`) match the table output exactly. This demonstrates how the app dynamically centers any ODB++ grid layout flawlessly without needing hardcoded offsets.
+#### Step 2: Calculate Total Content Height (`469.801 mm`)
+
+The same logic applies vertically.
+
+1.  **Find the spans between clusters and units.**
+    We look at two rows in the hierarchy:
+
+| Parent Step | Child Step | ... | Repeat Y (ny) | ... | Pitch Y (mm) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `qtr_panel` | `CLUSTER` | ... | **3** | ... | **79.0** |
+| `cluster` | `UNIT` | ... | **2** | ... | **34.3008** |
+
+    -   `qtr_panel → CLUSTER`: `Repeat Y (ny) = 3` means there are 3 clusters vertically in a quadrant, so there are `3 - 1 = 2` gaps between them. **This is where the `2` comes from.** The pitch is `79.0 mm`.
+    -   `cluster → UNIT`: `Repeat Y (ny) = 2` means there are 2 units vertically in a cluster, so there is `2 - 1 = 1` gap. The pitch is `34.3008 mm`.
+    -   The total span of origins within one vertical half of the panel is `(2 gaps × 79.0 mm) + (1 gap × 34.3008 mm) = 158.0 + 34.3008 = 192.3008 mm`.
+
+2.  **Find the large gap between the top and bottom halves.**
+    We look at the `panel → QTR_PANEL` row:
+
+| Parent Step | Child Step | ... | Pitch Y (mm) |
+| :--- | :--- | :--- | :--- |
+| `panel` | `QTR_PANEL` | ... | **244.0** |
+
+    -   `Pitch Y (mm) = 244.0` is the large gap between the bottom half and the top half.
+
+3.  **Combine and add the final unit's height.**
+    -   `Span of origins = (span of units in bottom half) + (middle gap) = 192.3008 + 244.0 = 436.3008 mm`.
+    -   `Total Content Height = 436.3008 mm + 33.500 mm (Unit Height) = **469.8008 mm**` (which rounds to `469.801`).
+
+#### Step 3: Calculate the Centering Margin
+
+Now that we have the total size of the content block, we can center it on the physical panel to find the starting position of the first unit.
+
+- **Left Margin (X-axis)**: `(Panel Width - Total Content Width) / 2 = (510.0 - 448.004) / 2 = **30.998 mm**`
+- **Bottom Margin (Y-axis)**: `(Panel Height - Total Content Height) / 2 = (515.0 - 469.801) / 2 = **22.5995 mm**` (rounds to `22.6`)
+
+This is how the application determines that the very first unit `(0,0)` starts at `X=30.998, Y=22.6`.
+
+---
+
+## A Note on Step Origins (Center vs. Corner)
+
+A common question is: "What if the CAM engineer used different origin points for different steps? For example, the `unit` origin is at its center, but the `cluster` origin is at its lower-left corner."
+
+**This does not affect the accuracy of the final calculation.**
+
+The application's logic is robust to this for the following reason:
+
+1.  **Relative Offsets**: The ODB++ `stephdr` files store the *relative distance* from a parent step's origin to a child step's origin (`sr.x`, `sr.y`). It does not matter where those origins are conceptually located.
+2.  **Recursive Calculation**: The `compute_unit_positions` function recursively walks the hierarchy. It starts at `(0,0)` and correctly adds up all the relative offsets defined in the `stephdr` files.
+3.  **Correct Final Positions**: As long as the CAM designer correctly specified the distance between origins in their CAM tool, the final list of "raw" unit positions will be mathematically correct before the final centering logic is applied.
+
+This design makes the application independent of the CAM engineer's specific workflow or style for placing step origins.
 
 ---
 
