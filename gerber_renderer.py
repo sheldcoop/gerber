@@ -752,9 +752,10 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             for future in as_completed(render_futures):
                 name, layer_obj, bounds = future.result()
                 rendered_layers[name] = layer_obj
-                # Exclude drill layers from board_bounds: drill features can span
-                # panel coordinates (not unit coordinates) and would inflate unit_w/unit_h.
-                if layer_obj.layer_type != 'drill':
+                # Only copper layers drive board_bounds used for centering.
+                # Soldermask/drill extend beyond the board profile (rails, edge
+                # contacts) and inflate bounds — causing wrong centering shifts.
+                if layer_obj.layer_type in ('copper', 'signal', 'power', 'mixed'):
                     all_bounds.append(bounds)
 
         # Aggregate bounds (copper/soldermask only — determines unit dimensions)
