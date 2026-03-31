@@ -79,8 +79,23 @@ def render_cluster_triage(parsed, aoi, align_args):
                     _bu_spread = _cl['BUILDUP'].nunique() if 'BUILDUP' in _cl.columns else 1
                     _cx = round(float(_cl['ALIGNED_X'].mean()), 2)
                     _cy = round(float(_cl['ALIGNED_Y'].mean()), 2)
-                    _top_type  = _cl['DEFECT_TYPE'].value_counts().idxmax() if 'DEFECT_TYPE' in _cl.columns else '—'
-                    _top_pct   = _cl['DEFECT_TYPE'].value_counts().iloc[0] / _cnt * 100
+
+                    _top_type_str = '—'
+                    if 'DEFECT_TYPE' in _cl.columns and not _cl.empty:
+                        _type_counts = _cl['DEFECT_TYPE'].value_counts()
+                        if not _type_counts.empty:
+                            _top_type = _type_counts.idxmax()
+                            _top_pct = (_type_counts.iloc[0] / _cnt) * 100
+                            _top_type_str = f"{_top_type} ({_top_pct:.0f}%)"
+
+                    _top_verif_str = '—'
+                    if 'VERIFICATION' in _cl.columns and not _cl.empty:
+                        _verif_counts = _cl['VERIFICATION'].value_counts()
+                        if not _verif_counts.empty:
+                            _top_verif = _verif_counts.idxmax()
+                            _top_verif_pct = (_verif_counts.iloc[0] / _cnt) * 100
+                            _top_verif_str = f"{_top_verif} ({_top_verif_pct:.0f}%)"
+
                     _n_units   = _cl[['UNIT_INDEX_Y', 'UNIT_INDEX_X']].drop_duplicates().__len__() if 'UNIT_INDEX_Y' in _cl.columns else '—'
                     # Severity: count × buildup spread penalty
                     _severity  = round(_cnt * (1 + 0.5 * (_bu_spread - 1)), 1)
@@ -90,7 +105,8 @@ def render_cluster_triage(parsed, aoi, align_args):
                         'Units Affected': _n_units,
                         'Buildup Layers': _bu_spread,
                         'Severity ▼': _severity,
-                        'Top Type': f"{_top_type} ({_top_pct:.0f}%)",
+                        'Top Type': _top_type_str,
+                        'Top Verification': _top_verif_str,
                         'X (mm)': _cx,
                         'Y (mm)': _cy,
                     })

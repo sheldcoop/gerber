@@ -93,6 +93,54 @@ The application performs a crucial **centering** operation to convert the ODB++ 
 
 This process ensures that the entire grid of PCBs is perfectly centered on the panel frame, matching how it's physically manufactured and inspected.
 
+### Example Calculation Walkthrough
+
+Let's trace exactly how the app calculates the display coordinates for five consecutive units in Row 0: `(0,0)` to `(0,4)`.
+
+**Panel & Content Dimensions (from ODB++):**
+- Panel Size: `510.0 x 515.0 mm`
+- Unit Size: `33.5 x 33.5 mm`
+- Unit Pitch X: `34.3008 mm`
+
+**Step 1: Calculate Total Content Width & Height**
+First, the app finds the raw distance from the leftmost unit to the rightmost unit, and adds the physical width of one unit to get the total "content block" size.
+
+*   **X-Axis (Width)**:
+    *   Left quadrant spans 5 unit pitches: `5 × 34.3008 = 171.504 mm`
+    *   Middle gap between quadrants: `243.0 mm`
+    *   Span from first to last unit origin: `171.504 + 243.0 = 414.504 mm`
+    *   Total Width = Span + Unit Width = `414.504 + 33.500 = 448.004 mm`
+
+*   **Y-Axis (Height)**:
+    *   A quadrant spans 2 cluster pitches (`2 × 79.0 = 158.0 mm`) and 1 unit pitch (`34.3008 mm`) = `192.3008 mm`
+    *   Middle gap between top and bottom halves: `244.0 mm`
+    *   Span from bottom to top unit origin: `192.3008 + 244.0 = 436.3008 mm`
+    *   Total Height = Span + Unit Height = `436.3008 + 33.500 = 469.8008 mm` (rounds to `469.801`)
+
+**Step 2: Calculate the Centering Margin**
+The app centers the total content block onto the physical panel.
+
+- **Left Margin (X-axis)**: `(510.0 - 448.004) / 2 = 30.998 mm`
+- **Bottom Margin (Y-axis)**: `(515.0 - 469.801) / 2 = 22.5995 mm` (rounds to `22.6 mm`)
+
+**Step 3: Calculate the Unit Positions (Row 0, Cols 0 to 4)**
+Since all these units are in Row 0, they all sit at the bottom edge. Their Y-coordinate is exactly the Bottom Margin: **`22.6 mm`**.
+
+For the X-coordinates, we start at the Left Margin and add the `34.3008 mm` unit pitch for each subsequent column:
+
+-   **Unit (0, 0)**
+    -   `X = Left Margin = 30.998 mm`
+-   **Unit (0, 1)**
+    -   `X = 30.998 + 34.3008 = 65.2988 mm` (rounds to `65.299`)
+-   **Unit (0, 2)**
+    -   `X = 65.2988 + 34.3008 = 99.5996 mm` (rounds to `99.600`)
+-   **Unit (0, 3)**
+    -   `X = 99.5996 + 34.3008 = 133.9004 mm` (rounds to `133.900`)
+-   **Unit (0, 4)**
+    -   `X = 133.9004 + 34.3008 = 168.2012 mm` (rounds to `168.201`)
+
+These calculated values (`30.998, 65.299, 99.6, 133.9, 168.201`) match the table output exactly. This demonstrates how the app dynamically centers any ODB++ grid layout flawlessly without needing hardcoded offsets.
+
 ---
 
 ## 5. AOI ↔ Unit Coordinate Verification
