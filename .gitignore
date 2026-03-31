@@ -14,3 +14,19 @@ venv/
 *.gz
 *.xlsx
 designodb_rigidflex/
+
+# Logs
+*.log
+streamlit_output.log
+
+# Rendered outputs
+fhr0010_bkm_3F.*
+
+# Empty legacy directories
+renderer_cache/
+renderer_models/
+renderer_utils/
+
+# Generated test data (regenerate with tools/create_dummy_odb.py, tools/create_test_svg.py)
+test_2F_odb/
+test_svgs/
