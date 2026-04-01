@@ -202,7 +202,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 rendered_layers[name] = layer_obj
                 # Only copper layers drive board_bounds used for centering.
                 # Soldermask/drill extend beyond the board profile and inflate bounds.
-                if layer_obj.layer_type in ('copper', 'signal', 'power', 'mixed'):
+                if layer_obj.layer_type in ('copper', 'signal', 'power', 'mixed', 'outline'):
                     all_bounds.append(bounds)
 
         # ── Phase 4: aggregate board bounds (copper layers only) ──────────

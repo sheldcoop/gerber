@@ -328,7 +328,12 @@ def render_sidebar():
 
                 copper_layers = dict(sorted(
                     ((n, l) for n, l in _rendered_for_ctrl.layers.items()
-                     if l.layer_type in ('copper', 'soldermask')),
+                     if l.layer_type in ('copper', 'signal', 'power', 'mixed')),
+                    key=lambda kv: _copper_sort_key(kv[0])
+                ))
+                soldermask_layers = dict(sorted(
+                    ((n, l) for n, l in _rendered_for_ctrl.layers.items()
+                     if l.layer_type == 'soldermask'),
                     key=lambda kv: _copper_sort_key(kv[0])
                 ))
                 drill_layers = dict(sorted(
@@ -337,10 +342,16 @@ def render_sidebar():
                     key=lambda kv: _drill_sort_key(kv[0])
                 ))
 
-                with st.expander(f"Copper & Soldermask ({len(copper_layers)})", expanded=True):
+                with st.expander(f"Copper ({len(copper_layers)})", expanded=True):
                     for i, (layer_name, layer) in enumerate(copper_layers.items()):
                         # Only the first (outermost) copper layer on by default
                         if _layer_row(layer_name, layer, i == 0):
+                            visible_layers.append(layer_name)
+                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
+
+                with st.expander(f"Soldermask ({len(soldermask_layers)})", expanded=False):
+                    for layer_name, layer in soldermask_layers.items():
+                        if _layer_row(layer_name, layer, False):
                             visible_layers.append(layer_name)
                         layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
 

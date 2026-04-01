@@ -141,12 +141,11 @@ def parse_symbol_descriptor(desc: str) -> _ODBSymbol:
         except ValueError:
             pass
 
-    # Fallback: extract any numbers and approximate as a circle
-    nums = [float(n) for n in re.findall(r'\d+\.?\d*', desc) if float(n) > 0]
-    if nums:
-        sz = max(nums[0], nums[1]) if len(nums) >= 2 else nums[0]
-        return _ODBSymbol('round', sz, sz, desc)
-    return _ODBSymbol('round', 0.2, 0.2, desc)
+    # Fallback: unrecognised descriptor (e.g. 'fiducial_swiss1000um_board1').
+    # Return 'unknown' so _parse_layer_to_gerbonara can substitute the correct
+    # bounding-box size from user_sym_map.  Number-extraction is intentionally
+    # avoided — names like 'fiducial_swiss1000um_board1' would yield 1000 mm.
+    return _ODBSymbol('unknown', 0.0, 0.0, desc)
 
 
 def parse_symbol_table(lines: list) -> dict:
