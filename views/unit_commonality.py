@@ -410,15 +410,18 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
 
                     def _build_layer_url(lyr_obj, rot):
                         """Return data URL with optional SVG rotation. Uses precomputed URL when rot==0."""
-                        if abs(rot) < 0.01:
+                        _invert = st.session_state.get('invert_polarity', False)
+                        if abs(rot) < 0.01 and not _invert:
                             if _is_multi_cm and lyr_obj.color_svg_urls:
                                 return next(iter(lyr_obj.color_svg_urls.values()))
                             return lyr_obj.svg_data_url
                         svg = lyr_obj.svg_string
-                        if st.session_state.get('invert_polarity', False):
+                        if _invert:
                             _fg = '#FFD700' if lyr_obj.layer_type == 'drill' else '#b87333'
                             _t = '__PS__'
                             svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
+                        if abs(rot) < 0.01:
+                            return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
                         vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
                         vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
                         if vb:
