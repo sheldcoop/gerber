@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.graph_objects as go
 from alignment import get_panel_quadrant_bounds, FRAME_WIDTH, FRAME_HEIGHT
 from visualizer import OverlayConfig
-from gerber_renderer import save_render_cache
 from core.data_utils import compute_cm_geometry
 
 def render_panel_heatmap(parsed, aoi, align_args):
@@ -83,29 +82,6 @@ def render_panel_heatmap(parsed, aoi, align_args):
             ),
         )
 
-        # ── Helper: load / build panel SVG background ──────────────────────
-        def _get_panel_svg_url(rp):
-            if not (rp and rp.panel_layout):
-                return None
-            _checked = [ln for ln in rp.layers if st.session_state.get(f"vis_{ln}", False)]
-            if not _checked:
-                return None
-            lyr_obj = rp.layers[_checked[0]]
-            if not lyr_obj.panel_svg_data_url:
-                with st.spinner("Building panel background..."):
-                    from gerber_renderer import build_panel_svg
-                    try:
-                        lyr_obj.panel_svg_data_url = build_panel_svg(
-                            lyr_obj.svg_string, rp.panel_layout
-                        )
-                    except Exception:
-                        pass
-                    _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                    _tgz_d = st.session_state.get('_tgz_digest')
-                    if (_tgz_b or _tgz_d) and lyr_obj.panel_svg_data_url:
-                        save_render_cache(rp, digest=_tgz_d, tgz_bytes=_tgz_b if not _tgz_d else None)
-            return lyr_obj.panel_svg_data_url
-
         if _rp_for_bounds and _rp_for_bounds.panel_layout:
             frame_bx1, frame_by1 = 0.0, 0.0
             frame_bx2 = _rp_for_bounds.panel_layout.panel_width
@@ -117,14 +93,6 @@ def render_panel_heatmap(parsed, aoi, align_args):
         if _hm_mode == "🌡️ Density Contour":
             from visualizer import build_heatmap_figure
             hm_fig = build_heatmap_figure(hm_df, hm_config)
-
-            _svg_url = _get_panel_svg_url(_rp_for_bounds)
-            if _svg_url:
-                hm_fig.update_layout(images=[dict(
-                    source=_svg_url, xref="x", yref="y",
-                    x=0, y=FRAME_HEIGHT, sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                    sizing="stretch", layer="below", opacity=1.0,
-                )])
 
             hm_fig.add_shape(
                 type="rect", x0=frame_bx1 - 8, y0=frame_by1 - 8,
@@ -285,16 +253,6 @@ def render_panel_heatmap(parsed, aoi, align_args):
                         thickness=12, len=0.65,
                     ),
                 ))
-
-                # ── Panel background (dimmed so grid is readable) ──────────
-                _svg_url = _get_panel_svg_url(_rp_for_bounds)
-                if _svg_url and _use_mm:
-                    _grid_fig.update_layout(images=[dict(
-                        source=_svg_url, xref="x", yref="y",
-                        x=frame_bx1, y=frame_by2,
-                        sizex=frame_bx2 - frame_bx1, sizey=frame_by2 - frame_by1,
-                        sizing="stretch", layer="below", opacity=0.25,
-                    )])
 
                 # Frame border
                 _grid_fig.add_shape(
