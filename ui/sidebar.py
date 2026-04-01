@@ -88,32 +88,54 @@ def render_sidebar():
                     st.session_state.pop(_k, None)
                 st.rerun()
 
-        # Show filename-based buildup/side detection results
+        # ── Per-file classification UI ─────────────────────────────────────
         if aoi_files:
-            with st.expander("Detected Buildup/Side", expanded=False):
-                needs_manual = {}
-                for uf in aoi_files:
-                    match = FILENAME_PATTERN.search(uf.name)
-                    if match:
-                        bu = int(match.group(1))
-                        side = match.group(2).upper()
-                        st.success(f"**{uf.name}** → BU-{bu:02d} {'Front' if side == 'F' else 'Back'}")
-                    else:
-                        st.warning(f"**{uf.name}** → Could not detect buildup/side")
-                        needs_manual[uf.name] = True
-                st.session_state['needs_manual_side'] = needs_manual
+            with st.expander("📋 Classify Files", expanded=True):
+                st.caption("Auto-filled from filename — adjust if needed before loading.")
+                from aoi_loader import _parse_filename as _pfn
+                _SIDES = ["Front", "Back"]
+                _classifications = []
 
-        # Manual buildup/side assignment for undetected files
-        manual_map = {}
-        if st.session_state.get('needs_manual_side'):
-            st.subheader("Manual Buildup/Side Assignment")
-            for fname in st.session_state['needs_manual_side']:
-                col1, col2 = st.columns(2)
-                with col1:
-                    bu = st.number_input(f"Buildup # for {fname}", min_value=0, max_value=20, value=1, key=f"bu_{fname}")
-                with col2:
-                    side = st.selectbox(f"Side for {fname}", ['Front', 'Back'], key=f"side_{fname}")
-                manual_map[fname] = (bu, 'F' if side == 'Front' else 'B')
+                for _i, _uf in enumerate(aoi_files):
+                    _auto = _pfn(_uf.name)
+                    # _auto returns (buildup, side, panel_id, section, warnings)
+                    _auto_bu      = _auto[0] or 1
+                    _auto_side    = 'Front' if (_auto[1] or 'F') == 'F' else 'Back'
+                    _auto_panel   = int((_auto[2] or 'Panel_01').split('_')[-1])
+                    _auto_section = _auto[3] or 1
+
+                    st.markdown(f"📄 `{_uf.name}`")
+                    _cc1, _cc2, _cc3, _cc4 = st.columns(4)
+
+                    _panel = _cc1.number_input(
+                        "Panel", min_value=1, max_value=99,
+                        value=_auto_panel, key=f"cl_panel_{_i}",
+                    )
+                    _buildup = _cc2.number_input(
+                        "Buildup", min_value=1, max_value=99,
+                        value=_auto_bu, key=f"cl_bu_{_i}",
+                    )
+                    _side = _cc3.selectbox(
+                        "Side", _SIDES,
+                        index=0 if _auto_side == 'Front' else 1,
+                        key=f"cl_side_{_i}",
+                    )
+                    _section = _cc4.number_input(
+                        "Section", min_value=1, max_value=99,
+                        value=_auto_section, key=f"cl_sec_{_i}",
+                    )
+
+                    _classifications.append({
+                        'file'    : _uf,
+                        'panel'   : int(_panel),
+                        'buildup' : int(_buildup),
+                        'side'    : _side,
+                        'section' : int(_section),
+                    })
+
+                st.session_state['aoi_classifications'] = _classifications
+        else:
+            st.session_state['aoi_classifications'] = []
 
         st.divider()
 
@@ -218,10 +240,8 @@ def render_sidebar():
             if aoi_files:
                 with st.spinner("Loading AOI defect data..."):
                     try:
-                        if manual_map:
-                            aoi_dataset = load_aoi_with_manual_side(aoi_files, manual_map)
-                        else:
-                            aoi_dataset = load_aoi_files(aoi_files)
+                        _cls = st.session_state.get('aoi_classifications', [])
+                        aoi_dataset = load_aoi_files(aoi_files, classifications=_cls if _cls else None)
 
                         st.session_state['aoi_dataset'] = aoi_dataset
 

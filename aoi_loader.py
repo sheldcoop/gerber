@@ -412,12 +412,17 @@ def _load_single_aoi(
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_aoi_files(uploaded_files: list) -> AOIDataset:
+def load_aoi_files(uploaded_files: list, classifications: Optional[list] = None) -> AOIDataset:
     """
     Load multiple AOI Excel files into a unified AOIDataset.
 
-    Each file's buildup number and side are extracted from its filename.
-    All DataFrames are concatenated with consistent column names.
+    If `classifications` is provided (list of dicts from the sidebar UI), each
+    entry must contain: {'file', 'panel', 'buildup', 'side', 'section'}.
+    Otherwise buildup/side/panel/section are parsed from the filename.
+
+    Args:
+        uploaded_files:  list of Streamlit UploadedFile objects
+        classifications: optional list of per-file classification dicts from the UI
 
     Args:
         uploaded_files: list of Streamlit UploadedFile objects
@@ -432,14 +437,33 @@ def load_aoi_files(uploaded_files: list) -> AOIDataset:
     all_results = []
     all_warnings = []
 
-    for uf in uploaded_files:
+    # If classifications provided, it's a list of dicts with keys:
+    # {'file', 'panel', 'buildup', 'side', 'section'} in the same order as uploaded_files
+    for i, uf in enumerate(uploaded_files):
         filename = uf.name
         file_bytes = uf.read()
         uf.seek(0)  # reset for potential re-read
 
-        # Extract buildup, side, panel and section from filename
-        buildup, side, panel_id, section, extract_warnings = _parse_filename(filename)
-        all_warnings.extend(extract_warnings)
+        # Prefer UI-provided classification when available
+        if classifications and i < len(classifications) and classifications[i].get('file'):
+            _cl = classifications[i]
+            try:
+                panel_id = f"Panel_{int(_cl.get('panel', 1)):02d}"
+            except Exception:
+                panel_id = 'Panel_01'
+            try:
+                buildup = int(_cl.get('buildup', 0))
+            except Exception:
+                buildup = 0
+            side = 'F' if str(_cl.get('side', 'Front')).lower().startswith('f') else 'B'
+            try:
+                section = int(_cl.get('section', 1))
+            except Exception:
+                section = 1
+        else:
+            # Extract buildup, side, panel and section from filename
+            buildup, side, panel_id, section, extract_warnings = _parse_filename(filename)
+            all_warnings.extend(extract_warnings)
 
         # Load and process the file
         result = _load_single_aoi(file_bytes, filename, buildup, side,
