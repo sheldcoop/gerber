@@ -101,8 +101,9 @@ def render_panel_heatmap(parsed, aoi, align_args):
                     except Exception:
                         pass
                     _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                    if _tgz_b and lyr_obj.panel_svg_data_url:
-                        save_render_cache(_tgz_b, rp)
+                    _tgz_d = st.session_state.get('_tgz_digest')
+                    if (_tgz_b or _tgz_d) and lyr_obj.panel_svg_data_url:
+                        save_render_cache(rp, digest=_tgz_d, tgz_bytes=_tgz_b if not _tgz_d else None)
             return lyr_obj.panel_svg_data_url
 
         if _rp_for_bounds and _rp_for_bounds.panel_layout:

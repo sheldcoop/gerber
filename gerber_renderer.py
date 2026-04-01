@@ -27,9 +27,16 @@ from odb_parser import (
     _find_step,
 )
 
-from core.cache import save_render_cache, load_render_cache  # re-exported for callers
+from core.cache import save_render_cache, load_render_cache, compute_tgz_digest  # re-exported for callers
 from core.pipeline import _render_pipeline, LAYER_COLORS
 from core.panel_builder import build_panel_svg  # re-exported for views that import it here
+
+import collections as _collections
+
+# Module-level in-process LRU: survives Streamlit re-runs within the same worker process.
+# Eliminates disk I/O for repeated renders of the same file in one session.
+_RENDER_MEM_CACHE: '_collections.OrderedDict[str, RenderedODB]' = _collections.OrderedDict()
+_RENDER_MEM_CACHE_MAX = 3
 
 
 # Pre-defined color palette for stacking (also used by pipeline.py)
@@ -83,7 +90,8 @@ class RenderedODB:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def render_odb_to_cam(data: bytes, filename: str = '',
-                      layer_filter: list = None) -> RenderedODB:
+                      layer_filter: list = None,
+                      digest: str = None) -> RenderedODB:
     """
     Parse ODB++ archive and render each copper layer as CAM-quality SVG.
 
@@ -91,15 +99,34 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         data: raw bytes of the .tgz archive
         filename: original filename (for error messages)
         layer_filter: optional list of layer names to render (None = all copper)
+        digest: pre-computed MD5 hex digest (from compute_tgz_digest).  Pass this
+                to skip re-hashing data on every call.
 
     Returns:
         RenderedODB with SVG strings and GerberFile objects per layer.
     """
-    cache_hit = load_render_cache(data)
+    if digest is None:
+        digest = compute_tgz_digest(data)
+
+    # 1. In-process LRU (zero I/O, zero hashing)
+    if digest in _RENDER_MEM_CACHE:
+        _RENDER_MEM_CACHE.move_to_end(digest)
+        return _RENDER_MEM_CACHE[digest]
+
+    # 2. Disk cache
+    cache_hit = load_render_cache(digest=digest)
     if cache_hit:
+        _RENDER_MEM_CACHE[digest] = cache_hit
+        if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
+            _RENDER_MEM_CACHE.popitem(last=False)
         return cache_hit
+
+    # 3. Full render
     result = _render_pipeline(data, filename, layer_filter)
-    save_render_cache(data, result)
+    save_render_cache(result, digest=digest)
+    _RENDER_MEM_CACHE[digest] = result
+    if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
+        _RENDER_MEM_CACHE.popitem(last=False)
     return result
 
 

@@ -173,7 +173,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             stack_color = layer_color_map[name]
-            stack_svg = str(gf.to_svg(fg=stack_color, bg='#060A06'))
+            # Color-swap via str.replace — avoids a second full to_svg() traversal.
+            stack_svg = svg_str.replace(fg_color, stack_color) if fg_color != stack_color else svg_str
             color_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
 
             bb = gf.bounding_box(MM)
@@ -252,10 +253,9 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             _dlyr.svg_string = _svg2
             _dlyr.svg_data_url = _svg_to_data_url_fast(_svg2)
             _dlyr.bounds = _bounds2
+            _sc = next(iter(_dlyr.color_svg_urls), _fg)
             _dlyr.color_svg_urls = {
-                next(iter(_dlyr.color_svg_urls), _fg): _svg_to_data_url_fast(
-                    str(_gf.to_svg(fg=next(iter(_dlyr.color_svg_urls), _fg), bg='#060A06'))
-                )
+                _sc: _svg_to_data_url_fast(_svg2.replace(_fg, _sc) if _fg != _sc else _svg2)
             }
 
         # ── Phase 6: compute panel layout from step-repeat + profile ──────

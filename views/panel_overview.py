@@ -80,8 +80,9 @@ def render_panel_overview(parsed, aoi, align_args):
                         except Exception:
                             pass
                         _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                        if _tgz_b and _want_lyr_obj.panel_svg_data_url:
-                            save_render_cache(_tgz_b, _rendered_panel)
+                        _tgz_d = st.session_state.get('_tgz_digest')
+                        if (_tgz_b or _tgz_d) and _want_lyr_obj.panel_svg_data_url:
+                            save_render_cache(_rendered_panel, digest=_tgz_d, tgz_bytes=_tgz_b if not _tgz_d else None)
                 if _want_lyr_obj.panel_svg_data_url:
                     _panel_svg_url = _want_lyr_obj.panel_svg_data_url
                     _panel_bg_name = _want_layer
@@ -237,8 +238,9 @@ def render_panel_overview(parsed, aoi, align_args):
                         except Exception:
                             pass
                         _tgz_b2 = st.session_state.get('_tgz_bytes_for_cache')
-                        if _tgz_b2 and _sel_lyr2.panel_svg_data_url:
-                            save_render_cache(_tgz_b2, _rodb)
+                        _tgz_d2 = st.session_state.get('_tgz_digest')
+                        if (_tgz_b2 or _tgz_d2) and _sel_lyr2.panel_svg_data_url:
+                            save_render_cache(_rodb, digest=_tgz_d2, tgz_bytes=_tgz_b2 if not _tgz_d2 else None)
                 _panel_svg = _sel_lyr2.panel_svg_data_url
 
             if not _panel_svg:

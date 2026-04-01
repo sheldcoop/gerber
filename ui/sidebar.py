@@ -10,6 +10,7 @@ import pandas as pd
 
 from odb_parser import parse_odb_archive
 from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache
+from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 
 def handle_bg_render_polling():
@@ -24,14 +25,16 @@ def handle_bg_render_polling():
         if _prog.get('status') == 'done':
             # Render finished — load from cache
             _bg_tgz = st.session_state.pop('_render_tgz_bytes', None)
+            _bg_digest = st.session_state.pop('_render_digest', None)
             _bg_name = st.session_state.pop('_render_filename', '')
             st.session_state.pop('_render_progress_file')
             Path(_prog_path).unlink(missing_ok=True)
-            if _bg_tgz:
-                _bg_rendered = load_render_cache(_bg_tgz)
+            if _bg_tgz or _bg_digest:
+                _bg_rendered = load_render_cache(digest=_bg_digest, tgz_bytes=_bg_tgz)
                 if _bg_rendered:
                     st.session_state['rendered_odb'] = _bg_rendered
                     st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
+                    st.session_state['_tgz_digest'] = _bg_digest
                     _copper_layers = [l for l in _bg_rendered.layers.values() if l.layer_type != 'drill']
                     st.session_state['_panel_svgs_built'] = bool(_copper_layers) and all(
                         l.panel_svg_data_url for l in _copper_layers
@@ -140,13 +143,19 @@ def render_sidebar():
                         _tgz_bytes = gerber_file.read()
                         gerber_file.seek(0)
 
-                        rendered = load_render_cache(_tgz_bytes)
+                        # Compute digest once — stored in session state so subsequent
+                        # re-runs never re-hash the full archive.
+                        _tgz_digest = compute_tgz_digest(_tgz_bytes)
+                        st.session_state['_tgz_digest'] = _tgz_digest
+
+                        rendered = load_render_cache(digest=_tgz_digest)
                         _from_cache = rendered is not None
 
                         if rendered:
                             # Cache hit — load instantly
                             st.session_state['rendered_odb'] = rendered
                             st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
+                            st.session_state['_tgz_digest'] = _tgz_digest
                             _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
                             _svgs_ready = _from_cache and bool(_copper_lyrs) and all(
                                 l.panel_svg_data_url for l in _copper_lyrs
@@ -187,10 +196,10 @@ def render_sidebar():
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
                             _prog_file.write_text('{"status":"running"}')
 
-                            def _bg_render(_bytes=_tgz_bytes, _name=gerber_file.name, _pf=_prog_file):
+                            def _bg_render(_bytes=_tgz_bytes, _digest=_tgz_digest, _name=gerber_file.name, _pf=_prog_file):
                                 try:
-                                    r = render_odb_to_cam(_bytes, _name)
-                                    save_render_cache(_bytes, r)
+                                    r = render_odb_to_cam(_bytes, _name, digest=_digest)
+                                    save_render_cache(r, digest=_digest)
                                     _pf.write_text('{"status":"done"}')
                                 except Exception as e:
                                     _pf.write_text(json.dumps({"status": "error", "error": str(e)}))
@@ -198,6 +207,7 @@ def render_sidebar():
                             threading.Thread(target=_bg_render, daemon=True).start()
                             st.session_state['_render_progress_file'] = str(_prog_file)
                             st.session_state['_render_tgz_bytes'] = _tgz_bytes
+                            st.session_state['_render_digest'] = _tgz_digest
                             st.session_state['_render_filename'] = gerber_file.name
                             st.info("Rendering CAM layers in background — the page will update automatically when ready.")
 

@@ -87,36 +87,46 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
             sym.size_x *= combined_sym_scale
             sym.size_y *= combined_sym_scale
 
-    # Build aperture cache
+    # Build aperture cache keyed by (sym_idx, rot_key).
+    # rot_key=0 → 0°/180° orientation; rot_key=1 → 90°/270° (swaps W and H for rect/oval).
+    # Pre-building both variants eliminates per-flash object allocation in the hot path.
     aperture_cache = {}
     for idx, sym in symbols.items():
-        if sym.shape not in ('unknown', 'skip'):
-            aperture_cache[idx] = _make_aperture(sym)
+        if sym.shape in ('unknown', 'skip'):
+            continue
+        ap0 = _make_aperture(sym)
+        aperture_cache[(idx, 0)] = ap0
+        if sym.shape in ('rect', 'rounded_rect', 'oval'):
+            ap1 = (ObroundAperture(w=sym.size_y, h=sym.size_x, unit=MM)
+                   if sym.shape == 'oval'
+                   else RectangleAperture(w=sym.size_y, h=sym.size_x, unit=MM))
+        else:
+            ap1 = ap0  # rotation doesn't change circular/other shapes
+        aperture_cache[(idx, 1)] = ap1
 
     gf = GerberFile()
     stats = {'flash': 0, 'line': 0, 'region': 0, 'clear': 0, 'skip': 0}
 
-    # Skip header lines
-    feature_start = 0
-    for idx, line in enumerate(lines):
-        s = line.strip()
-        if s and not s.startswith('$') and not s.startswith('#') \
-                and not s.startswith(';') and not s.startswith('@') \
-                and not s.startswith('&') \
-                and not s.upper().startswith('UNITS') \
-                and not s.upper().startswith('ID='):
-            feature_start = idx
-            break
+    # Pre-filter: build a cleaned list of feature lines in one pass.
+    # Skips empty lines, comment/header prefixes, and inline comments — eliminates
+    # redundant per-iteration str.strip() and prefix checks in the hot path.
+    _SKIP_STARTS = ('$', '#', ';', '@', '&')
+    _SKIP_UPPER = ('UNITS', 'ID=')
+    feature_lines = []
+    for raw_line in lines:
+        s = raw_line.strip()
+        if not s or s[0] in _SKIP_STARTS:
+            continue
+        if s.upper().startswith(_SKIP_UPPER):
+            continue
+        cleaned = s.partition(';')[0].rstrip()
+        if cleaned:
+            feature_lines.append(cleaned)
 
-    i = feature_start
-    while i < len(lines):
-        raw = lines[i].strip()
+    i = 0
+    while i < len(feature_lines):
+        line_clean = feature_lines[i]
         i += 1
-        if not raw or raw.startswith('#') or raw.startswith(';'):
-            continue
-        line_clean = raw.split(';')[0].strip()
-        if not line_clean:
-            continue
         parts = line_clean.split()
         rt = parts[0].upper()
 
@@ -137,20 +147,13 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                 if rt == 'H':
                     polarity = 'P'
 
-                ap = aperture_cache.get(sym_idx)
+                rot_key = 0
+                if abs(rot) > 0.01 and abs(rot % 90) < 0.1:
+                    rot_key = int(round(rot / 90)) % 2  # 0=0°/180°, 1=90°/270°
+                ap = aperture_cache.get((sym_idx, rot_key))
                 if ap is None:
                     stats['skip'] += 1
                     continue
-
-                sym = symbols.get(sym_idx)
-                if sym and abs(rot) > 0.01 and sym.shape in ('rect', 'oval'):
-                    if abs(rot % 90) < 0.1:
-                        turns = int(round(rot / 90)) % 4
-                        if turns in (1, 3):
-                            if sym.shape == 'rect':
-                                ap = RectangleAperture(w=sym.size_y, h=sym.size_x, unit=MM)
-                            else:
-                                ap = ObroundAperture(w=sym.size_y, h=sym.size_x, unit=MM)
 
                 is_dark = (polarity != 'N')
                 gf.objects.append(Flash(x=x, y=y, aperture=ap, unit=MM, polarity_dark=is_dark))
@@ -181,8 +184,8 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
             elif rt == 'S':
                 spol = parts[1].upper() if len(parts) > 1 else 'P'
                 slines = []
-                while i < len(lines):
-                    sl = lines[i].strip()
+                while i < len(feature_lines):
+                    sl = feature_lines[i]
                     i += 1
                     if sl.upper().startswith('SE'):
                         break
@@ -191,9 +194,6 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                 contours = []
                 current = []
                 for sline in slines:
-                    sline = sline.split(';')[0].strip()
-                    if not sline or sline.startswith('#'):
-                        continue
                     sp = sline.split()
                     if not sp:
                         continue
