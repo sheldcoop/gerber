@@ -48,10 +48,11 @@ def render_panel_heatmap(parsed, aoi, align_args):
         side_active = st.session_state.get('side_cap_select', 'All')
         hm_config.side_filter   = 'Both' if side_active == 'All' else side_active
 
-        # ── Panel Source Filter — one toggle per panel ────────────────────
-        _all_sources = sorted(hm_df['SOURCE_FILE'].unique().tolist()) if 'SOURCE_FILE' in hm_df.columns else []
+        # ── Panel Source Filter — one toggle per unique panel ─────────────
+        _panel_col = 'PANEL_ID' if 'PANEL_ID' in hm_df.columns else 'SOURCE_FILE'
+        _all_sources = sorted(hm_df[_panel_col].unique().tolist()) if _panel_col in hm_df.columns else []
         if _all_sources:
-            st.caption(f"**{len(_all_sources)} panels loaded** — flip a toggle to exclude one panel from the analysis:")
+            st.caption(f"**{len(_all_sources)} panel{'s' if len(_all_sources) != 1 else ''} loaded** — flip a toggle to exclude one panel from the analysis:")
             _tog_cols = st.columns(min(len(_all_sources), 8))
             _sel_sources = []
             for _pi, _src in enumerate(_all_sources):
@@ -64,7 +65,7 @@ def render_panel_heatmap(parsed, aoi, align_args):
                 if _included:
                     _sel_sources.append(_src)
             if _sel_sources:
-                hm_df = hm_df[hm_df['SOURCE_FILE'].isin(_sel_sources)]
+                hm_df = hm_df[hm_df[_panel_col].isin(_sel_sources)]
         else:
             _sel_sources = []
 
@@ -130,7 +131,24 @@ def render_panel_heatmap(parsed, aoi, align_args):
             if not _has_idx:
                 st.warning("Unit index columns (UNIT_INDEX_X / UNIT_INDEX_Y) not found in the AOI data.")
             else:
-                _n_panels_total = hm_df['SOURCE_FILE'].nunique() if 'SOURCE_FILE' in hm_df.columns else 1
+                _n_panels_total = hm_df[_panel_col].nunique() if _panel_col in hm_df.columns else 1
+
+                # ── Metric selector ────────────────────────────────────────
+                # Repeatability % only makes sense with >1 panel
+                _metric_options = ["Repeatability %", "Raw Count"] if _n_panels_total > 1 else ["Raw Count"]
+                _grid_metric = st.radio(
+                    "Metric",
+                    _metric_options,
+                    horizontal=True,
+                    key="grid_metric_sel",
+                    help=(
+                        "**Repeatability %** — % of panels where this unit had ≥1 defect. "
+                        "High = systematic machine fault. Low = one-off fluke. "
+                        "**Raw Count** — total defects summed across all selected panels."
+                        + ("" if _n_panels_total > 1 else
+                           "\n\n*Repeatability % requires more than 1 panel.*")
+                    ),
+                )
 
                 # ── Verification filter ────────────────────────────────────
                 if 'VERIFICATION' in hm_df.columns:
@@ -145,19 +163,6 @@ def render_panel_heatmap(parsed, aoi, align_args):
                     if _sel_verif:
                         hm_df = hm_df[hm_df['VERIFICATION'].isin(_sel_verif)]
 
-                # ── Metric selector ────────────────────────────────────────
-                _grid_metric = st.radio(
-                    "Metric",
-                    ["Repeatability %", "Raw Count"],
-                    horizontal=True,
-                    key="grid_metric_sel",
-                    help=(
-                        "**Repeatability %** — % of panels where this unit had ≥1 defect. "
-                        "High = systematic machine fault. Low = one-off fluke. "
-                        "**Raw Count** — total defects summed across all selected panels."
-                    ),
-                )
-
                 _max_col = int(hm_df['UNIT_INDEX_X'].max())
                 _max_row = int(hm_df['UNIT_INDEX_Y'].max())
                 _n_cols  = _max_col + 1
@@ -170,8 +175,8 @@ def render_panel_heatmap(parsed, aoi, align_args):
                 _Z = _np_hm.zeros((_n_rows, _n_cols), dtype=float)
                 _Z_raw = _np_hm.zeros((_n_rows, _n_cols), dtype=float)
 
-                if _grid_metric == "Repeatability %" and 'SOURCE_FILE' in hm_df.columns:
-                    _rep = (hm_df.groupby(['UNIT_INDEX_X', 'UNIT_INDEX_Y'])['SOURCE_FILE']
+                if _grid_metric == "Repeatability %" and _panel_col in hm_df.columns:
+                    _rep = (hm_df.groupby(['UNIT_INDEX_X', 'UNIT_INDEX_Y'])[_panel_col]
                             .nunique().reset_index(name='N_P'))
                     for _, _r in _rep.iterrows():
                         _Z[int(_r.UNIT_INDEX_Y), int(_r.UNIT_INDEX_X)] = (
@@ -219,8 +224,8 @@ def render_panel_heatmap(parsed, aoi, align_args):
                         _raw  = int(_Z_raw[_ri, _ci])
                         _mask = ((hm_df['UNIT_INDEX_X'] == _ci) &
                                  (hm_df['UNIT_INDEX_Y'] == _ri)) if _has_idx else None
-                        _n_p  = (hm_df.loc[_mask, 'SOURCE_FILE'].nunique()
-                                 if (_mask is not None and 'SOURCE_FILE' in hm_df.columns) else 0)
+                        _n_p  = (hm_df.loc[_mask, _panel_col].nunique()
+                                 if (_mask is not None and _panel_col in hm_df.columns) else 0)
                         _pct  = f"{_n_p / _n_panels_total * 100:.0f}%" if _n_panels_total else "—"
                         _hover[_ri, _ci] = (
                             f"<b>Col {_ci} · Row {_ri}</b><br>"
@@ -254,15 +259,23 @@ def render_panel_heatmap(parsed, aoi, align_args):
                     ),
                 ))
 
-                # Frame border
+                # Frame border — coords must match the axis units (mm or unit indices)
+                if _use_mm:
+                    _fx0, _fy0, _fx1, _fy1 = frame_bx1, frame_by1, frame_bx2, frame_by2
+                    _fp = 8
+                else:
+                    _fx0, _fy0 = -0.5, -0.5
+                    _fx1, _fy1 = _n_cols - 0.5, _n_rows - 0.5
+                    _fp = 0
+
                 _grid_fig.add_shape(
-                    type="rect", x0=frame_bx1 - 8, y0=frame_by1 - 8,
-                    x1=frame_bx2 + 8, y1=frame_by2 + 8,
+                    type="rect", x0=_fx0 - _fp, y0=_fy0 - _fp,
+                    x1=_fx1 + _fp, y1=_fy1 + _fp,
                     fillcolor="#2B3A2B", line=dict(color="#1a2a1a", width=1), layer="below",
                 )
                 _grid_fig.add_shape(
-                    type="rect", x0=frame_bx1, y0=frame_by1,
-                    x1=frame_bx2, y1=frame_by2,
+                    type="rect", x0=_fx0, y0=_fy0,
+                    x1=_fx1, y1=_fy1,
                     fillcolor="rgba(0,0,0,0)", line=dict(color="#C87533", width=2),
                 )
 
@@ -318,9 +331,9 @@ def render_panel_heatmap(parsed, aoi, align_args):
                     _drill_count = int(_Z_raw[_drill_row, _drill_col])
                     _drill_mask  = ((hm_df['UNIT_INDEX_X'] == _drill_col) &
                                     (hm_df['UNIT_INDEX_Y'] == _drill_row)) if _has_idx else None
-                    _drill_pct   = (hm_df.loc[_drill_mask, 'SOURCE_FILE'].nunique()
+                    _drill_pct   = (hm_df.loc[_drill_mask, _panel_col].nunique()
                                     / _n_panels_total * 100) if (_drill_mask is not None
-                                    and 'SOURCE_FILE' in hm_df.columns) else 0
+                                    and _panel_col in hm_df.columns) else 0
                     st.info(
                         f"Selected **Col {_drill_col} · Row {_drill_row}** — "
                         f"{_drill_count} defects · {_drill_pct:.0f}% repeatability"

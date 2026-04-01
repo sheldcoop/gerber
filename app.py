@@ -34,7 +34,7 @@ from core.state import init_state, sync_layers_to_aoi
 init_state()
 
 from ui.sidebar import handle_bg_render_polling, render_sidebar
-from views.panel_overview import render_panel_overview
+# from views.panel_overview import render_panel_overview  # disabled - performance
 from views.unit_commonality import render_unit_commonality
 from views.panel_heatmap import render_panel_heatmap
 from views.cluster_triage import render_cluster_triage
@@ -207,7 +207,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         return 'data:image/svg+xml;base64,' + _b64.b64encode(svg.encode()).decode()
 
     if view_mode == "🔭 Panel Overview":
-        render_panel_overview(parsed, aoi, align_args)
+        pass  # render_panel_overview(parsed, aoi, align_args)  # disabled - performance
 
     elif view_mode == "🗺️ Unit Commonality":
         render_unit_commonality(parsed, aoi, align_args, _get_svg_url)
@@ -301,7 +301,17 @@ else:
 
     1. **Upload an ODB++ archive** (.tgz) from InCam Pro in the sidebar
     2. **Upload AOI Excel files** (.xlsx) from Orbotech AOI
-       - Filename should follow `BU-XXF` / `BU-XXB` pattern (e.g., `BU-02F.xlsx`)
+       - **Recommended naming:** `BU_{buildup}{side}_Panel{panel}_S{section}.xlsx`
+       - `BU_01F` = Buildup 1, Front side
+       - `Panel1` = Panel number (same number groups files for the same panel run)
+       - `S1`, `S2`, `S3` = AOI scan sections covering the same panel side (merged automatically)
+       - **Example — 2 panels, BU01 Front, scanned in 3 sections each:**
+         ```
+         BU_01F_Panel1_S1.xlsx   BU_01F_Panel2_S1.xlsx
+         BU_01F_Panel1_S2.xlsx   BU_01F_Panel2_S2.xlsx
+         BU_01F_Panel1_S3.xlsx   BU_01F_Panel2_S3.xlsx
+         ```
+       - Legacy format `BU-02F.xlsx` still supported (treated as Panel 1, Section 1)
        - Or manually assign buildup/side after upload
     3. Click **Load & Process** to parse and visualize
 
