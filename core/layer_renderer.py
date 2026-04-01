@@ -35,6 +35,17 @@ def _make_aperture(sym: _ODBSymbol):
         return CircleAperture(diameter=sym.size_x * 0.707, unit=MM)
     elif sym.shape == 'donut':
         return CircleAperture(diameter=sym.size_x, unit=MM)
+    elif sym.shape == 'rounded_rect':
+        return RectangleAperture(w=sym.size_x, h=sym.size_y, unit=MM)
+    elif sym.shape == 'ellipse':
+        return ObroundAperture(w=sym.size_x, h=sym.size_y, unit=MM)
+    elif sym.shape == 'thermal':
+        return CircleAperture(diameter=sym.size_x, unit=MM)
+    elif sym.shape == 'cross':
+        d = min(sym.size_x, sym.size_y) or max(sym.size_x, sym.size_y)
+        return RectangleAperture(w=d, h=d, unit=MM)
+    elif sym.shape in ('octagon', 'hexagon', 'triangle'):
+        return CircleAperture(diameter=sym.size_x * 0.866, unit=MM)
     else:
         d = max(sym.size_x, sym.size_y)
         if d <= 0:

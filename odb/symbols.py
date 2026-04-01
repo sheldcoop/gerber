@@ -25,11 +25,15 @@ def parse_symbol_descriptor(desc: str) -> _ODBSymbol:
         except ValueError:
             pass
 
-    # rect: rect<w>x<h>
+    # rect: rect<w>x<h>  or  rect<w>x<h>xr<corner_r>  (InCAM inline rounded-rect)
     elif desc.startswith('rect'):
         try:
             parts = desc[4:].split('x')
-            return _ODBSymbol('rect', float(parts[0]), float(parts[1]), desc)
+            w, h = float(parts[0]), float(parts[1])
+            if len(parts) >= 3 and parts[2].startswith('r'):
+                r = float(parts[2][1:])
+                return _ODBSymbol('rounded_rect', w, h, desc, corner_r=r)
+            return _ODBSymbol('rect', w, h, desc)
         except (IndexError, ValueError):
             pass
 
