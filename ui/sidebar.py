@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive
-from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache
+from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache, scan_available_layers
 from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 
@@ -115,6 +115,30 @@ def render_sidebar():
                     side = st.selectbox(f"Side for {fname}", ['Front', 'Back'], key=f"side_{fname}")
                 manual_map[fname] = (bu, 'F' if side == 'Front' else 'B')
 
+        # ---- Layer Selection (scan matrix only — no geometry parsing) ----
+        if gerber_file:
+            _scan_key = f"_layer_scan_{gerber_file.name}_{gerber_file.size}"
+            if _scan_key not in st.session_state:
+                try:
+                    gerber_file.seek(0)
+                    _scan_bytes = gerber_file.read()
+                    gerber_file.seek(0)
+                    st.session_state[_scan_key] = scan_available_layers(_scan_bytes)
+                except Exception:
+                    st.session_state[_scan_key] = []
+            _all_scan_layers = st.session_state.get(_scan_key, [])
+            if _all_scan_layers:
+                _layer_opts  = [n for n, _ in _all_scan_layers]
+                _layer_types = {n: t for n, t in _all_scan_layers}
+                st.multiselect(
+                    "Layers to render",
+                    options=_layer_opts,
+                    default=_layer_opts,
+                    format_func=lambda n: f"{n}  [{_layer_types.get(n, '')}]",
+                    key='layer_filter_select',
+                    help="Un-tick layers you don't need before clicking Load. Fewer layers = faster render.",
+                )
+
         st.divider()
 
         # ---- Load & Process Button ----
@@ -147,6 +171,9 @@ def render_sidebar():
                         # re-runs never re-hash the full archive.
                         _tgz_digest = compute_tgz_digest(_tgz_bytes)
                         st.session_state['_tgz_digest'] = _tgz_digest
+
+                        # Honour the layer filter chosen before clicking Load.
+                        _layer_filter = st.session_state.get('layer_filter_select') or None
 
                         rendered = load_render_cache(digest=_tgz_digest)
                         _from_cache = rendered is not None
@@ -196,9 +223,9 @@ def render_sidebar():
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
                             _prog_file.write_text('{"status":"running"}')
 
-                            def _bg_render(_bytes=_tgz_bytes, _digest=_tgz_digest, _name=gerber_file.name, _pf=_prog_file):
+                            def _bg_render(_bytes=_tgz_bytes, _digest=_tgz_digest, _name=gerber_file.name, _pf=_prog_file, _lf=_layer_filter):
                                 try:
-                                    r = render_odb_to_cam(_bytes, _name, digest=_digest)
+                                    r = render_odb_to_cam(_bytes, _name, layer_filter=_lf, digest=_digest)
                                     save_render_cache(r, digest=_digest)
                                     _pf.write_text('{"status":"done"}')
                                 except Exception as e:

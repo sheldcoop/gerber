@@ -1,3 +1,4 @@
+import math
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -323,6 +324,24 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 # position without any extra cam_min correction.
                 _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr + _cm_off_x
                 _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr + _cm_off_y
+
+                # ── Rotation control ──────────────────────────────────────
+                _rot_deg = st.number_input(
+                    "Rotation (°)", min_value=0.0, max_value=360.0,
+                    value=0.0, step=0.5, format="%.1f",
+                    key='cm_rotation_deg',
+                    help="Rotate all defect points around the unit centre.",
+                )
+                if abs(_rot_deg) > 0.01:
+                    _cx = _cam_cell_w / 2
+                    _cy = _cam_cell_h / 2
+                    _rad = math.radians(_rot_deg)
+                    _cos_r, _sin_r = math.cos(_rad), math.sin(_rad)
+                    _dx = _cm_plot['ALIGNED_X'] - _cx
+                    _dy = _cm_plot['ALIGNED_Y'] - _cy
+                    _cm_plot = _cm_plot.copy()
+                    _cm_plot['ALIGNED_X'] = _cx + _dx * _cos_r - _dy * _sin_r
+                    _cm_plot['ALIGNED_Y'] = _cy + _dx * _sin_r + _dy * _cos_r
 
                 _cm_cfg = OverlayConfig()
                 _cm_cfg.board_bounds = (
