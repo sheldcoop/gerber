@@ -58,7 +58,7 @@ def render_panel_overview(parsed, aoi, align_args):
         _rendered_panel = st.session_state.get('rendered_odb')
         if _rendered_panel and _rendered_panel.panel_layout:
             # Pick which layer to display (first checked layer only — if none checked, show nothing)
-            _panel_svg_url = None
+            _panel_bg_url = None
             _panel_bg_name = None
             _want_layer = None
             _all_checked_panel = [
@@ -67,6 +67,38 @@ def render_panel_overview(parsed, aoi, align_args):
             ]
             if _all_checked_panel:
                 _want_layer = _all_checked_panel[0]   # Background can only show one layer
+
+            def _get_panel_bg_url(lyr_obj):
+                """Return panel background URL — PNG or SVG depending on sidebar setting."""
+                _use_png = st.session_state.get('panel_bg_format', 'SVG') == 'PNG (raster, faster zoom)'
+                # Ensure SVG is built first (PNG depends on it)
+                if not lyr_obj.panel_svg_data_url:
+                    return None
+                if not _use_png:
+                    return lyr_obj.panel_svg_data_url
+                # Lazy PNG build
+                if not lyr_obj.panel_png_data_url:
+                    with st.spinner("Converting panel to PNG (one-time)..."):
+                        try:
+                            from svglib.svglib import svg2rlg
+                            from reportlab.graphics import renderPM
+                            from io import BytesIO as _BytesIO
+                            import base64 as _b64_png
+                            _svg_raw = _b64_png.b64decode(
+                                lyr_obj.panel_svg_data_url.split(',', 1)[1]
+                            )
+                            _drawing = svg2rlg(_BytesIO(_svg_raw))
+                            if _drawing:
+                                _buf = _BytesIO()
+                                renderPM.drawToFile(_drawing, _buf, fmt='PNG', dpi=150)
+                                lyr_obj.panel_png_data_url = (
+                                    'data:image/png;base64,'
+                                    + _b64_png.b64encode(_buf.getvalue()).decode()
+                                )
+                        except Exception as _e:
+                            st.warning(f"PNG conversion failed, using SVG: {_e}")
+                return lyr_obj.panel_png_data_url or lyr_obj.panel_svg_data_url
+
             # Build panel SVG only for the selected layer (on-demand, one layer at a time)
             if _want_layer:
                 _want_lyr_obj = _rendered_panel.layers[_want_layer]
@@ -84,12 +116,12 @@ def render_panel_overview(parsed, aoi, align_args):
                         if (_tgz_b or _tgz_d) and _want_lyr_obj.panel_svg_data_url:
                             save_render_cache(_rendered_panel, digest=_tgz_d, tgz_bytes=_tgz_b if not _tgz_d else None)
                 if _want_lyr_obj.panel_svg_data_url:
-                    _panel_svg_url = _want_lyr_obj.panel_svg_data_url
+                    _panel_bg_url = _get_panel_bg_url(_want_lyr_obj)
                     _panel_bg_name = _want_layer
 
-            if _panel_svg_url:
+            if _panel_bg_url:
                 panel_fig.update_layout(images=[dict(
-                    source=_panel_svg_url,
+                    source=_panel_bg_url,
                     xref="x", yref="y",
                     x=0, y=FRAME_HEIGHT,
                     sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
@@ -242,6 +274,32 @@ def render_panel_overview(parsed, aoi, align_args):
                         if (_tgz_b2 or _tgz_d2) and _sel_lyr2.panel_svg_data_url:
                             save_render_cache(_rodb, digest=_tgz_d2, tgz_bytes=_tgz_b2 if not _tgz_d2 else None)
                 _panel_svg = _sel_lyr2.panel_svg_data_url
+                # Lazy PNG conversion if PNG mode selected
+                if _panel_svg:
+                    _use_png2 = st.session_state.get('panel_bg_format', 'SVG') == 'PNG (raster, faster zoom)'
+                    if _use_png2 and not _sel_lyr2.panel_png_data_url:
+                        with st.spinner("Converting panel to PNG (one-time)..."):
+                            try:
+                                from svglib.svglib import svg2rlg
+                                from reportlab.graphics import renderPM
+                                from io import BytesIO as _BytesIO2
+                                import base64 as _b64p2
+                                _svg_raw2 = _b64p2.b64decode(_panel_svg.split(',', 1)[1])
+                                _drawing2 = svg2rlg(_BytesIO2(_svg_raw2))
+                                if _drawing2:
+                                    _buf2 = _BytesIO2()
+                                    renderPM.drawToFile(_drawing2, _buf2, fmt='PNG', dpi=150)
+                                    _sel_lyr2.panel_png_data_url = (
+                                        'data:image/png;base64,'
+                                        + _b64p2.b64encode(_buf2.getvalue()).decode()
+                                    )
+                            except Exception as _e2:
+                                st.warning(f"PNG conversion failed, using SVG: {_e2}")
+                    _panel_svg = (
+                        _sel_lyr2.panel_png_data_url
+                        if (_use_png2 and _sel_lyr2.panel_png_data_url)
+                        else _panel_svg
+                    )
 
             if not _panel_svg:
                 st.caption("☝️ Select a layer in the sidebar to display the panel image.")

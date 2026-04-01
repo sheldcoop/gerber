@@ -59,6 +59,7 @@ class RenderedLayer:
     bounds: tuple                # (min_x, min_y, max_x, max_y) in mm
     feature_count: int
     panel_svg_data_url: str = '' # pre-rendered panel tile SVG (composite SVG data url)
+    panel_png_data_url: str = '' # rasterized PNG of panel_svg_data_url (lazy, on demand)
     stats: dict = field(default_factory=dict)
 
 
