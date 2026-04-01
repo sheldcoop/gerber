@@ -6,6 +6,39 @@ from alignment import calculate_geometry, INTER_UNIT_GAP
 from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
 from core.data_utils import compute_cm_geometry, filter_aoi_cm
 
+
+@st.cache_data(max_entries=64, ttl=3600, show_spinner=False)
+def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
+    """Map defect X_MM/Y_MM to unit-local coordinates. All arrays as tuples for cache key."""
+    import numpy as _np
+    ax = _np.array(x_mm) - _np.array(ox_arr) + off_x
+    ay = _np.array(y_mm) - _np.array(oy_arr) + off_y
+    return tuple(ax.tolist()), tuple(ay.tolist())
+
+
+@st.cache_data(max_entries=16, ttl=3600, show_spinner=False)
+def _compute_hotspot(ax, ay, cell_w, cell_h):
+    """Run KDE and return (cx, cy, radius) of the density peak, or None. Tuples for caching."""
+    try:
+        from sklearn.neighbors import KernelDensity
+        import numpy as _np
+        xy = _np.column_stack([list(ax), list(ay)])
+        if len(xy) < 5:
+            return None
+        kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
+        kde.fit(xy)
+        nx, ny = 40, 40
+        gxv = _np.linspace(0, cell_w, nx)
+        gyv = _np.linspace(0, cell_h, ny)
+        gxx, gyy = _np.meshgrid(gxv, gyv)
+        dens = _np.exp(kde.score_samples(_np.column_stack([gxx.ravel(), gyy.ravel()]))).reshape(ny, nx)
+        peak = _np.unravel_index(dens.argmax(), dens.shape)
+        return float(gxv[peak[1]]), float(gyv[peak[0]]), min(cell_w, cell_h) * 0.06
+    except Exception:
+        return None
+
+
+@st.fragment
 def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
     st.markdown("### 🗺️ Commonality — Defect Superposition")
     st.caption("Normalise each selected unit's defects into local coordinates and overlay on a single reference unit.")
@@ -317,31 +350,26 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
 
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
-                _cm_plot = _cm_src.copy()
-                # unit_positions already encode the copper-left-edge in display space
-                # (build_panel_svg places the copper edge at x=x_mm via tx=x_mm-vx).
-                # So ALIGNED = X_MM - unit_pos maps the defect to the correct Plotly
-                # position without any extra cam_min correction.
-                _cm_plot['ALIGNED_X'] = _cm_src['X_MM'].values - _ox_arr + _cm_off_x
-                _cm_plot['ALIGNED_Y'] = _cm_src['Y_MM'].values - _oy_arr + _cm_off_y
 
-                # ── Rotation control ──────────────────────────────────────
-                _rot_deg = st.number_input(
-                    "Rotation (°)", min_value=0.0, max_value=360.0,
-                    value=0.0, step=0.5, format="%.1f",
-                    key='cm_rotation_deg',
-                    help="Rotate all defect points around the unit centre.",
+                # ── Background rotation (SVG only — defect positions unchanged) ──
+                with st.form("cm_rotation_form", border=False):
+                    _rot_deg = st.number_input(
+                        "Background rotation (°)", min_value=0.0, max_value=360.0,
+                        value=0.0, step=0.5, format="%.1f",
+                        key='cm_rotation_deg',
+                        help="Rotate the CAD background to align with the defect cloud. Defect point positions do not move.",
+                    )
+                    st.form_submit_button("Apply rotation", use_container_width=True)
+
+                _ax, _ay = _align_defects(
+                    tuple(_cm_src['X_MM'].values.tolist()),
+                    tuple(_cm_src['Y_MM'].values.tolist()),
+                    tuple(_ox_arr), tuple(_oy_arr),
+                    _cm_off_x, _cm_off_y,
                 )
-                if abs(_rot_deg) > 0.01:
-                    _cx = _cam_cell_w / 2
-                    _cy = _cam_cell_h / 2
-                    _rad = math.radians(_rot_deg)
-                    _cos_r, _sin_r = math.cos(_rad), math.sin(_rad)
-                    _dx = _cm_plot['ALIGNED_X'] - _cx
-                    _dy = _cm_plot['ALIGNED_Y'] - _cy
-                    _cm_plot = _cm_plot.copy()
-                    _cm_plot['ALIGNED_X'] = _cx + _dx * _cos_r - _dy * _sin_r
-                    _cm_plot['ALIGNED_Y'] = _cy + _dx * _sin_r + _dy * _cos_r
+                _cm_plot = _cm_src.copy()
+                _cm_plot['ALIGNED_X'] = list(_ax)
+                _cm_plot['ALIGNED_Y'] = list(_ay)
 
                 _cm_cfg = OverlayConfig()
                 _cm_cfg.board_bounds = (
@@ -377,11 +405,39 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     _ref_b_cm    = _first_lyr_cm.bounds
                     _ref_shift_x = -_ref_b_cm[0]
                     _ref_shift_y = -_ref_b_cm[1]
+
+                    import re as _re_svg, base64 as _b64_svg
+
+                    def _build_layer_url(lyr_obj, rot):
+                        """Return data URL with optional SVG rotation. Uses precomputed URL when rot==0."""
+                        if abs(rot) < 0.01:
+                            if _is_multi_cm and lyr_obj.color_svg_urls:
+                                return next(iter(lyr_obj.color_svg_urls.values()))
+                            return lyr_obj.svg_data_url
+                        svg = lyr_obj.svg_string
+                        if st.session_state.get('invert_polarity', False):
+                            _fg = '#FFD700' if lyr_obj.layer_type == 'drill' else '#b87333'
+                            _t = '__PS__'
+                            svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
+                        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
+                        vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
+                        if vb:
+                            vx, vy, vw, vh = map(float, vb.group(1).split())
+                            cx, cy = vx + vw / 2, vy + vh / 2
+                            tag = _re_svg.search(r'<svg[^>]*>', svg)
+                            if tag:
+                                close = svg.rfind('</svg>')
+                                if close >= 0:
+                                    inner = svg[tag.end():close]
+                                    svg = (
+                                        svg[:tag.end()]
+                                        + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
+                                        + inner + '</g>' + svg[close:]
+                                    )
+                        return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
+
                     for _cm_cam_ln, _cm_cam_lyr in _cm_cam_pairs:
-                        if _is_multi_cm and _cm_cam_lyr.color_svg_urls:
-                            _cm_data_url = next(iter(_cm_cam_lyr.color_svg_urls.values()))
-                        else:
-                            _cm_data_url = get_svg_url(_cm_cam_lyr)
+                        _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg)
 
                         _cb_cm = _cm_cam_lyr.bounds
                         _im_x  = _cb_cm[0] + _ref_shift_x
@@ -447,37 +503,24 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         xref="x", yref="y",
                     )
 
-                if len(_cm_plot) >= 5:
-                    try:
-                        from sklearn.neighbors import KernelDensity
-                        import numpy as _np2
-                        _hs_xy = _cm_plot[['ALIGNED_X', 'ALIGNED_Y']].dropna().values
-                        if len(_hs_xy) >= 5:
-                            _kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
-                            _kde.fit(_hs_xy)
-                            _nx, _ny = 40, 40
-                            _gxv = _np2.linspace(0, _cam_cell_w, _nx)
-                            _gyv = _np2.linspace(0, _cam_cell_h, _ny)
-                            _gxx, _gyy = _np2.meshgrid(_gxv, _gyv)
-                            _grid_pts = _np2.column_stack([_gxx.ravel(), _gyy.ravel()])
-                            _dens = _np2.exp(_kde.score_samples(_grid_pts)).reshape(_ny, _nx)
-                            _peak_idx = _np2.unravel_index(_dens.argmax(), _dens.shape)
-                            _hs_cx = float(_gxv[_peak_idx[1]])
-                            _hs_cy = float(_gyv[_peak_idx[0]])
-                            _hs_r  = min(_cam_cell_w, _cam_cell_h) * 0.06
-                            _cm_fig.add_shape(type="circle",
-                                x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
-                                x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
-                                line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
-                                fillcolor="rgba(255,80,80,0.08)", layer="above")
-                            _cm_fig.add_annotation(
-                                x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
-                                text="hotspot", showarrow=False,
-                                font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
-                                xref="x", yref="y",
-                            )
-                    except Exception:
-                        pass
+                _hs = _compute_hotspot(
+                    tuple(_cm_plot['ALIGNED_X'].dropna().values.tolist()),
+                    tuple(_cm_plot['ALIGNED_Y'].dropna().values.tolist()),
+                    _cam_cell_w, _cam_cell_h,
+                )
+                if _hs:
+                    _hs_cx, _hs_cy, _hs_r = _hs
+                    _cm_fig.add_shape(type="circle",
+                        x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
+                        x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
+                        line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
+                        fillcolor="rgba(255,80,80,0.08)", layer="above")
+                    _cm_fig.add_annotation(
+                        x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
+                        text="hotspot", showarrow=False,
+                        font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
+                        xref="x", yref="y",
+                    )
 
                 _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
                                           help="Overlay a 2D defect density heatmap instead of individual dots",
