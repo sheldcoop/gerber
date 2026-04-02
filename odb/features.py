@@ -6,7 +6,7 @@ from shapely.ops import unary_union
 
 from odb.constants import MAX_FEATURE_ERRORS, INCHES_TO_MM
 from odb.symbols import parse_symbol_table
-from odb.geometry import parse_pad_record, parse_line_record, parse_surface_block
+from odb.geometry import parse_pad_record, parse_line_record, parse_arc_record, parse_surface_block
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,19 @@ def parse_features_text(text: str, uf: float, unknown_symbols: set,
                         minx, miny, maxx, maxy = geom.bounds
                         trace_widths.append(max(maxx - minx, maxy - miny))
 
-            # A (arc), T (text), B (barcode) — skip silently
+            elif record_type == 'A':
+                geom, polarity = parse_arc_record(parts, symbols, uf, ignore_polarity=True)
+                if geom is not None:
+                    sym_idx = int(parts[7]) if len(parts) > 7 else -1
+                    sym = symbols.get(sym_idx)
+                    width = sym.size_x if sym else 0.0
+                    if polarity == 'N':
+                        neg_geoms.append(geom)
+                    else:
+                        pos_geoms.append(geom)
+                        trace_widths.append(width)
+
+            # T (text), B (barcode) — not physical copper; not rendered
 
         except Exception as e:
             error_count += 1

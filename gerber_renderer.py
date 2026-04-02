@@ -131,6 +131,29 @@ def render_odb_to_cam(data: bytes, filename: str = '',
     return result
 
 
+def clear_render_cache(digest: str = None):
+    """
+    Evict a rendered result from both the in-process LRU and disk cache.
+
+    Pass digest to evict a specific entry; pass None to evict everything.
+    Called by the sidebar "Force re-render" button so code changes take
+    effect without restarting Streamlit.
+    """
+    from pathlib import Path as _Path
+    import shutil as _shutil
+
+    if digest is None:
+        _RENDER_MEM_CACHE.clear()
+        cam_dir = _Path.home() / '.cache' / 'gerber-vrs' / 'cam'
+        if cam_dir.exists():
+            _shutil.rmtree(cam_dir, ignore_errors=True)
+    else:
+        _RENDER_MEM_CACHE.pop(digest, None)
+        from core.cache import _cache_dir
+        entry = _cache_dir(digest)
+        _shutil.rmtree(entry, ignore_errors=True)
+
+
 def scan_available_layers(data: bytes) -> list:
     """
     Quick scan of ODB++ archive — returns [(name, type), ...] for renderable layers.

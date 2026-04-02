@@ -50,6 +50,7 @@ from odb.geometry import (
     arc_to_points,
     parse_pad_record,
     parse_line_record,
+    parse_arc_record,
     parse_surface_block,
 )
 
@@ -90,6 +91,7 @@ _symbol_to_geometry         = symbol_to_geometry
 _odb_arc_to_points          = arc_to_points
 _parse_pad_record           = parse_pad_record
 _parse_line_record          = parse_line_record
+_parse_arc_record           = parse_arc_record
 _parse_surface_block        = parse_surface_block
 _read_features_text         = read_features_text
 _parse_features_text        = parse_features_text

@@ -9,7 +9,7 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive
-from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache
+from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache, clear_render_cache
 from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 
@@ -140,7 +140,20 @@ def render_sidebar():
         st.divider()
 
         # ---- Load & Process Button ----
-        load_btn = st.button("🔄 Load & Process", width='stretch', type="primary")
+        _btn_cols = st.columns([3, 2], gap="small")
+        load_btn = _btn_cols[0].button("🔄 Load & Process", width='stretch', type="primary")
+        _force_btn = _btn_cols[1].button("🗑️ Force Re-render", width='stretch', type="secondary",
+                                          help="Clears cached SVGs so code changes take effect without restarting")
+        if _force_btn:
+            _fd = st.session_state.get('_tgz_digest')
+            if _fd:
+                clear_render_cache(digest=_fd)
+                st.session_state.pop('rendered_odb', None)
+                st.session_state.pop('_panel_svgs_built', None)
+                st.toast("Render cache cleared — click Load & Process to re-render", icon="🗑️")
+            else:
+                clear_render_cache()
+                st.toast("All render caches cleared", icon="🗑️")
 
         if load_btn:
             parsed_odb = None
