@@ -146,7 +146,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             return name, ltype, gf, stats, None
 
         parse_results = []
-        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as executor:
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(selected))) as executor:
             futures = {executor.submit(_process_layer, item): item for item in selected}
             for future in as_completed(futures):
                 parse_results.append(future.result())
@@ -173,8 +173,13 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             stack_color = layer_color_map[name]
-            # Color-swap via str.replace — avoids a second full to_svg() traversal.
-            stack_svg = svg_str.replace(fg_color, stack_color) if fg_color != stack_color else svg_str
+            # Color-swap via bytecode replace (faster for large SVGs)
+            if fg_color != stack_color:
+                svg_bytes = svg_str.encode('utf-8')
+                stack_bytes = svg_bytes.replace(fg_color.encode('utf-8'), stack_color.encode('utf-8'))
+                stack_svg = stack_bytes.decode('utf-8')
+            else:
+                stack_svg = svg_str
             color_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
 
             bb = gf.bounding_box(MM)
@@ -193,7 +198,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 stats=stats,
             ), bounds
 
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(valid_results)))) as executor:
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, max(1, len(valid_results)))) as executor:
             render_futures = {
                 executor.submit(_render_layer, name, ltype, gf, stats): name
                 for name, ltype, gf, stats in valid_results

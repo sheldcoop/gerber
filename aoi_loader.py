@@ -316,16 +316,27 @@ def _load_single_aoi(
     """
     warnings = []
 
-    # Read Excel
+    # Read Excel — try polars first (3-10× faster), fallback to pandas
     import io
+    df = None
     try:
-        # Try 'Defects' sheet first (common in Orbotech exports)
+        # Try polars for faster Excel reading if available
         try:
-            df = pd.read_excel(
-                io.BytesIO(file_bytes), sheet_name='Defects', engine='openpyxl'
-            )
-        except (ValueError, KeyError):
-            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, engine='openpyxl')
+            import polars as pl
+            # Try 'Defects' sheet first (common in Orbotech exports)
+            try:
+                pl_df = pl.read_excel(file_bytes, sheet_name='Defects')
+            except Exception:
+                pl_df = pl.read_excel(file_bytes, sheet_id=0)
+            df = pl_df.to_pandas()  # Convert to pandas for compatibility
+        except (ImportError, Exception):
+            # Polars not available or failed — use pandas
+            try:
+                df = pd.read_excel(
+                    io.BytesIO(file_bytes), sheet_name='Defects', engine='openpyxl'
+                )
+            except (ValueError, KeyError):
+                df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, engine='openpyxl')
     except Exception as e:
         return AOILoadResult(
             df=pd.DataFrame(),
