@@ -79,6 +79,7 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _, _no_aoi_cw, _no_aoi_ch = compute_cm_geometry(
                     unit_positions=tuple(_rodb_cm_check.panel_layout.unit_positions),
                     first_layer_bounds=tuple(_no_aoi_ref_lyr.bounds),
+                    unit_bounds=_rodb_cm_check.panel_layout.unit_bounds,
                 )
             else:
                 _rb_na = _no_aoi_ref_lyr.bounds
@@ -240,6 +241,7 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_origins, _cam_cell_w, _cam_cell_h = compute_cm_geometry(
                     unit_positions=tuple(_rodb_cm.panel_layout.unit_positions),
                     first_layer_bounds=tuple(_first_lyr_cm.bounds),
+                    unit_bounds=_rodb_cm.panel_layout.unit_bounds,
                 )
                 _cam_min_x = _first_lyr_cm.bounds[0]
                 _cam_min_y = _first_lyr_cm.bounds[1]
