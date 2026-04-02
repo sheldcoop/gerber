@@ -145,10 +145,29 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
     layer_uf = (25.4 if file_units == 'inch' else 1.0) if file_units else uf
     sym_scale = _detect_symbol_scale(text, layer_uf)
 
-    # InCAM Pro quirk: sym_scale ≈ 0.0254 means symbols in mils, coords in inches
+    # InCAM Pro quirk: sym_scale ≈ 0.0254 means symbols are in mils, but coords
+    # may already be in mm (unit-level files) or still in inches (cluster-level).
+    # Peek at raw coordinate magnitudes to distinguish the two cases:
+    #   raw_max < 15  → coords are in inches → scale up by 25.4 AND fix sym_scale
+    #   raw_max ≥ 15  → coords already in mm → keep layer_uf=1.0, sym_scale=0.0254
     if abs(sym_scale - 0.0254) < 0.001 and layer_uf == 1.0:
-        layer_uf = 25.4
-        sym_scale = 0.001
+        _raw_max = 0.0
+        _n = 0
+        for _l in text.splitlines():
+            if _l.startswith('L ') or _l.startswith('P '):
+                try:
+                    _p = _l.split()
+                    _raw_max = max(_raw_max, abs(float(_p[1])), abs(float(_p[2])))
+                except (IndexError, ValueError):
+                    pass
+                _n += 1
+                if _n >= 30:
+                    break
+        if 0 < _raw_max < 15.0:
+            # Coordinates are inches — convert to mm and reset sym_scale
+            layer_uf = 25.4
+            sym_scale = 0.001
+        # else: coordinates already in mm — sym_scale = 0.0254 is correct as-is
 
     lines = text.splitlines()
     symbols = _parse_symbol_table(lines)
