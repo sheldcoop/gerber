@@ -34,7 +34,7 @@ from core.state import init_state, sync_layers_to_aoi
 init_state()
 
 from ui.sidebar import handle_bg_render_polling, render_sidebar
-# from views.panel_overview import render_panel_overview  # disabled - performance
+from views.panel_overview import render_panel_overview
 from views.unit_commonality import render_unit_commonality
 from views.panel_heatmap import render_panel_heatmap
 from views.cluster_triage import render_cluster_triage
@@ -207,7 +207,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         return 'data:image/svg+xml;base64,' + _b64.b64encode(svg.encode()).decode()
 
     if view_mode == "🔭 Panel Overview":
-        pass  # render_panel_overview(parsed, aoi, align_args)  # disabled - performance
+        render_panel_overview(parsed, aoi, align_args)
 
     elif view_mode == "🗺️ Unit Commonality":
         render_unit_commonality(parsed, aoi, align_args, _get_svg_url)

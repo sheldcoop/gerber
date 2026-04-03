@@ -60,6 +60,41 @@ def render_sidebar():
         st.title("ODB++ + AOI Overlay")
         st.caption("Upload ODB++ archive and AOI defect data for overlay visualization")
 
+        # ---- Cache Management ----
+        from core.cache import get_cache_size
+        _cache_bytes, _cache_size = get_cache_size()
+        
+        _cache_col1, _cache_col2 = st.columns([3, 2])
+        with _cache_col1:
+            if st.button("🗑️ Clear All Cache", use_container_width=True, help="Clear all cached data including renders, computations, and AOI data"):
+                _before_bytes, _before_size = get_cache_size()
+                # Clear Streamlit cache
+                st.cache_data.clear()
+                # Clear disk render cache
+                clear_render_cache()
+                # Clear session state
+                for key in list(st.session_state.keys()):
+                    if key not in ['_aoi_upload_key']:  # Preserve upload widget key
+                        del st.session_state[key]
+                _after_bytes, _after_size = get_cache_size()
+                if _before_bytes > 0:
+                    st.toast(f"✅ Cache cleared: {_before_size} → {_after_size}", icon="🗑️")
+                else:
+                    st.toast("✅ All caches cleared!", icon="🗑️")
+                st.rerun()
+        
+        with _cache_col2:
+            if st.button("🔄 Refresh", use_container_width=True, help="Refresh the current view"):
+                st.rerun()
+        
+        # Display cache size
+        if _cache_bytes > 0:
+            st.caption(f"💾 Cache: {_cache_size}")
+        else:
+            st.caption("💾 Cache: Empty")
+        
+        st.divider()
+
         # ---- Section 1: File Upload ----
         st.header("1. Upload Files")
 
@@ -140,20 +175,7 @@ def render_sidebar():
         st.divider()
 
         # ---- Load & Process Button ----
-        _btn_cols = st.columns([3, 2], gap="small")
-        load_btn = _btn_cols[0].button("🔄 Load & Process", width='stretch', type="primary")
-        _force_btn = _btn_cols[1].button("🗑️ Force Re-render", width='stretch', type="secondary",
-                                          help="Clears cached SVGs so code changes take effect without restarting")
-        if _force_btn:
-            _fd = st.session_state.get('_tgz_digest')
-            if _fd:
-                clear_render_cache(digest=_fd)
-                st.session_state.pop('rendered_odb', None)
-                st.session_state.pop('_panel_svgs_built', None)
-                st.toast("Render cache cleared — click Load & Process to re-render", icon="🗑️")
-            else:
-                clear_render_cache()
-                st.toast("All render caches cleared", icon="🗑️")
+        load_btn = st.button("🔄 Load & Process", use_container_width=True, type="primary")
 
         if load_btn:
             parsed_odb = None
@@ -409,14 +431,6 @@ def render_sidebar():
                     key="invert_polarity",
                     value=False,
                     help="Swap copper and background colours — useful for checking negative-polarity layers",
-                )
-
-                st.radio(
-                    "Panel background format",
-                    ["SVG (vector)", "PNG (raster, faster zoom)"],
-                    key="panel_bg_format",
-                    horizontal=True,
-                    help="PNG converts the panel SVG to a flat image once — faster to zoom/pan. SVG is sharper at any zoom.",
                 )
 
                 st.divider()

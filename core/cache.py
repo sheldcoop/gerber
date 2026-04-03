@@ -131,6 +131,35 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
         pass  # cache write failure is non-fatal
 
 
+def get_cache_size() -> tuple:
+    """Return (total_bytes, human_readable_string) for the CAM cache directory.
+    
+    Returns:
+        (total_bytes: int, formatted_size: str)
+        Example: (10485760, "10.0 MB")
+    """
+    total = 0
+    if _CAM_CACHE_DIR.exists():
+        for item in _CAM_CACHE_DIR.rglob('*'):
+            if item.is_file():
+                try:
+                    total += item.stat().st_size
+                except (OSError, PermissionError):
+                    pass
+    
+    # Format size
+    if total == 0:
+        return (0, "0 B")
+    elif total < 1024:
+        return (total, f"{total} B")
+    elif total < 1024 * 1024:
+        return (total, f"{total / 1024:.1f} KB")
+    elif total < 1024 * 1024 * 1024:
+        return (total, f"{total / (1024 * 1024):.1f} MB")
+    else:
+        return (total, f"{total / (1024 * 1024 * 1024):.2f} GB")
+
+
 def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optional[object]:
     """Return a cached RenderedODB, or None on cache miss.
 

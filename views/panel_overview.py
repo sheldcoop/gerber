@@ -1,321 +1,235 @@
+"""
+views/panel_overview.py — Full panel CAM viewer with hierarchy boundaries.
+
+Displays the complete ODB++ panel layout with:
+- Full panel SVG (all units composited)
+- Hierarchy boundaries (panel → cluster → unit)
+- Panel information (size, grid layout, unit count)
+"""
+
 import streamlit as st
-import pandas as pd
 import plotly.graph_objects as go
-from alignment import get_panel_quadrant_bounds, FRAME_WIDTH, FRAME_HEIGHT
-from visualizer import build_defect_only_figure, OverlayConfig
-from gerber_renderer import save_render_cache
-from core.data_utils import compute_panel_shapes, compute_clusters_cached
+from gerber_renderer import save_render_cache, build_panel_svg
+
+
+def _get_cluster_positions(panel_layout):
+    """Return list of (x0, y0, x1, y1) for each cluster in display coords."""
+    sh = panel_layout.step_hierarchy
+    uw, uh = panel_layout.unit_bounds
+    raw_positions = getattr(panel_layout, 'unit_positions_raw', [])
+    disp_positions = panel_layout.unit_positions
+    if not raw_positions or not disp_positions:
+        return []
+
+    shift_x = disp_positions[0][0] - raw_positions[0][0]
+    shift_y = disp_positions[0][1] - raw_positions[0][1]
+
+    # Find the panel→cluster repeats and identify the cluster step name
+    panel_children = sh.get('panel', [])
+    cluster_step = None
+    for sr in panel_children:
+        child = sr.child_step.lower()
+        if 'cluster' in child or 'qtr' in child:
+            cluster_step = child
+            break
+    if cluster_step is None:
+        return []
+
+    # Compute extent of one cluster in its own local coordinate space
+    cluster_children = sh.get(cluster_step, [])
+    if not cluster_children:
+        return []
+
+    cu_positions = []
+    for sr in cluster_children:
+        for iy in range(sr.ny):
+            for ix in range(sr.nx):
+                cu_positions.append((sr.x + ix * sr.dx, sr.y + iy * sr.dy))
+    if not cu_positions:
+        return []
+
+    c_min_x = min(p[0] for p in cu_positions)
+    c_min_y = min(p[1] for p in cu_positions)
+    c_max_x = max(p[0] for p in cu_positions) + uw
+    c_max_y = max(p[1] for p in cu_positions) + uh
+
+    # Emit cluster bounding boxes in panel display space
+    result = []
+    for sr in panel_children:
+        if sr.child_step.lower() == cluster_step:
+            for iy in range(sr.ny):
+                for ix in range(sr.nx):
+                    raw_x = sr.x + ix * sr.dx
+                    raw_y = sr.y + iy * sr.dy
+                    result.append((
+                        raw_x + c_min_x + shift_x,
+                        raw_y + c_min_y + shift_y,
+                        raw_x + c_max_x + shift_x,
+                        raw_y + c_max_y + shift_y,
+                    ))
+    return result
+
+
+def _build_base_figure(panel_layout) -> go.Figure:
+    """Build empty Plotly figure with correct axes and PCB background."""
+    pw = panel_layout.panel_width
+    ph = panel_layout.panel_height
+    fig = go.Figure()
+    fig.update_layout(
+        xaxis=dict(
+            range=[-10, pw + 10], scaleanchor='y', scaleratio=1,
+            showgrid=False, zeroline=False, color='#aaa',
+        ),
+        yaxis=dict(
+            range=[-10, ph + 10], showgrid=False, zeroline=False, color='#aaa',
+        ),
+        plot_bgcolor='#1a2a1a',
+        paper_bgcolor='#111a11',
+        margin=dict(l=0, r=0, t=24, b=0),
+        height=720,
+        showlegend=False,
+    )
+    return fig
+
+
+def _add_background(fig, pw, ph) -> None:
+    """Add PCB carrier and panel frame shapes."""
+    fig.add_shape(
+        type="rect",
+        x0=-8, y0=-8, x1=pw + 8, y1=ph + 8,
+        fillcolor="#2B3A2B",
+        line=dict(color="#1a2a1a", width=1),
+        layer="below",
+    )
+    fig.add_shape(
+        type="rect",
+        x0=0, y0=0, x1=pw, y1=ph,
+        fillcolor="rgba(0,120,220,0.06)",
+        line=dict(color="rgba(0,140,255,0.8)", width=2),
+        layer="below",
+    )
+
+
+def _add_hierarchy_shapes(fig, panel_layout) -> None:
+    """Add cluster and unit boundary shapes with labels."""
+    uw, uh = panel_layout.unit_bounds
+
+    # Cluster boundaries (amber dashed)
+    cluster_bounds = _get_cluster_positions(panel_layout)
+    for i, (x0, y0, x1, y1) in enumerate(cluster_bounds):
+        fig.add_shape(
+            type="rect",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            fillcolor="rgba(255,180,0,0.06)",
+            line=dict(color="rgba(255,180,0,0.7)", width=1.5, dash="dash"),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=(x0 + x1) / 2, y=y1 - 1,
+            text=f"C-{i + 1:02d}",
+            showarrow=False,
+            font=dict(size=10, color="rgba(255,180,0,0.9)"),
+            bgcolor="rgba(0,0,0,0.4)",
+            borderpad=2,
+        )
+
+    # Unit boundaries (green)
+    for i, (ux, uy) in enumerate(panel_layout.unit_positions):
+        fig.add_shape(
+            type="rect",
+            x0=ux, y0=uy, x1=ux + uw, y1=uy + uh,
+            fillcolor="rgba(0,200,120,0.05)",
+            line=dict(color="rgba(0,220,130,0.5)", width=0.8),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=ux + uw / 2, y=uy + uh / 2,
+            text=f"U-{i + 1:02d}",
+            showarrow=False,
+            font=dict(size=8, color="rgba(0,220,130,0.7)"),
+        )
+
 
 def render_panel_overview(parsed, aoi, align_args):
-    st.markdown("### Panel Defect Map")
-    if aoi and aoi.has_data:
-        panel_df = aoi.all_defects.copy()
-        _p_off_x = align_args.get('manual_offset_x', 0.0)
-        _p_off_y = align_args.get('manual_offset_y', 0.0)
-        if 'X_MM' not in panel_df.columns and 'X' in panel_df.columns:
-            panel_df['ALIGNED_X'] = panel_df['X'] / 1000.0 + _p_off_x
-            panel_df['ALIGNED_Y'] = panel_df['Y'] / 1000.0 + _p_off_y
-        else:
-            panel_df['ALIGNED_X'] = (panel_df['X_MM'] if 'X_MM' in panel_df.columns else 0.0) + _p_off_x
-            panel_df['ALIGNED_Y'] = (panel_df['Y_MM'] if 'Y_MM' in panel_df.columns else 0.0) + _p_off_y
+    st.markdown("### 🏭 Panel Layout Viewer")
+    st.caption(
+        "View the complete ODB++ panel with step-repeat hierarchy boundaries. "
+        "Shows all units composited from the selected layer."
+    )
 
-        if align_args.get('flip_y', False) and not panel_df.empty:
-            panel_df['ALIGNED_Y'] = panel_df['ALIGNED_Y'].max() - panel_df['ALIGNED_Y']
+    rendered_odb = st.session_state.get('rendered_odb')
+    if not rendered_odb or not rendered_odb.panel_layout:
+        st.info("⬆️ Upload an ODB++ archive (.tgz) to view the panel layout.")
+        return
 
-        panel_config = OverlayConfig(min_feature_size=0.1)  # LOD: suppress sub-0.1mm traces at panel zoom
+    pl = rendered_odb.panel_layout
+    pw = pl.panel_width
+    ph = pl.panel_height
+    uw, uh = pl.unit_bounds
 
-        # Quadrant grid geometry (for grid overlay lines only)
-        quad_bounds = get_panel_quadrant_bounds(
-            st.session_state.get('quad_rows_input', 6),
-            st.session_state.get('quad_cols_input', 6),
-            dyn_gap_x=st.session_state.get('dyn_gap_x_input', 5.0),
-            dyn_gap_y=st.session_state.get('dyn_gap_y_input', 3.5),
-        )
+    # Panel info
+    info_cols = st.columns(3)
+    with info_cols[0]:
+        st.metric("Panel", f"{pw:.1f} × {ph:.1f} mm")
+    with info_cols[1]:
+        st.metric("Layout", f"{pl.cols} × {pl.rows} grid ({pl.total_units} units)")
+    with info_cols[2]:
+        st.metric("Unit", f"{uw:.2f} × {uh:.2f} mm")
 
-        # Viewport: use ODB++ panel frame when TGZ is loaded (same space as CAM PNG
-        # and AOI X_MM/Y_MM). Fall back to geometry-engine bounds when no TGZ.
-        _rp_for_bounds = st.session_state.get('rendered_odb')
-        if _rp_for_bounds and _rp_for_bounds.panel_layout:
-            _vpw = _rp_for_bounds.panel_layout.panel_width
-            _vph = _rp_for_bounds.panel_layout.panel_height
-            panel_config.board_bounds = (-10, -10, _vpw + 10, _vph + 10)
-        else:
-            ax1, ay1, ax2, ay2 = quad_bounds['frame']
-            panel_config.board_bounds = (ax1 - 10, ay1 - 10, ax2 + 10, ay2 + 10)
+    show_hierarchy = st.checkbox("Show Hierarchy Boundaries", value=True, key="show_hierarchy_bounds")
 
-        # Read active scope filters from capsule UI
-        panel_config.color_mode    = st.session_state.get('color_mode_select', 'by_type')
-        panel_config.marker_style  = st.session_state.get('marker_style_select', 'dot')
-        panel_config.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
-        panel_config.buildup_filter = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-        side_active = st.session_state.get('side_cap_select', 'All')
-        panel_config.side_filter   = 'Both' if side_active == 'All' else side_active
+    # ── Figure ───────────────────────────────────────────────────────────────
+    fig = _build_base_figure(pl)
+    _add_background(fig, pw, ph)
+    if show_hierarchy:
+        _add_hierarchy_shapes(fig, pl)
 
-        panel_fig = build_defect_only_figure(panel_df, panel_config)
-        panel_fig.update_layout(showlegend=False)
+    # ── CAM layer SVG ────────────────────────────────────────────────────────
+    all_checked = [
+        ln for ln in rendered_odb.layers
+        if st.session_state.get(f"vis_{ln}", False)
+    ]
+    want_layer = all_checked[0] if all_checked else None
 
-        # ── CAM (Gerbonara) background tiling (pre-cached panel SVG) ────
-        _rendered_panel = st.session_state.get('rendered_odb')
-        if _rendered_panel and _rendered_panel.panel_layout:
-            # Pick which layer to display (first checked layer only — if none checked, show nothing)
-            _panel_bg_url = None
-            _panel_bg_name = None
-            _want_layer = None
-            _all_checked_panel = [
-                _ln for _ln in _rendered_panel.layers
-                if st.session_state.get(f"vis_{_ln}", False)
-            ]
-            if _all_checked_panel:
-                _want_layer = _all_checked_panel[0]   # Background can only show one layer
-
-            def _get_panel_bg_url(lyr_obj):
-                """Return panel background URL — PNG or SVG depending on sidebar setting."""
-                _use_png = st.session_state.get('panel_bg_format', 'SVG') == 'PNG (raster, faster zoom)'
-                # Ensure SVG is built first (PNG depends on it)
-                if not lyr_obj.panel_svg_data_url:
-                    return None
-                if not _use_png:
-                    return lyr_obj.panel_svg_data_url
-                # Lazy PNG build
-                if not lyr_obj.panel_png_data_url:
-                    with st.spinner("Converting panel to PNG (one-time)..."):
-                        try:
-                            from svglib.svglib import svg2rlg
-                            from reportlab.graphics import renderPM
-                            from io import BytesIO as _BytesIO
-                            import base64 as _b64_png
-                            _svg_raw = _b64_png.b64decode(
-                                lyr_obj.panel_svg_data_url.split(',', 1)[1]
-                            )
-                            _drawing = svg2rlg(_BytesIO(_svg_raw))
-                            if _drawing:
-                                _buf = _BytesIO()
-                                renderPM.drawToFile(_drawing, _buf, fmt='PNG', dpi=150)
-                                lyr_obj.panel_png_data_url = (
-                                    'data:image/png;base64,'
-                                    + _b64_png.b64encode(_buf.getvalue()).decode()
-                                )
-                        except Exception as _e:
-                            st.warning(f"PNG conversion failed, using SVG: {_e}")
-                return lyr_obj.panel_png_data_url or lyr_obj.panel_svg_data_url
-
-            # Build panel SVG only for the selected layer (on-demand, one layer at a time)
-            if _want_layer:
-                _want_lyr_obj = _rendered_panel.layers[_want_layer]
-                if not _want_lyr_obj.panel_svg_data_url:
-                    with st.spinner(f"Building panel image for {_want_layer}..."):
-                        from gerber_renderer import build_panel_svg
-                        try:
-                            _want_lyr_obj.panel_svg_data_url = build_panel_svg(
-                                _want_lyr_obj.svg_string, _rendered_panel.panel_layout
-                            )
-                        except Exception:
-                            pass
-                        _tgz_b = st.session_state.get('_tgz_bytes_for_cache')
-                        _tgz_d = st.session_state.get('_tgz_digest')
-                        if (_tgz_b or _tgz_d) and _want_lyr_obj.panel_svg_data_url:
-                            save_render_cache(_rendered_panel, digest=_tgz_d, tgz_bytes=_tgz_b if not _tgz_d else None)
-                if _want_lyr_obj.panel_svg_data_url:
-                    _panel_bg_url = _get_panel_bg_url(_want_lyr_obj)
-                    _panel_bg_name = _want_layer
-
-            if _panel_bg_url:
-                panel_fig.update_layout(images=[dict(
-                    source=_panel_bg_url,
-                    xref="x", yref="y",
-                    x=0, y=FRAME_HEIGHT,
-                    sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                    sizing="stretch", layer="below", opacity=1.0,
-                )])
-                _extra = len(_all_checked_panel) - 1
-                if _extra > 0:
-                    st.caption(
-                        f"Panel image: **{_want_layer}**"
-                        f" (+ {_extra} more selected — panel view shows one layer at a time)"
-                    )
-
-        # ── Cluster Intelligence Overlay ──────────────────────────────
-        if not panel_df.empty and 'ALIGNED_X' in panel_df.columns and len(panel_df) >= 3:
-            from alignment import compute_dataframe_hash
-            _cl_hash = compute_dataframe_hash(panel_df)
-            clustered_df, cluster_summary, _hulls = compute_clusters_cached(
-                _cl_hash, panel_df, eps=2.0, min_samples=3
-            )
-            if not cluster_summary.empty:
-                for _cid, (_hull, _cnt) in _hulls.items():
-                    hx, hy = _hull
-                    panel_fig.add_trace(go.Scatter(
-                        x=hx, y=hy, mode='lines',
-                        line=dict(color='#00FFCC', width=2, dash='dash'),
-                        name=f"Cluster {_cid} ({_cnt})",
-                        hoverinfo='name', showlegend=False,
-                    ))
-                st.session_state['_cluster_summary'] = cluster_summary
-                st.session_state['_clustered_df'] = clustered_df
-
-        # ── Professional PCB substrate panel background ───────────────
-        # Use ODB++ panel dimensions when TGZ is loaded (matches CAM PNG exactly).
-        # Fall back to geometry-engine frame bounds when no TGZ.
-        if _rp_for_bounds and _rp_for_bounds.panel_layout:
-            frame_bx1, frame_by1 = 0.0, 0.0
-            frame_bx2 = _rp_for_bounds.panel_layout.panel_width
-            frame_by2 = _rp_for_bounds.panel_layout.panel_height
-        else:
-            frame_bx1, frame_by1, frame_bx2, frame_by2 = quad_bounds['frame']
-
-        # Dark green solder-mask base for the whole frame
-        panel_fig.add_shape(
-            type="rect",
-            x0=frame_bx1 - 8, y0=frame_by1 - 8,
-            x1=frame_bx2 + 8, y1=frame_by2 + 8,
-            fillcolor="#2B3A2B",          # PCB panel carrier (dark green)
-            line=dict(color="#1a2a1a", width=1),
-            layer="below",
-        )
-        # Copper FR4 frame band
-        panel_fig.add_shape(
-            type="rect",
-            x0=frame_bx1, y0=frame_by1,
-            x1=frame_bx2, y1=frame_by2,
-            fillcolor="rgba(184,115,51,0.18)",   # warm copper tint
-            line=dict(color="#C87533", width=3),
-            layer="below",
-        )
-
-        # Unit cell grid — subtle outlines for each individual PCB
-        for name, (bx1, by1, bx2, by2) in quad_bounds.items():
-            if name == 'frame':
-                continue
-            # quadrant zone shading
-            panel_fig.add_shape(
-                type="rect",
-                x0=bx1, y0=by1, x1=bx2, y1=by2,
-                fillcolor="rgba(0,200,120,0.04)",
-                line=dict(color="rgba(0,200,120,0.35)", width=1, dash="dot"),
-                layer="below",
-            )
-
-        # Draw individual unit cells (cached — only recomputes on grid param change)
-        _pq_rows = int(st.session_state.get('quad_rows_input', 6))
-        _pq_cols = int(st.session_state.get('quad_cols_input', 6))
-        _pd_gap_x = float(st.session_state.get('dyn_gap_x_input', 5.0))
-        _pd_gap_y = float(st.session_state.get('dyn_gap_y_input', 3.5))
-        _cell_shapes = compute_panel_shapes(_pq_rows, _pq_cols, _pd_gap_x, _pd_gap_y)
-        panel_fig.update_layout(shapes=panel_fig.layout.shapes + tuple(_cell_shapes))
-
-        event = st.plotly_chart(
-            panel_fig,
-            width='stretch',
-            on_select="rerun",
-            selection_mode="points",
-            key="panel_map_selection",
-            config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
-        )
-
-        # --- Click event handling ---
-        sel = event.selection if (event and hasattr(event, 'selection')) else {}
-        point_indices = sel.get('point_indices', [])
-        if point_indices:
-            clicked_row = panel_df.iloc[point_indices[0]]
-            ux = clicked_row.get('UNIT_INDEX_X')
-            uy = clicked_row.get('UNIT_INDEX_Y')
-
-            if ux is not None and uy is not None:
-                st.rerun()
-
-    elif st.session_state.get('rendered_odb') and st.session_state.get('bg_source') == 'CAM (Gerbonara)':
-        # CAM-only mode: no AOI data, but TGZ is rendered — show tiled panel SVG
-        _rodb = st.session_state['rendered_odb']
-        _pl_cam = _rodb.panel_layout
-        if _pl_cam and _rodb.layers:
-            _cam_fig = go.Figure()
-            _cam_fig.update_layout(
-                xaxis=dict(range=[-10, FRAME_WIDTH + 10], scaleanchor='y', scaleratio=1,
-                           showgrid=False, zeroline=False, color='#aaa'),
-                yaxis=dict(range=[-10, FRAME_HEIGHT + 10], showgrid=False, zeroline=False, color='#aaa'),
-                plot_bgcolor='#1a2a1a', paper_bgcolor='#111a11',
-                margin=dict(l=0, r=0, t=24, b=0),
-                height=720,
-            )
-            # Panel frame shapes
-            _cam_fig.add_shape(type="rect", x0=-5, y0=-5, x1=FRAME_WIDTH+5, y1=FRAME_HEIGHT+5,
-                               fillcolor="#2B3A2B", line=dict(color="#1a2a1a", width=1), layer="below")
-            _cam_fig.add_shape(type="rect", x0=0, y0=0, x1=FRAME_WIDTH, y1=FRAME_HEIGHT,
-                               fillcolor="rgba(184,115,51,0.18)", line=dict(color="#C87533", width=3), layer="below")
-            # Unit cell outlines from TGZ positions
-            _uw_cam = _pl_cam.unit_bounds[0]
-            _uh_cam = _pl_cam.unit_bounds[1]
-            for _px, _py in _pl_cam.unit_positions:
-                _cam_fig.add_shape(type="rect", x0=_px, y0=_py,
-                                   x1=_px + _uw_cam, y1=_py + _uh_cam,
-                                   fillcolor="rgba(0,180,100,0.07)",
-                                   line=dict(color="rgba(0,220,130,0.5)", width=0.8), layer="below")
-            # Use pre-cached panel SVG for the checked layer only (no fallback)
-            _panel_svg = None
-            _sel_ln2 = None
-            for _ln2 in _rodb.layers:
-                if st.session_state.get(f"vis_{_ln2}", False):
-                    _sel_ln2 = _ln2
-                    break
-
-            if _sel_ln2:
-                _sel_lyr2 = _rodb.layers[_sel_ln2]
-                if not _sel_lyr2.panel_svg_data_url:
-                    with st.spinner(f"Building panel image for {_sel_ln2}..."):
-                        from gerber_renderer import build_panel_svg
-                        try:
-                            _sel_lyr2.panel_svg_data_url = build_panel_svg(
-                                _sel_lyr2.svg_string, _pl_cam
-                            )
-                        except Exception:
-                            pass
-                        _tgz_b2 = st.session_state.get('_tgz_bytes_for_cache')
-                        _tgz_d2 = st.session_state.get('_tgz_digest')
-                        if (_tgz_b2 or _tgz_d2) and _sel_lyr2.panel_svg_data_url:
-                            save_render_cache(_rodb, digest=_tgz_d2, tgz_bytes=_tgz_b2 if not _tgz_d2 else None)
-                _panel_svg = _sel_lyr2.panel_svg_data_url
-                # Lazy PNG conversion if PNG mode selected
-                if _panel_svg:
-                    _use_png2 = st.session_state.get('panel_bg_format', 'SVG') == 'PNG (raster, faster zoom)'
-                    if _use_png2 and not _sel_lyr2.panel_png_data_url:
-                        with st.spinner("Converting panel to PNG (one-time)..."):
-                            try:
-                                from svglib.svglib import svg2rlg
-                                from reportlab.graphics import renderPM
-                                from io import BytesIO as _BytesIO2
-                                import base64 as _b64p2
-                                _svg_raw2 = _b64p2.b64decode(_panel_svg.split(',', 1)[1])
-                                _drawing2 = svg2rlg(_BytesIO2(_svg_raw2))
-                                if _drawing2:
-                                    _buf2 = _BytesIO2()
-                                    renderPM.drawToFile(_drawing2, _buf2, fmt='PNG', dpi=150)
-                                    _sel_lyr2.panel_png_data_url = (
-                                        'data:image/png;base64,'
-                                        + _b64p2.b64encode(_buf2.getvalue()).decode()
-                                    )
-                            except Exception as _e2:
-                                st.warning(f"PNG conversion failed, using SVG: {_e2}")
-                    _panel_svg = (
-                        _sel_lyr2.panel_png_data_url
-                        if (_use_png2 and _sel_lyr2.panel_png_data_url)
-                        else _panel_svg
-                    )
-
-            if not _panel_svg:
-                st.caption("☝️ Select a layer in the sidebar to display the panel image.")
-
-            if _panel_svg:
-                _cam_fig.update_layout(images=[dict(
-                    source=_panel_svg,
-                    xref="x", yref="y",
-                    x=0, y=FRAME_HEIGHT,
-                    sizex=FRAME_WIDTH, sizey=FRAME_HEIGHT,
-                    sizing="stretch", layer="below", opacity=1.0,
-                )])
-            st.plotly_chart(_cam_fig, width='stretch',
-                            config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
-        else:
-            st.info("Panel layout not found in TGZ. Upload AOI data for panel view.")
-
+    if want_layer:
+        lyr = rendered_odb.layers[want_layer]
+        if not lyr.panel_svg_data_url:
+            with st.spinner(f"Building panel image for {want_layer}..."):
+                try:
+                    lyr.panel_svg_data_url = build_panel_svg(lyr.svg_string, pl)
+                except Exception:
+                    pass
+                tgz_b = st.session_state.get('_tgz_bytes_for_cache')
+                tgz_d = st.session_state.get('_tgz_digest')
+                if (tgz_b or tgz_d) and lyr.panel_svg_data_url:
+                    save_render_cache(rendered_odb, digest=tgz_d,
+                                      tgz_bytes=tgz_b if not tgz_d else None)
+        if lyr.panel_svg_data_url:
+            fig.update_layout(images=[dict(
+                source=lyr.panel_svg_data_url,
+                xref="x", yref="y",
+                x=0, y=ph,
+                sizex=pw, sizey=ph,
+                sizing="stretch", layer="below", opacity=1.0,
+            )])
+            extra = len(all_checked) - 1
+            if extra > 0:
+                st.caption(
+                    f"Panel image: **{want_layer}**"
+                    f" (+ {extra} more selected — panel view shows one layer at a time)"
+                )
     else:
-        st.info("Upload AOI defect data to view the Panel Map.")
+        st.caption("☝️ Select a layer in the sidebar to display the panel image.")
+
+    if show_hierarchy:
+        st.markdown(
+            "<small>🔵 Panel frame &nbsp;&nbsp; 🟠 Cluster boundaries &nbsp;&nbsp;"
+            " 🟢 Unit boundaries</small>",
+            unsafe_allow_html=True,
+        )
+
+    st.plotly_chart(
+        fig,
+        width='stretch',
+        config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
+    )
