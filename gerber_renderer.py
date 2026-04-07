@@ -44,6 +44,7 @@ _RENDER_MEM_CACHE_MAX = 3
 __all__ = [
     'RenderedLayer', 'PanelLayout', 'RenderedODB', 'LAYER_COLORS',
     'render_odb_to_cam', 'scan_available_layers', 'render_layer_svg',
+    'svg_to_png_data_url',
 ]
 
 
@@ -188,3 +189,43 @@ def render_layer_svg(data: bytes, layer_name: str,
         svg_tag = layer.gerber_file.to_svg(fg=fg_color, bg=bg_color)
         return str(svg_tag)
     return None
+
+
+def svg_to_png_data_url(svg_data_url: str, width_mm: float, height_mm: float) -> Optional[str]:
+    """
+    Convert SVG data URL to PNG data URL using cairosvg.
+    
+    Args:
+        svg_data_url: base64-encoded SVG data URL
+        width_mm: target width in mm
+        height_mm: target height in mm
+    
+    Returns:
+        PNG data URL or None if conversion fails
+    """
+    try:
+        import base64
+        import io
+        from cairosvg import svg2png
+        
+        # Decode the SVG data URL
+        if svg_data_url.startswith('data:image/svg+xml;base64,'):
+            svg_b64 = svg_data_url.split(',', 1)[1]
+            svg_bytes = base64.b64decode(svg_b64)
+            svg_string = svg_bytes.decode('utf-8')
+        else:
+            return None
+        
+        # Convert SVG to PNG (scale to reasonable resolution: ~10 pixels per mm)
+        png_bytes = svg2png(
+            bytestring=svg_bytes,
+            output_width=int(width_mm * 10),
+            output_height=int(height_mm * 10)
+        )
+        
+        # Encode as PNG data URL
+        png_b64 = base64.b64encode(png_bytes).decode('utf-8')
+        return f'data:image/png;base64,{png_b64}'
+    
+    except Exception:
+        return None
