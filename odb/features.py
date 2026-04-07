@@ -1,6 +1,16 @@
-"""odb/features.py — Features file I/O and full feature parser."""
+"""odb/features.py — Features file I/O and full feature parser.
 
-from typing import Optional
+IMPORTANT: ODB++ files can specify units in two places:
+1. misc/info file: UNITS=INCH or UNITS=MM (global default)
+2. Feature file headers: #UNITS=I or #UNITS=M (per-file override)
+
+This parser now properly detects #UNITS= in feature files and uses the
+correct conversion factor (25.4 for inches, 1.0 for mm) regardless of
+what misc/info says. This fixes issues where misc/info is missing or
+incomplete but feature files have correct #UNITS= declarations.
+"""
+
+from typing import Optional, Tuple
 
 from shapely.ops import unary_union
 
@@ -86,14 +96,56 @@ def _find_feature_start(lines: list) -> int:
 # Main parser
 # ---------------------------------------------------------------------------
 
+def _detect_feature_units(lines: list, default_uf: float) -> Tuple[float, str]:
+    """Detect per-file units from feature headers and outline records.
+
+    Returns:
+        (units_factor_mm, source)
+        source ∈ {'global-default', 'header-#UNITS', 'header-UNITS', 'outline-inline'}
+    """
+    # 1) Header-level declarations (authoritative)
+    for line in lines[:20]:
+        upper = line.strip().upper()
+        if upper.startswith('#UNITS='):
+            unit_code = upper.split('=', 1)[1].strip()
+            if unit_code.startswith('I'):
+                return INCHES_TO_MM, 'header-#UNITS'
+            if unit_code.startswith('M'):
+                return 1.0, 'header-#UNITS'
+        if upper.startswith('UNITS'):
+            if 'INCH' in upper:
+                return INCHES_TO_MM, 'header-UNITS'
+            if 'MM' in upper or 'METRIC' in upper:
+                return 1.0, 'header-UNITS'
+
+    # 2) Inline unit marker on OB/OS records (e.g. "OB ... I")
+    for raw in lines:
+        s = raw.strip()
+        if not s or s.startswith('#') or s.startswith(';'):
+            continue
+        if s.startswith(('OB ', 'OS ')):
+            parts = s.split()
+            if parts:
+                tail = parts[-1].upper()
+                if tail == 'I':
+                    return INCHES_TO_MM, 'outline-inline'
+                if tail == 'M':
+                    return 1.0, 'outline-inline'
+
+    return default_uf, 'global-default'
+
 def parse_features_text(text: str, uf: float, unknown_symbols: set,
                          user_symbols: Optional[dict] = None,
                          sym_scale: float = 1.0) -> tuple:
     """
     Parse a full ODB++ features file text into Shapely geometries.
+    
+    Now detects #UNITS=I (inches) or #UNITS=M (mm) from feature file header
+    and overrides the global uf (units factor) if present.
 
-    Returns (geometries, trace_widths, warnings, fiducials, drill_hits).
-    drill_hits is a list of (x, y, diameter_mm) tuples from H records.
+    Returns (geometries, trace_widths, warnings, fiducials, drill_hits, detected_uf).
+    - drill_hits is a list of (x, y, diameter_mm) tuples from H records.
+    - detected_uf is the units factor used (may differ from input uf if #UNITS= was found)
     """
     pos_geoms = []
     neg_geoms = []
@@ -103,6 +155,13 @@ def parse_features_text(text: str, uf: float, unknown_symbols: set,
     drill_hits = []
 
     lines = text.splitlines()
+
+    # Detect per-file units (header, then inline outline token fallback)
+    detected_uf, units_source = _detect_feature_units(lines, uf)
+    uf = detected_uf
+    if units_source != 'global-default':
+        warnings.append(f"units override: source={units_source}, uf={detected_uf}")
+    
     symbols = _resolve_symbols(lines, uf, user_symbols or {}, unknown_symbols, sym_scale)
     feature_start = _find_feature_start(lines)
 
@@ -224,7 +283,7 @@ def parse_features_text(text: str, uf: float, unknown_symbols: set,
     else:
         geometries = pos_geoms
 
-    return geometries, trace_widths, warnings, fiducials, drill_hits
+    return geometries, trace_widths, warnings, fiducials, drill_hits, detected_uf
 
 
 # ---------------------------------------------------------------------------

@@ -190,6 +190,28 @@ def find_step(job_root: str) -> str:
 # Step-repeat hierarchy
 # ---------------------------------------------------------------------------
 
+def _detect_stephdr_units_factor(text: str, default_uf: float) -> tuple:
+    """Detect units declaration in a stephdr file.
+
+    Returns:
+        (uf_mm, source)
+        source ∈ {'global-default', 'stephdr-UNITS', 'stephdr-#UNITS'}
+    """
+    for line in text.splitlines()[:UNITS_HEADER_SCAN_LINES]:
+        upper = line.strip().upper()
+        if upper.startswith('#UNITS='):
+            code = upper.split('=', 1)[1].strip()
+            if code.startswith('I'):
+                return INCHES_TO_MM, 'stephdr-#UNITS'
+            if code.startswith('M'):
+                return 1.0, 'stephdr-#UNITS'
+        if upper.startswith('UNITS'):
+            if 'INCH' in upper:
+                return INCHES_TO_MM, 'stephdr-UNITS'
+            if 'MM' in upper or 'METRIC' in upper:
+                return 1.0, 'stephdr-UNITS'
+    return default_uf, 'global-default'
+
 def _make_step_repeat(fields: dict, uf: float) -> StepRepeat:
     """Construct a StepRepeat from a parsed key=value field dict."""
     return StepRepeat(
@@ -234,6 +256,8 @@ def parse_step_repeat(job_root: str, uf: float = 1.0) -> dict:
         except OSError:
             continue
 
+        step_uf, _ = _detect_stephdr_units_factor(text, uf)
+
         repeats = []
         in_sr = False
         sr_fields = {}
@@ -250,7 +274,7 @@ def parse_step_repeat(job_root: str, uf: float = 1.0) -> dict:
             if in_sr:
                 if stripped == '' or stripped == '}' or upper.startswith('STEP-REPEAT'):
                     if sr_fields.get('NAME'):
-                        repeats.append(_make_step_repeat(sr_fields, uf))
+                        repeats.append(_make_step_repeat(sr_fields, step_uf))
                     sr_fields = {}
                     if upper.startswith('STEP-REPEAT'):
                         continue
@@ -277,7 +301,7 @@ def parse_step_repeat(job_root: str, uf: float = 1.0) -> dict:
 
         # Flush last entry
         if sr_fields.get('NAME'):
-            repeats.append(_make_step_repeat(sr_fields, uf))
+            repeats.append(_make_step_repeat(sr_fields, step_uf))
 
         if repeats:
             result[step_name.lower()] = repeats

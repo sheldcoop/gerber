@@ -269,7 +269,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
 
-            # Detect InCAM Pro inches quirk FIRST so uf is correct for profile parsing.
+            # Detect InCAM Pro inches quirk in STEP-REPEAT only.
             # If smallest step-repeat spacing < 5 mm but × 25.4 matches copper extent,
             # coordinates are in inches — re-parse with the correct factor.
             _all_spacings = []
@@ -281,7 +281,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 _min_spacing = min(_all_spacings)
                 if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
                     step_hierarchy = _parse_step_repeat(job_root, 25.4)
-                    uf = 25.4  # profile coordinates are also in inches — update uf
+                    warnings.append("⚠️ STEP-REPEAT inches quirk detected: hierarchy re-parsed with uf=25.4")
 
             # Parse profile layer for accurate unit dimensions.
             try:
@@ -295,7 +295,15 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 else:
                     warnings.append(f"📄 Profile: found at steps/{step_name}/profile ({len(profile_text)} chars), uf={uf}")
                     unknown_symbols_dummy = set()
-                    geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    geoms, widths, warns, _, _, _detected_uf = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    if warns:
+                        warnings.extend(f"📄 Profile parse: {w}" for w in warns)
+                    
+                    # Re-scale geometries if detected units differ from what we used to parse
+                    if geoms and _detected_uf != uf:
+                        from shapely.affinity import scale as shapely_scale
+                        _scale_factor = _detected_uf / uf
+                        geoms = [shapely_scale(g, xfact=_scale_factor, yfact=_scale_factor, origin=(0, 0)) for g in geoms]
 
                     if not geoms:
                         import re as _re_prof
@@ -305,9 +313,9 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                             if _pline.startswith(('OB ', 'OS ')):
                                 _pts = _re_prof.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pline)
                                 if len(_pts) >= 2:
-                                    _outline_xs.append(float(_pts[0]) * uf)
-                                    _outline_ys.append(float(_pts[1]) * uf)
-                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={uf}")
+                                    _outline_xs.append(float(_pts[0]) * _detected_uf)
+                                    _outline_ys.append(float(_pts[1]) * _detected_uf)
+                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={_detected_uf}")
                         if _outline_xs and _outline_ys:
                             pb = (min(_outline_xs), min(_outline_ys),
                                   max(_outline_xs), max(_outline_ys))
@@ -338,7 +346,16 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                     _pp = os.path.join(job_root, 'steps', _top, 'profile')
                     _pt = _read_features_text(_pp) or _read_features_text(_pp + '.Z')
                     if _pt:
-                        _pg, _, _, _, _ = _parse_features_text(_pt, uf, set())
+                        _pg, _, _pwarns, _, _, _detected_uf = _parse_features_text(_pt, uf, set())
+                        if _pwarns:
+                            warnings.extend(f"📐 Panel profile parse: {w}" for w in _pwarns)
+                        
+                        # Re-scale geometries if detected units differ from what we used to parse
+                        if _pg and _detected_uf != uf:
+                            from shapely.affinity import scale as shapely_scale
+                            _scale_factor = _detected_uf / uf
+                            _pg = [shapely_scale(g, xfact=_scale_factor, yfact=_scale_factor, origin=(0, 0)) for g in _pg]
+                        
                         if not _pg:
                             import re as _re_pan
                             _pxs, _pys = [], []
@@ -347,8 +364,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                                 if _pl2.startswith(('OB ', 'OS ')):
                                     _pp2 = _re_pan.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pl2)
                                     if len(_pp2) >= 2:
-                                        _pxs.append(float(_pp2[0]) * uf)
-                                        _pys.append(float(_pp2[1]) * uf)
+                                        _pxs.append(float(_pp2[0]) * _detected_uf)
+                                        _pys.append(float(_pp2[1]) * _detected_uf)
                             _pb = (min(_pxs), min(_pys), max(_pxs), max(_pys)) if _pxs else None
                         else:
                             _pb = _compute_bounds(_pg)
