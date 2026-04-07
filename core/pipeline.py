@@ -298,12 +298,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                     geoms, widths, warns, _, _, _detected_uf = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
                     if warns:
                         warnings.extend(f"📄 Profile parse: {w}" for w in warns)
-                    
-                    # Re-scale geometries if detected units differ from what we used to parse
-                    if geoms and _detected_uf != uf:
-                        from shapely.affinity import scale as shapely_scale
-                        _scale_factor = _detected_uf / uf
-                        geoms = [shapely_scale(g, xfact=_scale_factor, yfact=_scale_factor, origin=(0, 0)) for g in geoms]
+                    if _detected_uf != uf:
+                        warnings.append(f"📄 Profile units resolved via parser: detected_uf={_detected_uf}, input_uf={uf}")
 
                     if not geoms:
                         import re as _re_prof
@@ -349,12 +345,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                         _pg, _, _pwarns, _, _, _detected_uf = _parse_features_text(_pt, uf, set())
                         if _pwarns:
                             warnings.extend(f"📐 Panel profile parse: {w}" for w in _pwarns)
-                        
-                        # Re-scale geometries if detected units differ from what we used to parse
-                        if _pg and _detected_uf != uf:
-                            from shapely.affinity import scale as shapely_scale
-                            _scale_factor = _detected_uf / uf
-                            _pg = [shapely_scale(g, xfact=_scale_factor, yfact=_scale_factor, origin=(0, 0)) for g in _pg]
+                        if _detected_uf != uf:
+                            warnings.append(f"📐 Panel profile units resolved via parser: detected_uf={_detected_uf}, input_uf={uf}")
                         
                         if not _pg:
                             import re as _re_pan
