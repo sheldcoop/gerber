@@ -460,5 +460,64 @@ def render_sidebar():
                     key='color_mode_select',
                 )
 
+                st.divider()
+
+                # ---- Verification Severity Map ----
+                st.markdown("**⚠️ Verification Severity Map**")
+                st.caption(
+                    "Assign a severity level to each verification code in your AOI data. "
+                    "Used by Fault Site Fingerprint and Defect Risk Breakdown."
+                )
+
+                _SEV_OPTIONS   = ['Critical', 'High', 'Medium', 'Low']
+                _SEV_INT_MAP   = {'Critical': 3, 'High': 2, 'Medium': 1, 'Low': 0}
+                _SEV_DEFAULTS  = {
+                    # Common Orbotech codes — user can override
+                    'SH': 'Critical', 'SHORT': 'Critical',
+                    'OP': 'Critical', 'OPEN': 'Critical',
+                    'MS': 'Critical', 'MISSING': 'Critical',
+                    'BR': 'Critical', 'BRIDGE': 'Critical',
+                    'EX': 'High',     'EXCESS': 'High',
+                    'PH': 'High',     'PINHOLE': 'High',
+                    'NK': 'Medium',   'NICK': 'Medium',
+                    'SC': 'Low',      'SCRATCH': 'Low',
+                }
+
+                _aoi_ds = st.session_state.get('aoi_dataset')
+                if _aoi_ds and _aoi_ds.has_data and 'VERIFICATION' in _aoi_ds.all_defects.columns:
+                    _all_vcodes = sorted(
+                        v for v in _aoi_ds.all_defects['VERIFICATION'].dropna().unique()
+                        if str(v).strip() not in ('', 'NAN', 'NONE', 'N')
+                    )
+                else:
+                    _all_vcodes = []
+
+                if not _all_vcodes:
+                    st.caption("_(No verification codes found — load AOI data first)_")
+                else:
+                    # Load existing map from session state or seed with defaults
+                    _existing_map = st.session_state.get('verif_severity_map', {})
+                    _verif_map_out = {}
+                    for _vc in _all_vcodes:
+                        _vc_upper = str(_vc).upper()
+                        # Priority: previously saved → built-in default → Medium
+                        _saved = _existing_map.get(_vc_upper)
+                        _default_label = (
+                            _saved if _saved in _SEV_OPTIONS
+                            else _SEV_DEFAULTS.get(_vc_upper, 'Medium')
+                        )
+                        _chosen = st.selectbox(
+                            f"`{_vc}`",
+                            options=_SEV_OPTIONS,
+                            index=_SEV_OPTIONS.index(_default_label),
+                            key=f"vsev_{_vc_upper}",
+                        )
+                        _verif_map_out[_vc_upper] = _chosen
+
+                    # Persist as {code: int} for use by fingerprint + app.py
+                    st.session_state['verif_severity_map'] = {
+                        k: _SEV_INT_MAP[v] for k, v in _verif_map_out.items()
+                    }
+
             # ---- Background Source ----
             st.session_state['bg_source'] = 'CAM (Gerbonara)'

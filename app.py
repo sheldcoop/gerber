@@ -225,17 +225,22 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     if aoi and aoi.has_data:
         with st.expander("⚠️ Defect Risk Breakdown", expanded=False):
             import plotly.graph_objects as _go_ds
-            from scoring import classify_severity
+            from scoring import classify_severity_by_verification
 
             _ds_df = aoi.all_defects.copy()
+            _vsmap = st.session_state.get('verif_severity_map', {})
 
-            # Classify every defect
+            # Classify every defect — verification map wins over keyword heuristic
             _SEV_LABEL_DS = {3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low'}
             _SEV_COLOR_DS = {'Critical': '#FF3B3B', 'High': '#FF9900', 'Medium': '#FFD700', 'Low': '#66BB6A'}
             _SEV_ORDER    = ['Critical', 'High', 'Medium', 'Low']
-            _ds_df['_sev'] = _ds_df['DEFECT_TYPE'].apply(
-                lambda t: _SEV_LABEL_DS[classify_severity(t)]
-            )
+
+            def _classify_row(row):
+                vcode = str(row.get('VERIFICATION', '—')) if 'VERIFICATION' in row.index else '—'
+                dtype = str(row.get('DEFECT_TYPE', '')) if 'DEFECT_TYPE' in row.index else ''
+                return _SEV_LABEL_DS[classify_severity_by_verification(vcode, dtype, _vsmap)]
+
+            _ds_df['_sev'] = _ds_df.apply(_classify_row, axis=1)
 
             # ── Top metrics ──────────────────────────────────────────────
             _total   = len(_ds_df)

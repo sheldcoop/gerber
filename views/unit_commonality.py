@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from alignment import calculate_geometry, INTER_UNIT_GAP
 from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
 from core.data_utils import compute_cm_geometry, filter_aoi_cm
-from scoring import classify_severity
+from scoring import classify_severity, classify_severity_by_verification
 
 
 @st.cache_data(max_entries=64, ttl=3600, show_spinner=False)
@@ -28,18 +28,22 @@ def _compute_pad_fingerprint(
     ax_tuple: tuple,
     ay_tuple: tuple,
     defect_types: tuple,
-    unit_keys: tuple,       # (row, col) per defect — as flat tuple of 2-tuples
-    buildup_vals: tuple,    # BUILDUP per defect, or empty tuple
+    unit_keys: tuple,
+    buildup_vals: tuple,
+    verification_vals: tuple = (),
+    verif_severity_map: tuple = (),   # tuple of (code, int) pairs — hashable for cache
     snap_mm: float = 0.5,
 ) -> pd.DataFrame:
     """
-    Group aligned defects by pad location (snapped to snap_mm grid) and compute:
-      - unit_count  : how many UNIQUE units contributed a defect at this location
-      - unit_pct    : unit_count / total_unique_units  (0-1)
-      - severity    : worst classify_severity() among defect types at this location
-      - top_type    : most frequent defect type
-      - buildup_list: sorted unique buildup values (empty string if not available)
-      - cx, cy      : snap-grid centre coordinates (mm)
+    Group aligned defects by fault site (snapped to snap_mm grid) and compute:
+      - unit_count      : how many UNIQUE units contributed a defect at this location
+      - unit_pct        : unit_count / total_unique_units  (0-1)
+      - severity        : worst classify_severity() among defect types at this location
+      - top_type        : most frequent defect type
+      - top_verif       : most frequent verification code (e.g. CU22, SH, OP)
+      - all_verif       : all unique verification codes at this site
+      - buildup_list    : sorted unique buildup values
+      - cx, cy          : snap-grid centre coordinates (mm)
 
     Returns a DataFrame sorted by (severity DESC, unit_count DESC).
     """
@@ -51,6 +55,9 @@ def _compute_pad_fingerprint(
     ax = _np.array(ax_tuple)
     ay = _np.array(ay_tuple)
 
+    # Convert verif_severity_map tuple back to dict
+    _vsmap = dict(verif_severity_map) if verif_severity_map else {}
+
     # Snap to grid
     snap_x = _np.round(ax / snap_mm).astype(int)
     snap_y = _np.round(ay / snap_mm).astype(int)
@@ -58,8 +65,7 @@ def _compute_pad_fingerprint(
     total_units = len(set(unit_keys))
 
     rows = []
-    # Group by snapped cell
-    from collections import defaultdict
+    from collections import defaultdict, Counter
     buckets: dict = defaultdict(list)
     for i in range(len(ax)):
         key = (int(snap_x[i]), int(snap_y[i]))
@@ -68,16 +74,38 @@ def _compute_pad_fingerprint(
     for (sx, sy), indices in buckets.items():
         cx = sx * snap_mm
         cy = sy * snap_mm
-        types_here = [defect_types[i] for i in indices]
-        units_here = set(unit_keys[i] for i in indices)
-        sev_here = max(classify_severity(t) for t in types_here)
-        from collections import Counter
+        types_here  = [defect_types[i] for i in indices]
+        units_here  = set(unit_keys[i] for i in indices)
+
+        # Verification
+        if verification_vals:
+            verif_here = [str(verification_vals[i]) for i in indices
+                          if verification_vals[i] is not None]
+            top_v = Counter(verif_here).most_common(1)[0][0] if verif_here else '—'
+            all_v = ', '.join(sorted(set(verif_here))) if verif_here else '—'
+        else:
+            verif_here = []
+            top_v = '—'
+            all_v = '—'
+
+        # Severity — user map via verification code wins over keyword heuristic
+        sev_here = max(
+            classify_severity_by_verification(
+                verif_here[i] if i < len(verif_here) else '—',
+                types_here[i],
+                _vsmap,
+            )
+            for i in range(len(types_here))
+        )
+
         top_t = Counter(types_here).most_common(1)[0][0]
+
         if buildup_vals:
             bu_set = sorted(set(str(buildup_vals[i]) for i in indices if buildup_vals[i] is not None))
             bu_str = ', '.join(bu_set)
         else:
             bu_str = '—'
+
         rows.append({
             'cx': round(cx, 3),
             'cy': round(cy, 3),
@@ -85,6 +113,8 @@ def _compute_pad_fingerprint(
             'unit_pct': round(len(units_here) / max(total_units, 1) * 100, 1),
             'severity': sev_here,
             'severity_label': _SEV_LABEL[sev_here],
+            'top_verif': top_v,
+            'all_verif': all_v,
             'top_type': top_t,
             'buildup': bu_str,
             'defect_count': len(indices),
@@ -448,13 +478,14 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
 
                 # ── Fingerprint mode toggle ───────────────────────────────
                 _fp_mode = st.toggle(
-                    "🔬 Pad Fingerprint Mode",
+                    "🔬 Fault Site Fingerprint Mode",
                     value=False,
                     key="cm_fingerprint_toggle",
                     help=(
-                        "Replace raw dots with pad-level recurrence markers. "
-                        "Size = how many units hit this pad. "
-                        "Colour = worst defect severity (red=Critical, orange=High, yellow=Medium, green=Low)."
+                        "Replace raw dots with one marker per recurring fault site. "
+                        "Size = how many units were hit. "
+                        "Colour = worst defect severity (red=Critical, orange=High, yellow=Medium, green=Low). "
+                        "Hover to see the top verification code (e.g. CU22, SH, OP)."
                     ),
                 )
 
@@ -470,6 +501,14 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     if 'BUILDUP' in _cm_plot.columns
                     else []
                 )
+                _fp_verif = tuple(
+                    _cm_plot['VERIFICATION'].tolist()
+                    if 'VERIFICATION' in _cm_plot.columns
+                    else []
+                )
+                _fp_vsmap = tuple(
+                    st.session_state.get('verif_severity_map', {}).items()
+                )
                 _fp_df = _compute_pad_fingerprint(
                     ax_tuple=tuple(_cm_plot['ALIGNED_X'].tolist()),
                     ay_tuple=tuple(_cm_plot['ALIGNED_Y'].tolist()),
@@ -480,6 +519,8 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     ),
                     unit_keys=_fp_unit_keys,
                     buildup_vals=_fp_bu,
+                    verification_vals=_fp_verif,
+                    verif_severity_map=_fp_vsmap,
                 )
 
                 if _fp_mode and not _fp_df.empty:
@@ -503,12 +544,14 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                                 opacity=0.82,
                                 line=dict(color='rgba(0,0,0,0.4)', width=0.8),
                             ),
-                            customdata=_sev_rows[['unit_count', 'unit_pct', 'top_type', 'buildup', 'defect_count']].values,
+                            customdata=_sev_rows[['unit_count', 'unit_pct', 'top_verif', 'all_verif', 'top_type', 'buildup', 'defect_count']].values,
                             hovertemplate=(
-                                "<b>%{customdata[2]}</b><br>"
+                                "<b>Verification: %{customdata[2]}</b><br>"
+                                "All codes at this site: %{customdata[3]}<br>"
+                                "Defect type: %{customdata[4]}<br>"
                                 "Units hit: <b>%{customdata[0]}</b> (%{customdata[1]}%)<br>"
-                                "Total defects at pad: %{customdata[4]}<br>"
-                                "Buildup: %{customdata[3]}<br>"
+                                "Total defects at site: %{customdata[6]}<br>"
+                                "Buildup: %{customdata[5]}<br>"
                                 "X: %{x:.2f} mm  Y: %{y:.2f} mm"
                                 "<extra></extra>"
                             ),
@@ -700,39 +743,39 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 if not _fp_df.empty:
                     _systemic_pads = int((_fp_df['unit_pct'] >= 50.0).sum())
                     _worst_row     = _fp_df.iloc[0]  # already sorted by severity DESC, unit_count DESC
-                    _worst_hit     = f"{_worst_row['unit_pct']:.0f}% — {_worst_row['top_type']}"
+                    _worst_hit     = f"{_worst_row['unit_pct']:.0f}% — {_worst_row['top_verif']}"
                     _crit_sys      = int(((_fp_df['severity'] == 3) & (_fp_df['unit_pct'] >= 50.0)).sum())
 
                     _cm_s1.metric(
-                        "Systemic Pads (≥ 50 % units)",
+                        "Systemic Fault Sites (≥ 50 % units)",
                         _systemic_pads,
-                        help="Pad locations where ≥ 50 % of selected units had a defect. These are process faults, not random.",
+                        help="Fault sites where ≥ 50 % of selected units had a defect. These are process faults, not random.",
                     )
                     _cm_s2.metric(
-                        "Worst Pad Hit Rate",
+                        "Worst Site Hit Rate",
                         _worst_hit,
-                        help="The pad location with the highest unit hit % and the defect type driving it.",
+                        help="The fault site with the highest unit hit % and the top verification code driving it.",
                     )
                     _cm_s3.metric(
                         "Critical + Systemic",
                         _crit_sys,
-                        delta=f"of {len(_fp_df)} total pad locations",
+                        delta=f"of {len(_fp_df)} total fault sites",
                         delta_color="inverse",
-                        help="Critical-severity pads also failing on ≥ 50 % of units — the highest-priority items to fix.",
+                        help="Critical-severity fault sites also failing on ≥ 50 % of units — the highest-priority items to fix.",
                     )
                 else:
                     _cm_s1.metric("Units Selected", len(_cm_sel_units))
                     _cm_s2.metric("Defects Shown",  len(_cm_plot))
                     _cm_s3.metric("Avg / Unit",     f"{len(_cm_plot)/len(_cm_sel_units):.1f}")
 
-                # ── Pad Fingerprint Table ─────────────────────────────────
+                # ── Fault Site Fingerprint Table ──────────────────────────
                 if not _fp_df.empty:
                     st.divider()
-                    st.markdown("#### 🔬 Pad Recurrence Fingerprint")
+                    st.markdown("#### 🔬 Fault Site Recurrence Fingerprint")
                     st.caption(
-                        "Each row is a distinct pad location (defects snapped to 0.5 mm grid). "
+                        "Each row is a distinct fault site (defects snapped to 0.5 mm grid). "
                         "**Unit hit %** = how many of the selected units had a defect here. "
-                        "A pad at 100 % is a **systemic process fault** — it fails on every unit, every time."
+                        "A site at 100 % is a **systemic process fault** — it fails on every unit, every time."
                     )
 
                     # Systemic threshold warning
@@ -741,12 +784,12 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         _fp_crit_sys = _fp_systemic[_fp_systemic['severity'] == 3]
                         if not _fp_crit_sys.empty:
                             st.error(
-                                f"🚨 **{len(_fp_crit_sys)} Critical pad location(s) are failing on ≥ 80 % of units.** "
+                                f"🚨 **{len(_fp_crit_sys)} Critical fault site(s) are failing on ≥ 80 % of units.** "
                                 "This is a systemic process fault — not random defects."
                             )
                         else:
                             st.warning(
-                                f"⚠️ **{len(_fp_systemic)} pad location(s) are failing on ≥ 80 % of units.**"
+                                f"⚠️ **{len(_fp_systemic)} fault site(s) are failing on ≥ 80 % of units.**"
                             )
 
                     _fp_display = _fp_df.copy()
@@ -757,6 +800,8 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         'unit_count': 'Units Hit',
                         'unit_pct': 'Hit %',
                         'severity_label': 'Severity',
+                        'top_verif': 'Top Verification',
+                        'all_verif': 'All Verif. Codes',
                         'top_type': 'Top Defect Type',
                         'buildup': 'Buildup(s)',
                         'defect_count': 'Total Defects',
