@@ -221,77 +221,115 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     elif view_mode == "📊 Panelization Data":
         render_panelization_data(parsed, aoi, align_args)
 
-    # ---- Defect Summary Panel ----
+    # ---- Defect Risk Breakdown ----
     if aoi and aoi.has_data:
-        with st.expander("📊 Defect Summary", expanded=False):
-            import plotly.express as _px
+        with st.expander("⚠️ Defect Risk Breakdown", expanded=False):
+            import plotly.graph_objects as _go_ds
+            from scoring import classify_severity
 
-            _ds_df = aoi.all_defects
-            _sc1, _sc2, _sc3 = st.columns(3)
-            _sc1.metric("Total Defects", f"{len(_ds_df):,}")
-            _sc2.metric("Defect Types", len(aoi.defect_types))
-            _sc3.metric("Buildup Layers", len(aoi.buildup_numbers))
+            _ds_df = aoi.all_defects.copy()
+
+            # Classify every defect
+            _SEV_LABEL_DS = {3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low'}
+            _SEV_COLOR_DS = {'Critical': '#FF3B3B', 'High': '#FF9900', 'Medium': '#FFD700', 'Low': '#66BB6A'}
+            _SEV_ORDER    = ['Critical', 'High', 'Medium', 'Low']
+            _ds_df['_sev'] = _ds_df['DEFECT_TYPE'].apply(
+                lambda t: _SEV_LABEL_DS[classify_severity(t)]
+            )
+
+            # ── Top metrics ──────────────────────────────────────────────
+            _total   = len(_ds_df)
+            _n_crit  = int((_ds_df['_sev'] == 'Critical').sum())
+            _n_high  = int((_ds_df['_sev'] == 'High').sum())
+            _pct_risk = round((_n_crit + _n_high) / max(_total, 1) * 100, 1)
+
+            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+            _mc1.metric("Total Defects",    f"{_total:,}")
+            _mc2.metric("Critical",         f"{_n_crit:,}",
+                        delta=f"{_n_crit/_total*100:.1f} %" if _total else "0 %",
+                        delta_color="inverse")
+            _mc3.metric("High",             f"{_n_high:,}",
+                        delta=f"{_n_high/_total*100:.1f} %" if _total else "0 %",
+                        delta_color="inverse")
+            _mc4.metric("Critical + High",  f"{_pct_risk} % of all defects",
+                        help="The share of defects that are yield-impacting (shorts, opens, missing pads, bridges).")
             st.divider()
 
-            _dc1, _dc2 = st.columns(2)
+            _dsc1, _dsc2 = st.columns(2)
 
-            # Bar: defect count by type
-            with _dc1:
-                _by_type = (
-                    _ds_df.groupby('DEFECT_TYPE', observed=True)
-                    .size().reset_index(name='Count')
-                    .sort_values('Count', ascending=True)
-                )
-                _bar_fig = _px.bar(
-                    _by_type, x='Count', y='DEFECT_TYPE', orientation='h',
-                    title='Defects by Type',
-                    color='Count', color_continuous_scale='Reds',
-                )
-                _bar_fig.update_layout(
-                    plot_bgcolor='#000000', paper_bgcolor='#000000',
-                    font=dict(color='#cccccc'), showlegend=False,
-                    coloraxis_showscale=False, margin=dict(l=0, r=0, t=36, b=0), height=320,
-                )
-                st.plotly_chart(_bar_fig, width='stretch')
+            # ── Left: Severity × Buildup stacked bar ─────────────────────
+            with _dsc1:
+                if 'BUILDUP' in _ds_df.columns:
+                    _sev_bu = (
+                        _ds_df.groupby(['BUILDUP', '_sev'], observed=True)
+                        .size().reset_index(name='Count')
+                    )
+                    _sev_bu_fig = _go_ds.Figure()
+                    for _sv in _SEV_ORDER:
+                        _sv_rows = _sev_bu[_sev_bu['_sev'] == _sv]
+                        if _sv_rows.empty:
+                            continue
+                        _sev_bu_fig.add_trace(_go_ds.Bar(
+                            x=_sv_rows['BUILDUP'].astype(str),
+                            y=_sv_rows['Count'],
+                            name=_sv,
+                            marker_color=_SEV_COLOR_DS[_sv],
+                        ))
+                    _sev_bu_fig.update_layout(
+                        barmode='stack',
+                        title='Severity by Buildup Layer',
+                        plot_bgcolor='#000000', paper_bgcolor='#000000',
+                        font=dict(color='#cccccc'),
+                        legend=dict(orientation='h', y=-0.2),
+                        xaxis_title='Buildup', yaxis_title='Defect Count',
+                        margin=dict(l=0, r=0, t=36, b=0), height=320,
+                    )
+                    st.plotly_chart(_sev_bu_fig, width='stretch')
+                else:
+                    st.info("No BUILDUP column in AOI data.")
 
-            # Donut: front vs back
-            with _dc2:
-                _by_side = _ds_df.groupby('SIDE', observed=True).size().reset_index(name='Count')
-                _donut_fig = _px.pie(
-                    _by_side, values='Count', names='SIDE',
-                    title='Front vs Back', hole=0.55,
-                    color_discrete_sequence=['#00c87a', '#e05050'],
-                )
-                _donut_fig.update_layout(
-                    plot_bgcolor='#000000', paper_bgcolor='#000000',
-                    font=dict(color='#cccccc'), margin=dict(l=0, r=0, t=36, b=0), height=320,
-                )
-                st.plotly_chart(_donut_fig, width='stretch')
+            # ── Right: Severity × Side stacked bar ───────────────────────
+            with _dsc2:
+                if 'SIDE' in _ds_df.columns:
+                    _sev_side = (
+                        _ds_df.groupby(['SIDE', '_sev'], observed=True)
+                        .size().reset_index(name='Count')
+                    )
+                    _sev_side_fig = _go_ds.Figure()
+                    for _sv in _SEV_ORDER:
+                        _sv_rows = _sev_side[_sev_side['_sev'] == _sv]
+                        if _sv_rows.empty:
+                            continue
+                        _sev_side_fig.add_trace(_go_ds.Bar(
+                            x=_sv_rows['SIDE'],
+                            y=_sv_rows['Count'],
+                            name=_sv,
+                            marker_color=_SEV_COLOR_DS[_sv],
+                            showlegend=False,
+                        ))
+                    _sev_side_fig.update_layout(
+                        barmode='stack',
+                        title='Severity by Side (Front / Back)',
+                        plot_bgcolor='#000000', paper_bgcolor='#000000',
+                        font=dict(color='#cccccc'),
+                        xaxis_title='Side', yaxis_title='Defect Count',
+                        margin=dict(l=0, r=0, t=36, b=0), height=320,
+                    )
+                    st.plotly_chart(_sev_side_fig, width='stretch')
+                else:
+                    st.info("No SIDE column in AOI data.")
 
-            # Bar: defects per buildup layer
-            _by_bu = (
-                _ds_df.groupby(['BUILDUP', 'SIDE'], observed=True)
-                .size().reset_index(name='Count')
-                .sort_values('BUILDUP')
-            )
-            _bu_fig = _px.bar(
-                _by_bu, x='BUILDUP', y='Count', color='SIDE',
-                barmode='group', title='Defects per Buildup Layer',
-                color_discrete_map={'Front': '#00c87a', 'Back': '#e05050'},
-            )
-            _bu_fig.update_layout(
-                plot_bgcolor='#000000', paper_bgcolor='#000000',
-                font=dict(color='#cccccc'), margin=dict(l=0, r=0, t=36, b=0), height=280,
-            )
-            st.plotly_chart(_bu_fig, width='stretch')
-
-            # Cross-table: type × buildup
-            _cross = (
-                _ds_df.groupby(['DEFECT_TYPE', 'BUILDUP'], observed=True)
-                .size().unstack(fill_value=0)
-            )
-            st.caption("**Cross-table: Defect Type × Buildup**")
-            st.dataframe(_cross, width='stretch')
+            # ── Severity × Defect Type cross-table (Critical/High only) ──
+            _risk_only = _ds_df[_ds_df['_sev'].isin(['Critical', 'High'])]
+            if not _risk_only.empty:
+                st.caption("**Critical & High defects only — by type and buildup**")
+                _risk_cross = (
+                    _risk_only.groupby(['DEFECT_TYPE', 'BUILDUP'], observed=True)
+                    .size().unstack(fill_value=0)
+                )
+                st.dataframe(_risk_cross, use_container_width=True)
+            else:
+                st.success("✅ No Critical or High severity defects found.")
 
 else:
     # Landing page
