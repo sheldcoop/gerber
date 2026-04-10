@@ -16,28 +16,6 @@ def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
     return tuple(ax.tolist()), tuple(ay.tolist())
 
 
-@st.cache_data(max_entries=16, ttl=3600, show_spinner=False)
-def _compute_hotspot(ax, ay, cell_w, cell_h):
-    """Run KDE and return (cx, cy, radius) of the density peak, or None. Tuples for caching."""
-    try:
-        from sklearn.neighbors import KernelDensity
-        import numpy as _np
-        xy = _np.column_stack([list(ax), list(ay)])
-        if len(xy) < 5:
-            return None
-        kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
-        kde.fit(xy)
-        nx, ny = 40, 40
-        gxv = _np.linspace(0, cell_w, nx)
-        gyv = _np.linspace(0, cell_h, ny)
-        gxx, gyy = _np.meshgrid(gxv, gyv)
-        dens = _np.exp(kde.score_samples(_np.column_stack([gxx.ravel(), gyy.ravel()]))).reshape(ny, nx)
-        peak = _np.unravel_index(dens.argmax(), dens.shape)
-        return float(gxv[peak[1]]), float(gyv[peak[0]]), min(cell_w, cell_h) * 0.06
-    except Exception:
-        return None
-
-
 @st.fragment
 def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
     st.markdown("### 🗺️ Commonality — Defect Superposition")
@@ -505,25 +483,6 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         text=f"Layer: {_active_layer_name}",
                         showarrow=False, xanchor="center", yanchor="bottom",
                         font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
-                        xref="x", yref="y",
-                    )
-
-                _hs = _compute_hotspot(
-                    tuple(_cm_plot['ALIGNED_X'].dropna().values.tolist()),
-                    tuple(_cm_plot['ALIGNED_Y'].dropna().values.tolist()),
-                    _cam_cell_w, _cam_cell_h,
-                )
-                if _hs:
-                    _hs_cx, _hs_cy, _hs_r = _hs
-                    _cm_fig.add_shape(type="circle",
-                        x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
-                        x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
-                        line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
-                        fillcolor="rgba(255,80,80,0.08)", layer="above")
-                    _cm_fig.add_annotation(
-                        x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
-                        text="hotspot", showarrow=False,
-                        font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
                         xref="x", yref="y",
                     )
 
