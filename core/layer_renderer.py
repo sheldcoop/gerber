@@ -3,6 +3,9 @@ core/layer_renderer.py — Parse a single ODB++ layer into a Gerbonara GerberFil
 """
 
 import os
+import math as _math
+
+from shapely.geometry import LineString as _ShapelyLine
 
 from gerbonara import GerberFile
 from gerbonara.graphic_objects import Flash, Line, Region
@@ -18,7 +21,46 @@ from odb_parser import (
     _units_from_text,
     _parse_symbol_table,
     _odb_arc_to_points,
+    _symbol_to_geometry,
 )
+
+
+# Shapes that need exact polygon rendering — Gerbonara aperture approximations
+# lose spokes (thermal), holes (donut), arms (cross), or outline accuracy
+# (diamond, hexagon, octagon, triangle, rounded_rect).  For these we emit
+# Region objects built from the exact Shapely geometry instead of Flash.
+_COMPLEX_SHAPES = frozenset({
+    'thermal', 'cross', 'donut', 'diamond',
+    'hexagon', 'octagon', 'triangle', 'rounded_rect',
+})
+
+
+def _geom_to_regions(geom, is_dark: bool) -> list:
+    """Convert a Shapely geometry into a list of Gerbonara Region objects.
+
+    Handles Polygon (with interior holes), MultiPolygon, and
+    GeometryCollection.  Holes become opposite-polarity regions so Gerbonara
+    subtracts them correctly during SVG/raster rendering.
+    """
+    out = []
+    if geom is None or geom.is_empty:
+        return out
+    if hasattr(geom, 'geoms'):
+        for g in geom.geoms:
+            out.extend(_geom_to_regions(g, is_dark))
+        return out
+    if geom.geom_type != 'Polygon':
+        return out
+    ext = list(geom.exterior.coords)
+    if ext[0] != ext[-1]:
+        ext.append(ext[0])
+    out.append(Region(outline=ext, unit=MM, polarity_dark=is_dark))
+    for interior in geom.interiors:
+        hole = list(interior.coords)
+        if hole[0] != hole[-1]:
+            hole.append(hole[0])
+        out.append(Region(outline=hole, unit=MM, polarity_dark=not is_dark))
+    return out
 
 
 def _make_aperture(sym: _ODBSymbol):
@@ -35,6 +77,17 @@ def _make_aperture(sym: _ODBSymbol):
         return CircleAperture(diameter=sym.size_x * 0.707, unit=MM)
     elif sym.shape == 'donut':
         return CircleAperture(diameter=sym.size_x, unit=MM)
+    elif sym.shape == 'rounded_rect':
+        return RectangleAperture(w=sym.size_x, h=sym.size_y, unit=MM)
+    elif sym.shape == 'ellipse':
+        return ObroundAperture(w=sym.size_x, h=sym.size_y, unit=MM)
+    elif sym.shape == 'thermal':
+        return CircleAperture(diameter=sym.size_x, unit=MM)
+    elif sym.shape == 'cross':
+        d = min(sym.size_x, sym.size_y) or max(sym.size_x, sym.size_y)
+        return RectangleAperture(w=d, h=d, unit=MM)
+    elif sym.shape in ('octagon', 'hexagon', 'triangle'):
+        return CircleAperture(diameter=sym.size_x * 0.866, unit=MM)
     else:
         d = max(sym.size_x, sym.size_y)
         if d <= 0:
@@ -42,14 +95,49 @@ def _make_aperture(sym: _ODBSymbol):
         return CircleAperture(diameter=d, unit=MM)
 
 
+def _find_features_text(job_root: str, step_name: str, layer_name: str):
+    """
+    Locate and read the features file for `layer_name`, trying `step_name`
+    first, then falling back to every other step under steps/ in alphabetical
+    order.  Returns (text, resolved_step) or (None, None).
+
+    ODB++ allows features to live at any level of the step-repeat hierarchy.
+    For example the 2f routing layer may only have features at the 'cluster'
+    step while the leaf 'unit' step has an empty directory.  Without this
+    fallback those layers silently render as empty.
+    """
+    steps_dir = os.path.join(job_root, 'steps')
+
+    def _try(sname):
+        base = os.path.join(steps_dir, sname, 'layers', layer_name, 'features')
+        t = _read_features_text(base)
+        if t is None:
+            t = _read_features_text(base + '.Z')
+        return t
+
+    text = _try(step_name)
+    if text is not None:
+        return text, step_name
+
+    try:
+        other = sorted(
+            e for e in os.listdir(steps_dir)
+            if os.path.isdir(os.path.join(steps_dir, e)) and e != step_name
+        )
+    except OSError:
+        other = []
+
+    for sname in other:
+        text = _try(sname)
+        if text is not None:
+            return text, sname
+
+    return None, None
+
+
 def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map):
     """Parse a single ODB++ layer into a GerberFile with proper CAM objects."""
-    layers_dir = os.path.join(job_root, 'steps', step_name, 'layers')
-    features_path = os.path.join(layers_dir, layer_name, 'features')
-
-    text = _read_features_text(features_path)
-    if text is None:
-        text = _read_features_text(features_path + '.Z')
+    text, _resolved_step = _find_features_text(job_root, step_name, layer_name)
     if text is None:
         return None, {}
 
@@ -57,10 +145,29 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
     layer_uf = (25.4 if file_units == 'inch' else 1.0) if file_units else uf
     sym_scale = _detect_symbol_scale(text, layer_uf)
 
-    # InCAM Pro quirk: sym_scale ≈ 0.0254 means symbols in mils, coords in inches
+    # InCAM Pro quirk: sym_scale ≈ 0.0254 means symbols are in mils, but coords
+    # may already be in mm (unit-level files) or still in inches (cluster-level).
+    # Peek at raw coordinate magnitudes to distinguish the two cases:
+    #   raw_max < 15  → coords are in inches → scale up by 25.4 AND fix sym_scale
+    #   raw_max ≥ 15  → coords already in mm → keep layer_uf=1.0, sym_scale=0.0254
     if abs(sym_scale - 0.0254) < 0.001 and layer_uf == 1.0:
-        layer_uf = 25.4
-        sym_scale = 0.001
+        _raw_max = 0.0
+        _n = 0
+        for _l in text.splitlines():
+            if _l.startswith('L ') or _l.startswith('P '):
+                try:
+                    _p = _l.split()
+                    _raw_max = max(_raw_max, abs(float(_p[1])), abs(float(_p[2])))
+                except (IndexError, ValueError):
+                    pass
+                _n += 1
+                if _n >= 30:
+                    break
+        if 0 < _raw_max < 15.0:
+            # Coordinates are inches — convert to mm and reset sym_scale
+            layer_uf = 25.4
+            sym_scale = 0.001
+        # else: coordinates already in mm — sym_scale = 0.0254 is correct as-is
 
     lines = text.splitlines()
     symbols = _parse_symbol_table(lines)
@@ -76,36 +183,46 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
             sym.size_x *= combined_sym_scale
             sym.size_y *= combined_sym_scale
 
-    # Build aperture cache
+    # Build aperture cache keyed by (sym_idx, rot_key).
+    # rot_key=0 → 0°/180° orientation; rot_key=1 → 90°/270° (swaps W and H for rect/oval).
+    # Pre-building both variants eliminates per-flash object allocation in the hot path.
     aperture_cache = {}
     for idx, sym in symbols.items():
-        if sym.shape not in ('unknown', 'skip'):
-            aperture_cache[idx] = _make_aperture(sym)
+        if sym.shape in ('unknown', 'skip'):
+            continue
+        ap0 = _make_aperture(sym)
+        aperture_cache[(idx, 0)] = ap0
+        if sym.shape in ('rect', 'rounded_rect', 'oval'):
+            ap1 = (ObroundAperture(w=sym.size_y, h=sym.size_x, unit=MM)
+                   if sym.shape == 'oval'
+                   else RectangleAperture(w=sym.size_y, h=sym.size_x, unit=MM))
+        else:
+            ap1 = ap0  # rotation doesn't change circular/other shapes
+        aperture_cache[(idx, 1)] = ap1
 
     gf = GerberFile()
     stats = {'flash': 0, 'line': 0, 'region': 0, 'clear': 0, 'skip': 0}
 
-    # Skip header lines
-    feature_start = 0
-    for idx, line in enumerate(lines):
-        s = line.strip()
-        if s and not s.startswith('$') and not s.startswith('#') \
-                and not s.startswith(';') and not s.startswith('@') \
-                and not s.startswith('&') \
-                and not s.upper().startswith('UNITS') \
-                and not s.upper().startswith('ID='):
-            feature_start = idx
-            break
+    # Pre-filter: build a cleaned list of feature lines in one pass.
+    # Skips empty lines, comment/header prefixes, and inline comments — eliminates
+    # redundant per-iteration str.strip() and prefix checks in the hot path.
+    _SKIP_STARTS = ('$', '#', ';', '@', '&')
+    _SKIP_UPPER = ('UNITS', 'ID=')
+    feature_lines = []
+    for raw_line in lines:
+        s = raw_line.strip()
+        if not s or s[0] in _SKIP_STARTS:
+            continue
+        if s.upper().startswith(_SKIP_UPPER):
+            continue
+        cleaned = s.partition(';')[0].rstrip()
+        if cleaned:
+            feature_lines.append(cleaned)
 
-    i = feature_start
-    while i < len(lines):
-        raw = lines[i].strip()
+    i = 0
+    while i < len(feature_lines):
+        line_clean = feature_lines[i]
         i += 1
-        if not raw or raw.startswith('#') or raw.startswith(';'):
-            continue
-        line_clean = raw.split(';')[0].strip()
-        if not line_clean:
-            continue
         parts = line_clean.split()
         rt = parts[0].upper()
 
@@ -126,22 +243,29 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                 if rt == 'H':
                     polarity = 'P'
 
-                ap = aperture_cache.get(sym_idx)
+                is_dark = (polarity != 'N')
+                sym = symbols.get(sym_idx)
+
+                # Complex shapes: emit exact polygon region (preserves thermal spokes,
+                # donut holes, cross arms, diamond/hexagon/octagon/triangle outline, etc.)
+                if sym is not None and sym.shape in _COMPLEX_SHAPES:
+                    geom = _symbol_to_geometry(x, y, sym, rot)
+                    if geom is not None:
+                        gf.objects.extend(_geom_to_regions(geom, is_dark))
+                        stats['flash' if is_dark else 'clear'] += 1
+                    else:
+                        stats['skip'] += 1
+                    continue
+
+                # Simple shapes: use Flash with Gerbonara aperture (fast path)
+                rot_key = 0
+                if abs(rot) > 0.01 and abs(rot % 90) < 0.1:
+                    rot_key = int(round(rot / 90)) % 2  # 0=0°/180°, 1=90°/270°
+                ap = aperture_cache.get((sym_idx, rot_key))
                 if ap is None:
                     stats['skip'] += 1
                     continue
 
-                sym = symbols.get(sym_idx)
-                if sym and abs(rot) > 0.01 and sym.shape in ('rect', 'oval'):
-                    if abs(rot % 90) < 0.1:
-                        turns = int(round(rot / 90)) % 4
-                        if turns in (1, 3):
-                            if sym.shape == 'rect':
-                                ap = RectangleAperture(w=sym.size_y, h=sym.size_x, unit=MM)
-                            else:
-                                ap = ObroundAperture(w=sym.size_y, h=sym.size_x, unit=MM)
-
-                is_dark = (polarity != 'N')
                 gf.objects.append(Flash(x=x, y=y, aperture=ap, unit=MM, polarity_dark=is_dark))
                 stats['flash' if is_dark else 'clear'] += 1
 
@@ -157,7 +281,9 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                 if sym is None:
                     stats['skip'] += 1
                     continue
-                trace_ap = CircleAperture(diameter=sym.size_x, unit=MM)
+                # Oval brush: minor axis is the trace width, not the major axis
+                trace_width = min(sym.size_x, sym.size_y) if sym.shape == 'oval' else sym.size_x
+                trace_ap = CircleAperture(diameter=trace_width, unit=MM)
 
                 is_dark = (polarity != 'N')
                 if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
@@ -167,11 +293,46 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                                           aperture=trace_ap, unit=MM, polarity_dark=is_dark))
                 stats['line' if is_dark else 'clear'] += 1
 
+            elif rt == 'A':
+                # Standalone arc trace: A xs ys xe ye xc yc sym_idx polarity [mirror] [cw]
+                x1   = float(parts[1]) * layer_uf
+                y1   = float(parts[2]) * layer_uf
+                x2   = float(parts[3]) * layer_uf
+                y2   = float(parts[4]) * layer_uf
+                xc_a = float(parts[5]) * layer_uf
+                yc_a = float(parts[6]) * layer_uf
+                sym_idx  = int(parts[7])
+                polarity = parts[8].split(';')[0].strip().upper() if len(parts) > 8 else 'P'
+                cw_a = False
+                if len(parts) > 10:
+                    d_a = parts[10].split(';')[0].strip().upper()
+                    cw_a = d_a in ('Y', 'CW', '1')
+
+                sym = symbols.get(sym_idx)
+                if sym is None or sym.size_x <= 0:
+                    stats['skip'] += 1
+                    continue
+
+                r_a = _math.sqrt((x1 - xc_a)**2 + (y1 - yc_a)**2)
+                arc_pts_a = _odb_arc_to_points(x1, y1, x2, y2, xc_a, yc_a,
+                                               cw=cw_a, radius=r_a)
+                all_pts_a = [(x1, y1)] + arc_pts_a
+                is_dark = (polarity != 'N')
+                if len(all_pts_a) >= 2:
+                    cap = 1 if sym.shape == 'round' else 2
+                    arc_poly = _ShapelyLine(all_pts_a).buffer(
+                        sym.size_x / 2.0, cap_style=cap, resolution=8
+                    )
+                    gf.objects.extend(_geom_to_regions(arc_poly, is_dark))
+                    stats['line' if is_dark else 'clear'] += 1
+                else:
+                    stats['skip'] += 1
+
             elif rt == 'S':
                 spol = parts[1].upper() if len(parts) > 1 else 'P'
                 slines = []
-                while i < len(lines):
-                    sl = lines[i].strip()
+                while i < len(feature_lines):
+                    sl = feature_lines[i]
                     i += 1
                     if sl.upper().startswith('SE'):
                         break
@@ -180,9 +341,6 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                 contours = []
                 current = []
                 for sline in slines:
-                    sline = sline.split(';')[0].strip()
-                    if not sline or sline.startswith('#'):
-                        continue
                     sp = sline.split()
                     if not sp:
                         continue
@@ -200,9 +358,15 @@ def _parse_layer_to_gerbonara(job_root, step_name, layer_name, uf, user_sym_map)
                             y_end = float(sp[2]) * layer_uf
                             xc = float(sp[3]) * layer_uf
                             yc = float(sp[4]) * layer_uf
+                            cw_oc = False
+                            if len(sp) >= 6:
+                                d_oc = sp[5].split(';')[0].strip().upper()
+                                cw_oc = d_oc in ('Y', 'CW', '1')
                             x_start, y_start = current[-1]
+                            r_oc = _math.sqrt((x_start - xc)**2 + (y_start - yc)**2)
                             arc_pts = _odb_arc_to_points(x_start, y_start,
-                                                          x_end, y_end, xc, yc, num_segments=32)
+                                                          x_end, y_end, xc, yc,
+                                                          cw=cw_oc, radius=r_oc)
                             current.extend(arc_pts)
                     elif cmd == 'OE':
                         if len(current) >= 3:

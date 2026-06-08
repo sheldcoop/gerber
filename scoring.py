@@ -44,6 +44,31 @@ def classify_severity(defect_type: str) -> int:
     return 1  # default: medium
 
 
+def classify_severity_by_verification(
+    verif_code: str,
+    defect_type: str,
+    custom_map: dict,          # {verif_code_upper: int 0-3}  — from session_state
+) -> int:
+    """
+    Resolve severity for a defect.
+
+    Priority order:
+      1. User-defined custom_map keyed by verification code  (most trusted)
+      2. Keyword heuristic on defect_type                    (fallback)
+
+    Args:
+        verif_code  : e.g. 'CU22', 'SH', 'OP', '—'
+        defect_type : raw AOI machine defect type string
+        custom_map  : dict built from sidebar UI, keys are upper-cased verif codes
+
+    Returns int 0-3.
+    """
+    key = str(verif_code).strip().upper()
+    if key and key != '—' and key in custom_map:
+        return int(custom_map[key])
+    return classify_severity(defect_type)
+
+
 def score_defect_priority(df: pd.DataFrame) -> pd.Series:
     """Compute priority score for each defect in the DataFrame.
 

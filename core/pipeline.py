@@ -146,7 +146,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             return name, ltype, gf, stats, None
 
         parse_results = []
-        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as executor:
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(selected))) as executor:
             futures = {executor.submit(_process_layer, item): item for item in selected}
             for future in as_completed(futures):
                 parse_results.append(future.result())
@@ -173,7 +173,13 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             stack_color = layer_color_map[name]
-            stack_svg = str(gf.to_svg(fg=stack_color, bg='#060A06'))
+            # Color-swap via bytecode replace (faster for large SVGs)
+            if fg_color != stack_color:
+                svg_bytes = svg_str.encode('utf-8')
+                stack_bytes = svg_bytes.replace(fg_color.encode('utf-8'), stack_color.encode('utf-8'))
+                stack_svg = stack_bytes.decode('utf-8')
+            else:
+                stack_svg = svg_str
             color_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
 
             bb = gf.bounding_box(MM)
@@ -192,7 +198,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 stats=stats,
             ), bounds
 
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(valid_results)))) as executor:
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, max(1, len(valid_results)))) as executor:
             render_futures = {
                 executor.submit(_render_layer, name, ltype, gf, stats): name
                 for name, ltype, gf, stats in valid_results
@@ -252,10 +258,9 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             _dlyr.svg_string = _svg2
             _dlyr.svg_data_url = _svg_to_data_url_fast(_svg2)
             _dlyr.bounds = _bounds2
+            _sc = next(iter(_dlyr.color_svg_urls), _fg)
             _dlyr.color_svg_urls = {
-                next(iter(_dlyr.color_svg_urls), _fg): _svg_to_data_url_fast(
-                    str(_gf.to_svg(fg=next(iter(_dlyr.color_svg_urls), _fg), bg='#060A06'))
-                )
+                _sc: _svg_to_data_url_fast(_svg2.replace(_fg, _sc) if _fg != _sc else _svg2)
             }
 
         # ── Phase 6: compute panel layout from step-repeat + profile ──────
@@ -264,7 +269,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
 
-            # Detect InCAM Pro inches quirk FIRST so uf is correct for profile parsing.
+            # Detect InCAM Pro inches quirk in STEP-REPEAT only.
             # If smallest step-repeat spacing < 5 mm but × 25.4 matches copper extent,
             # coordinates are in inches — re-parse with the correct factor.
             _all_spacings = []
@@ -276,7 +281,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 _min_spacing = min(_all_spacings)
                 if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
                     step_hierarchy = _parse_step_repeat(job_root, 25.4)
-                    uf = 25.4  # profile coordinates are also in inches — update uf
+                    warnings.append("⚠️ STEP-REPEAT inches quirk detected: hierarchy re-parsed with uf=25.4")
 
             # Parse profile layer for accurate unit dimensions.
             try:
@@ -290,7 +295,11 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 else:
                     warnings.append(f"📄 Profile: found at steps/{step_name}/profile ({len(profile_text)} chars), uf={uf}")
                     unknown_symbols_dummy = set()
-                    geoms, widths, warns, _, _ = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    geoms, widths, warns, _, _, _detected_uf = _parse_features_text(profile_text, uf, unknown_symbols_dummy)
+                    if warns:
+                        warnings.extend(f"📄 Profile parse: {w}" for w in warns)
+                    if _detected_uf != uf:
+                        warnings.append(f"📄 Profile units resolved via parser: detected_uf={_detected_uf}, input_uf={uf}")
 
                     if not geoms:
                         import re as _re_prof
@@ -300,9 +309,9 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                             if _pline.startswith(('OB ', 'OS ')):
                                 _pts = _re_prof.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pline)
                                 if len(_pts) >= 2:
-                                    _outline_xs.append(float(_pts[0]) * uf)
-                                    _outline_ys.append(float(_pts[1]) * uf)
-                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={uf}")
+                                    _outline_xs.append(float(_pts[0]) * _detected_uf)
+                                    _outline_ys.append(float(_pts[1]) * _detected_uf)
+                        warnings.append(f"📄 Profile OB/OS fallback: {len(_outline_xs)} points, uf={_detected_uf}")
                         if _outline_xs and _outline_ys:
                             pb = (min(_outline_xs), min(_outline_ys),
                                   max(_outline_xs), max(_outline_ys))
@@ -323,6 +332,26 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             except Exception as e:
                 warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
 
+            # Post-profile inch detection: if profile gave a real mm unit size but
+            # step_hierarchy coords are still in inch scale (max coord < one unit width),
+            # the global uf was wrong — re-parse the hierarchy with uf=25.4.
+            # This catches InCAM Pro jobs where misc/info has no UNITS= declaration
+            # and copper features are also in inches (blocking the pre-profile check).
+            if uf == 1.0 and unit_w > 10.0:
+                _sr_max_abs = 0.0
+                for _sr_list in step_hierarchy.values():
+                    for _sr in _sr_list:
+                        _sr_max_abs = max(_sr_max_abs,
+                                          abs(_sr.x), abs(_sr.y),
+                                          _sr.dx if _sr.dx > 0 else 0.0,
+                                          _sr.dy if _sr.dy > 0 else 0.0)
+                if 0 < _sr_max_abs < unit_w:
+                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+                    warnings.append(
+                        f"⚠️ Step-repeat inch quirk (post-profile): max SR coord {_sr_max_abs:.3f} < "
+                        f"unit_w {unit_w:.2f} mm — re-parsed with uf=25.4"
+                    )
+
             # Derive panel frame dimensions from ODB++ top-level step profile.
             _panel_w, _panel_h = None, None
             try:
@@ -333,7 +362,12 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                     _pp = os.path.join(job_root, 'steps', _top, 'profile')
                     _pt = _read_features_text(_pp) or _read_features_text(_pp + '.Z')
                     if _pt:
-                        _pg, _, _, _, _ = _parse_features_text(_pt, uf, set())
+                        _pg, _, _pwarns, _, _, _detected_uf = _parse_features_text(_pt, uf, set())
+                        if _pwarns:
+                            warnings.extend(f"📐 Panel profile parse: {w}" for w in _pwarns)
+                        if _detected_uf != uf:
+                            warnings.append(f"📐 Panel profile units resolved via parser: detected_uf={_detected_uf}, input_uf={uf}")
+                        
                         if not _pg:
                             import re as _re_pan
                             _pxs, _pys = [], []
@@ -342,8 +376,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                                 if _pl2.startswith(('OB ', 'OS ')):
                                     _pp2 = _re_pan.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', _pl2)
                                     if len(_pp2) >= 2:
-                                        _pxs.append(float(_pp2[0]) * uf)
-                                        _pys.append(float(_pp2[1]) * uf)
+                                        _pxs.append(float(_pp2[0]) * _detected_uf)
+                                        _pys.append(float(_pp2[1]) * _detected_uf)
                             _pb = (min(_pxs), min(_pys), max(_pxs), max(_pys)) if _pxs else None
                         else:
                             _pb = _compute_bounds(_pg)

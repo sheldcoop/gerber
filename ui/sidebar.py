@@ -9,7 +9,8 @@ import streamlit as st
 import pandas as pd
 
 from odb_parser import parse_odb_archive
-from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache
+from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache, clear_render_cache
+from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 
 def handle_bg_render_polling():
@@ -24,14 +25,16 @@ def handle_bg_render_polling():
         if _prog.get('status') == 'done':
             # Render finished — load from cache
             _bg_tgz = st.session_state.pop('_render_tgz_bytes', None)
+            _bg_digest = st.session_state.pop('_render_digest', None)
             _bg_name = st.session_state.pop('_render_filename', '')
             st.session_state.pop('_render_progress_file')
             Path(_prog_path).unlink(missing_ok=True)
-            if _bg_tgz:
-                _bg_rendered = load_render_cache(_bg_tgz)
+            if _bg_tgz or _bg_digest:
+                _bg_rendered = load_render_cache(digest=_bg_digest, tgz_bytes=_bg_tgz)
                 if _bg_rendered:
                     st.session_state['rendered_odb'] = _bg_rendered
                     st.session_state['_tgz_bytes_for_cache'] = _bg_tgz
+                    st.session_state['_tgz_digest'] = _bg_digest
                     _copper_layers = [l for l in _bg_rendered.layers.values() if l.layer_type != 'drill']
                     st.session_state['_panel_svgs_built'] = bool(_copper_layers) and all(
                         l.panel_svg_data_url for l in _copper_layers
@@ -56,6 +59,41 @@ def render_sidebar():
     with st.sidebar:
         st.title("ODB++ + AOI Overlay")
         st.caption("Upload ODB++ archive and AOI defect data for overlay visualization")
+
+        # ---- Cache Management ----
+        from core.cache import get_cache_size
+        _cache_bytes, _cache_size = get_cache_size()
+        
+        _cache_col1, _cache_col2 = st.columns([3, 2])
+        with _cache_col1:
+            if st.button("🗑️ Clear All Cache", use_container_width=True, help="Clear all cached data including renders, computations, and AOI data"):
+                _before_bytes, _before_size = get_cache_size()
+                # Clear Streamlit cache
+                st.cache_data.clear()
+                # Clear disk render cache
+                clear_render_cache()
+                # Clear session state
+                for key in list(st.session_state.keys()):
+                    if key not in ['_aoi_upload_key']:  # Preserve upload widget key
+                        del st.session_state[key]
+                _after_bytes, _after_size = get_cache_size()
+                if _before_bytes > 0:
+                    st.toast(f"✅ Cache cleared: {_before_size} → {_after_size}", icon="🗑️")
+                else:
+                    st.toast("✅ All caches cleared!", icon="🗑️")
+                st.rerun()
+        
+        with _cache_col2:
+            if st.button("🔄 Refresh", use_container_width=True, help="Refresh the current view"):
+                st.rerun()
+        
+        # Display cache size
+        if _cache_bytes > 0:
+            st.caption(f"💾 Cache: {_cache_size}")
+        else:
+            st.caption("💾 Cache: Empty")
+        
+        st.divider()
 
         # ---- Section 1: File Upload ----
         st.header("1. Upload Files")
@@ -85,37 +123,59 @@ def render_sidebar():
                     st.session_state.pop(_k, None)
                 st.rerun()
 
-        # Show filename-based buildup/side detection results
+        # ── Per-file classification UI ─────────────────────────────────────
         if aoi_files:
-            with st.expander("Detected Buildup/Side", expanded=False):
-                needs_manual = {}
-                for uf in aoi_files:
-                    match = FILENAME_PATTERN.search(uf.name)
-                    if match:
-                        bu = int(match.group(1))
-                        side = match.group(2).upper()
-                        st.success(f"**{uf.name}** → BU-{bu:02d} {'Front' if side == 'F' else 'Back'}")
-                    else:
-                        st.warning(f"**{uf.name}** → Could not detect buildup/side")
-                        needs_manual[uf.name] = True
-                st.session_state['needs_manual_side'] = needs_manual
+            with st.expander("📋 Classify Files", expanded=True):
+                st.caption("Auto-filled from filename — adjust if needed before loading.")
+                from aoi_loader import _parse_filename as _pfn
+                _SIDES = ["Front", "Back"]
+                _classifications = []
 
-        # Manual buildup/side assignment for undetected files
-        manual_map = {}
-        if st.session_state.get('needs_manual_side'):
-            st.subheader("Manual Buildup/Side Assignment")
-            for fname in st.session_state['needs_manual_side']:
-                col1, col2 = st.columns(2)
-                with col1:
-                    bu = st.number_input(f"Buildup # for {fname}", min_value=0, max_value=20, value=1, key=f"bu_{fname}")
-                with col2:
-                    side = st.selectbox(f"Side for {fname}", ['Front', 'Back'], key=f"side_{fname}")
-                manual_map[fname] = (bu, 'F' if side == 'Front' else 'B')
+                for _i, _uf in enumerate(aoi_files):
+                    _auto = _pfn(_uf.name)
+                    # _auto returns (buildup, side, panel_id, section, warnings)
+                    _auto_bu      = _auto[0] or 1
+                    _auto_side    = 'Front' if (_auto[1] or 'F') == 'F' else 'Back'
+                    _auto_panel   = int((_auto[2] or 'Panel_01').split('_')[-1])
+                    _auto_section = _auto[3] or 1
+
+                    st.markdown(f"📄 `{_uf.name}`")
+                    _cc1, _cc2, _cc3, _cc4 = st.columns(4)
+
+                    _panel = _cc1.number_input(
+                        "Panel", min_value=1, max_value=99,
+                        value=_auto_panel, key=f"cl_panel_{_i}",
+                    )
+                    _buildup = _cc2.number_input(
+                        "Buildup", min_value=1, max_value=99,
+                        value=_auto_bu, key=f"cl_bu_{_i}",
+                    )
+                    _side = _cc3.selectbox(
+                        "Side", _SIDES,
+                        index=0 if _auto_side == 'Front' else 1,
+                        key=f"cl_side_{_i}",
+                    )
+                    _section = _cc4.number_input(
+                        "Section", min_value=1, max_value=99,
+                        value=_auto_section, key=f"cl_sec_{_i}",
+                    )
+
+                    _classifications.append({
+                        'file'    : _uf,
+                        'panel'   : int(_panel),
+                        'buildup' : int(_buildup),
+                        'side'    : _side,
+                        'section' : int(_section),
+                    })
+
+                st.session_state['aoi_classifications'] = _classifications
+        else:
+            st.session_state['aoi_classifications'] = []
 
         st.divider()
 
         # ---- Load & Process Button ----
-        load_btn = st.button("🔄 Load & Process", width='stretch', type="primary")
+        load_btn = st.button("🔄 Load & Process", use_container_width=True, type="primary")
 
         if load_btn:
             parsed_odb = None
@@ -140,13 +200,19 @@ def render_sidebar():
                         _tgz_bytes = gerber_file.read()
                         gerber_file.seek(0)
 
-                        rendered = load_render_cache(_tgz_bytes)
+                        # Compute digest once — stored in session state so subsequent
+                        # re-runs never re-hash the full archive.
+                        _tgz_digest = compute_tgz_digest(_tgz_bytes)
+                        st.session_state['_tgz_digest'] = _tgz_digest
+
+                        rendered = load_render_cache(digest=_tgz_digest)
                         _from_cache = rendered is not None
 
                         if rendered:
                             # Cache hit — load instantly
                             st.session_state['rendered_odb'] = rendered
                             st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
+                            st.session_state['_tgz_digest'] = _tgz_digest
                             _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
                             _svgs_ready = _from_cache and bool(_copper_lyrs) and all(
                                 l.panel_svg_data_url for l in _copper_lyrs
@@ -187,10 +253,10 @@ def render_sidebar():
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
                             _prog_file.write_text('{"status":"running"}')
 
-                            def _bg_render(_bytes=_tgz_bytes, _name=gerber_file.name, _pf=_prog_file):
+                            def _bg_render(_bytes=_tgz_bytes, _digest=_tgz_digest, _name=gerber_file.name, _pf=_prog_file):
                                 try:
-                                    r = render_odb_to_cam(_bytes, _name)
-                                    save_render_cache(_bytes, r)
+                                    r = render_odb_to_cam(_bytes, _name, digest=_digest)
+                                    save_render_cache(r, digest=_digest)
                                     _pf.write_text('{"status":"done"}')
                                 except Exception as e:
                                     _pf.write_text(json.dumps({"status": "error", "error": str(e)}))
@@ -198,6 +264,7 @@ def render_sidebar():
                             threading.Thread(target=_bg_render, daemon=True).start()
                             st.session_state['_render_progress_file'] = str(_prog_file)
                             st.session_state['_render_tgz_bytes'] = _tgz_bytes
+                            st.session_state['_render_digest'] = _tgz_digest
                             st.session_state['_render_filename'] = gerber_file.name
                             st.info("Rendering CAM layers in background — the page will update automatically when ready.")
 
@@ -208,10 +275,8 @@ def render_sidebar():
             if aoi_files:
                 with st.spinner("Loading AOI defect data..."):
                     try:
-                        if manual_map:
-                            aoi_dataset = load_aoi_with_manual_side(aoi_files, manual_map)
-                        else:
-                            aoi_dataset = load_aoi_files(aoi_files)
+                        _cls = st.session_state.get('aoi_classifications', [])
+                        aoi_dataset = load_aoi_files(aoi_files, classifications=_cls if _cls else None)
 
                         st.session_state['aoi_dataset'] = aoi_dataset
 
@@ -394,6 +459,71 @@ def render_sidebar():
                     }.get(x, x),
                     key='color_mode_select',
                 )
+
+                st.divider()
+
+                # ---- Verification Severity Map ----
+                st.markdown("**⚠️ Verification Severity Map**")
+                st.caption(
+                    "Drop each verification code into the correct severity bucket. "
+                    "Unassigned codes fall back to defect-type keyword matching. "
+                    "Used by Fault Site Fingerprint and Defect Risk Breakdown."
+                )
+
+                _SEV_INT_MAP  = {'Critical': 3, 'High': 2, 'Medium': 1, 'Low': 0}
+                _SEV_ICONS    = {'Critical': '🔴', 'High': '🟠', 'Medium': '🟡', 'Low': '🟢'}
+                # Built-in pre-fill defaults for common Orbotech codes
+                _SEV_DEFAULTS = {
+                    'SH': 'Critical', 'SHORT': 'Critical',
+                    'OP': 'Critical', 'OPEN':  'Critical',
+                    'MS': 'Critical', 'MISSING': 'Critical',
+                    'BR': 'Critical', 'BRIDGE': 'Critical',
+                    'EX': 'High',     'EXCESS': 'High',
+                    'PH': 'High',     'PINHOLE': 'High',
+                    'NK': 'Medium',   'NICK':   'Medium',
+                    'SC': 'Low',      'SCRATCH': 'Low',
+                }
+
+                _aoi_ds = st.session_state.get('aoi_dataset')
+                if _aoi_ds and _aoi_ds.has_data and 'VERIFICATION' in _aoi_ds.all_defects.columns:
+                    _all_vcodes = sorted(
+                        str(v).strip().upper()
+                        for v in _aoi_ds.all_defects['VERIFICATION'].dropna().unique()
+                        if str(v).strip().upper() not in ('', 'NAN', 'NONE', 'N')
+                    )
+                else:
+                    _all_vcodes = []
+
+                if not _all_vcodes:
+                    st.caption("_(No verification codes found — load AOI data first)_")
+                else:
+                    # Seed each multiselect default from: previous session → built-in default
+                    _prev_map = st.session_state.get('verif_severity_map', {})
+                    # _prev_map is {code: int} — invert to {sev_label: [codes]}
+                    _INT_TO_LABEL = {3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low'}
+                    _prev_buckets: dict[str, list] = {'Critical': [], 'High': [], 'Medium': [], 'Low': []}
+                    for _vc in _all_vcodes:
+                        if _vc in _prev_map:
+                            _prev_buckets[_INT_TO_LABEL[_prev_map[_vc]]].append(_vc)
+                        elif _vc in _SEV_DEFAULTS:
+                            _prev_buckets[_SEV_DEFAULTS[_vc]].append(_vc)
+                        # else: unassigned — not placed in any bucket → keyword fallback
+
+                    _new_map: dict[str, int] = {}
+                    for _sev_label in ['Critical', 'High', 'Medium', 'Low']:
+                        _chosen = st.multiselect(
+                            f"{_SEV_ICONS[_sev_label]} {_sev_label}",
+                            options=_all_vcodes,
+                            default=_prev_buckets[_sev_label],
+                            key=f"vsev_bucket_{_sev_label}",
+                            help=f"Verification codes to treat as {_sev_label}. "
+                                 "Codes not in any bucket fall back to defect-type keyword matching.",
+                        )
+                        for _vc in _chosen:
+                            _new_map[_vc] = _SEV_INT_MAP[_sev_label]
+
+                    # Persist as {code: int}
+                    st.session_state['verif_severity_map'] = _new_map
 
             # ---- Background Source ----
             st.session_state['bg_source'] = 'CAM (Gerbonara)'

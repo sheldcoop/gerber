@@ -42,6 +42,7 @@ def compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> li
 def compute_cm_geometry(
     unit_positions: tuple,       # tuple of (x, y) — ODB++ display (panel-absolute) coords
     first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y) of CAM layer in local space
+    unit_bounds: tuple = None,   # (width_mm, height_mm) from board profile — preferred when available
 ) -> tuple:
     """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout.
 
@@ -53,8 +54,12 @@ def compute_cm_geometry(
     Result is in [0, cell_w] × [0, cell_h], matching the CAM SVG in Plotly.
     """
     cam_min_x, cam_min_y, cam_max_x, cam_max_y = first_layer_bounds
-    cell_w = cam_max_x - cam_min_x
-    cell_h = cam_max_y - cam_min_y
+    if unit_bounds and unit_bounds[0] > 0 and unit_bounds[1] > 0:
+        cell_w = unit_bounds[0]
+        cell_h = unit_bounds[1]
+    else:
+        cell_w = cam_max_x - cam_min_x
+        cell_h = cam_max_y - cam_min_y
     uniq_x = sorted(set(round(x, 2) for x, _ in unit_positions))
     uniq_y = sorted(set(round(y, 2) for _, y in unit_positions))
     # Origin = display position only — NO cam_min offset.

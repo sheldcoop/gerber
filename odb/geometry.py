@@ -171,14 +171,17 @@ def symbol_to_geometry(x: float, y: float, sym: _ODBSymbol, rotation_deg: float)
 def arc_to_points(x1: float, y1: float, x2: float, y2: float,
                   xc: float, yc: float,
                   cw: bool = False,
-                  num_segments: int = ARC_SEGMENTS_FINE) -> list:
+                  num_segments: int = ARC_SEGMENTS_FINE,
+                  radius: float = None) -> list:
     """
     Approximate a circular arc (start → end around center) with line points.
 
     cw=False → counter-clockwise (ODB++ default).
     cw=True  → clockwise (when OC line has Y/CW flag).
+    radius: when provided, use adaptive segment count (one segment per 5 µm of
+            arc length, clamped 16–512) instead of num_segments.
     """
-    r = math.sqrt((x1 - xc)**2 + (y1 - yc)**2)
+    r = math.sqrt((x1 - xc)**2 + (y1 - yc)**2) if radius is None else radius
     if r < COORD_EPSILON:
         return [(x2, y2)]
 
@@ -193,7 +196,10 @@ def arc_to_points(x1: float, y1: float, x2: float, y2: float,
             a_end += 2 * math.pi
 
     sweep = a_end - a_start
-    n = max(ARC_SEGMENTS_COARSE, int(abs(sweep) / (2 * math.pi) * num_segments))
+    if radius is not None:
+        n = max(16, min(512, int(abs(sweep) * r / 0.005)))
+    else:
+        n = max(ARC_SEGMENTS_COARSE, int(abs(sweep) / (2 * math.pi) * num_segments))
 
     return [
         (xc + r * math.cos(a_start + sweep * k / n),
@@ -280,6 +286,53 @@ def parse_line_record(parts: list, symbols: dict, uf: float,
         return None, polarity
 
 
+def parse_arc_record(parts: list, symbols: dict, uf: float,
+                    ignore_polarity: bool = False):
+    """
+    Parse an A (arc trace) record.
+
+    ODB++ A record field order:
+      A xs ys xe ye xc yc  sym_idx  polarity  [mirror]  [cw_flag]
+
+    Returns (geometry, polarity_char) tuple.
+    """
+    try:
+        x1       = float(parts[1]) * uf
+        y1       = float(parts[2]) * uf
+        x2       = float(parts[3]) * uf
+        y2       = float(parts[4]) * uf
+        xc_      = float(parts[5]) * uf
+        yc_      = float(parts[6]) * uf
+        sym_idx  = int(parts[7])
+        polarity = parts[8].split(';')[0].strip().upper() if len(parts) > 8 else 'P'
+        cw_flag  = False
+        if len(parts) > 10:
+            d = parts[10].split(';')[0].strip().upper()
+            cw_flag = d in ('Y', 'CW', '1')
+    except (IndexError, ValueError):
+        return None, 'P'
+
+    if polarity == 'N' and not ignore_polarity:
+        return None, 'N'
+
+    sym = symbols.get(sym_idx)
+    if sym is None or sym.size_x <= 0:
+        return None, polarity
+
+    try:
+        r = math.sqrt((x1 - xc_)**2 + (y1 - yc_)**2)
+        pts = arc_to_points(x1, y1, x2, y2, xc_, yc_, cw=cw_flag, radius=r)
+        all_pts = [(x1, y1)] + pts
+        if len(all_pts) < 2:
+            return None, polarity
+        line = LineString(all_pts)
+        cap = 1 if sym.shape == 'round' else 2
+        return line.buffer(sym.size_x / 2.0, cap_style=cap,
+                           resolution=ARC_SEGMENTS_COARSE), polarity
+    except Exception:
+        return None, polarity
+
+
 def parse_surface_block(surface_lines: list, uf: float):
     """
     Parse the body of an S..SE surface block into a Shapely Polygon.
@@ -324,7 +377,9 @@ def parse_surface_block(surface_lines: list, uf: float):
                     d = parts[5].split(';')[0].strip().upper()
                     cw_flag = d in ('Y', 'CW', '1')
                 x_start, y_start = current[-1]
-                current.extend(arc_to_points(x_start, y_start, x_end, y_end, xc, yc, cw=cw_flag))
+                r_oc = math.sqrt((x_start - xc)**2 + (y_start - yc)**2)
+                current.extend(arc_to_points(x_start, y_start, x_end, y_end, xc, yc,
+                                             cw=cw_flag, radius=r_oc))
 
         elif cmd == 'OE':
             if len(current) >= 3:

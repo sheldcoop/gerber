@@ -16,7 +16,7 @@ from odb import (
     _parse_symbol_descriptor, _parse_symbol_table, _parse_symbol_table_from_text,
     _detect_symbol_scale, _load_user_symbols,
     _symbol_to_geometry, _odb_arc_to_points,
-    _parse_pad_record, _parse_line_record, _parse_surface_block,
+    _parse_pad_record, _parse_line_record, _parse_arc_record, _parse_surface_block,
     _read_features_text, _parse_features_text,
     _compute_bounds, _aggregate_bounds,
     _parse_profile_layer, _parse_components,
