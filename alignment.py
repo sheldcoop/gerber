@@ -657,7 +657,6 @@ def _alignment_result_to_hashable(result: AlignmentResult) -> tuple:
     )
 
 
-@st.cache_data(show_spinner="Computing alignment...")
 def compute_alignment_cached(
     gerber_bounds: tuple,
     aoi_bounds: tuple,
@@ -727,7 +726,6 @@ def _dict_to_alignment_result(d: dict) -> AlignmentResult:
     )
 
 
-@st.cache_data(show_spinner="Applying coordinate transform...")
 def apply_alignment_cached(
     _df_hash: str,
     alignment_dict: dict,

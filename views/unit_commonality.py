@@ -8,12 +8,35 @@ from core.data_utils import compute_cm_geometry, filter_aoi_cm
 from scoring import classify_severity, classify_severity_by_verification
 
 
-@st.cache_data(max_entries=64, ttl=3600, show_spinner=False)
-def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
-    """Map defect X_MM/Y_MM to unit-local coordinates. All arrays as tuples for cache key."""
+def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y, unit_angle: float = 0.0):
+    """Map defect X_MM/Y_MM to unit-local coordinates.
+
+    Subtracts the unit origin, applies the optional manual offset, then applies
+    the inverse rotation for the unit's placement angle so that defects land in
+    the unit's own (0°) local coordinate frame — matching the CAM SVG.
+
+    Rotation convention (ODB++ CCW positive):
+        ANGLE=0   → identity             local_x = dx,  local_y = dy
+        ANGLE=90  → rotate -90° inverse  local_x = dy,  local_y = -dx
+        ANGLE=180 → rotate -180° inverse local_x = -dx, local_y = -dy
+        ANGLE=270 → rotate -270° inverse local_x = -dy, local_y = dx
+
+    All arrays passed as tuples for Streamlit cache key compatibility.
+    """
     import numpy as _np
-    ax = _np.array(x_mm) - _np.array(ox_arr) + off_x
-    ay = _np.array(y_mm) - _np.array(oy_arr) + off_y
+    dx = _np.array(x_mm) - _np.array(ox_arr) + off_x
+    dy = _np.array(y_mm) - _np.array(oy_arr) + off_y
+
+    angle_norm = round(unit_angle) % 360
+    if angle_norm == 90:
+        ax, ay = dy, -dx
+    elif angle_norm == 180:
+        ax, ay = -dx, -dy
+    elif angle_norm == 270:
+        ax, ay = -dy, dx
+    else:  # 0° or any unrecognised angle — identity
+        ax, ay = dx, dy
+
     return tuple(ax.tolist()), tuple(ay.tolist())
 
 
@@ -23,7 +46,6 @@ _SEV_COLOR = {3: '#FF3B3B', 2: '#FF9900', 1: '#FFD700', 0: '#66BB6A'}
 _SEV_DOT_SCALE = {3: 18, 2: 13, 1: 9, 0: 6}   # base marker size per severity
 
 
-@st.cache_data(max_entries=32, ttl=3600, show_spinner=False)
 def _compute_pad_fingerprint(
     ax_tuple: tuple,
     ay_tuple: tuple,
@@ -444,6 +466,12 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
 
+                # Read dominant placement angle from panel layout (0 when no TGZ loaded)
+                _rodb_cm_angle = st.session_state.get('rendered_odb')
+                _unit_angle_cm = 0.0
+                if _rodb_cm_angle and _rodb_cm_angle.panel_layout:
+                    _unit_angle_cm = getattr(_rodb_cm_angle.panel_layout, 'dominant_angle', 0.0)
+
                 # ── Background rotation (SVG only — defect positions unchanged) ──
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
@@ -459,6 +487,7 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     tuple(_cm_src['Y_MM'].values.tolist()),
                     tuple(_ox_arr), tuple(_oy_arr),
                     _cm_off_x, _cm_off_y,
+                    _unit_angle_cm,
                 )
                 _cm_plot = _cm_src.copy()
                 _cm_plot['ALIGNED_X'] = list(_ax)
@@ -617,15 +646,33 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg)
 
                         _cb_cm = _cm_cam_lyr.bounds
-                        _im_x  = _cb_cm[0] + _ref_shift_x
-                        _im_y  = _cb_cm[3] + _ref_shift_y
-                        _im_w  = _cb_cm[2] - _cb_cm[0]
-                        _im_h  = _cb_cm[3] - _cb_cm[1]
+                        _im_w_nat = _cb_cm[2] - _cb_cm[0]   # natural (unrotated) width
+                        _im_h_nat = _cb_cm[3] - _cb_cm[1]   # natural (unrotated) height
+
+                        # For 90°/270° placements the canvas is swapped (cell_w=nat_h,
+                        # cell_h=nat_w). Plotly places images top-left at (x, y) with
+                        # sizex along X and sizey along Y. We must swap sizex/sizey so
+                        # the image fills the swapped canvas, and fix the y anchor
+                        # (Plotly uses top-left corner: y = top of image in data coords).
+                        _angle_norm_img = round(_unit_angle_cm) % 360
+                        if _angle_norm_img in (90, 270):
+                            # Canvas: cell_w=nat_h, cell_h=nat_w
+                            # Image must fill [0, cell_w] × [0, cell_h] → sizex=nat_h, sizey=nat_w
+                            _place_sizex = _im_h_nat
+                            _place_sizey = _im_w_nat
+                            _place_x     = 0.0
+                            _place_y     = _im_w_nat   # top of image = nat_w = cell_h
+                        else:
+                            _place_sizex = _im_w_nat
+                            _place_sizey = _im_h_nat
+                            _place_x     = _cb_cm[0] + _ref_shift_x
+                            _place_y     = _cb_cm[3] + _ref_shift_y
+
                         _cm_fig.add_layout_image(dict(
                             source=_cm_data_url,
                             xref="x", yref="y",
-                            x=_im_x, y=_im_y,
-                            sizex=_im_w, sizey=_im_h,
+                            x=_place_x, y=_place_y,
+                            sizex=_place_sizex, sizey=_place_sizey,
                             sizing="stretch", layer="below",
                             opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
                         ))

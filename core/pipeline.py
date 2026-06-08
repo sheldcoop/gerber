@@ -332,6 +332,26 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             except Exception as e:
                 warnings.append(f"⚠️ Could not parse profile layer ({e}) — using copper bounds")
 
+            # Post-profile inch detection: if profile gave a real mm unit size but
+            # step_hierarchy coords are still in inch scale (max coord < one unit width),
+            # the global uf was wrong — re-parse the hierarchy with uf=25.4.
+            # This catches InCAM Pro jobs where misc/info has no UNITS= declaration
+            # and copper features are also in inches (blocking the pre-profile check).
+            if uf == 1.0 and unit_w > 10.0:
+                _sr_max_abs = 0.0
+                for _sr_list in step_hierarchy.values():
+                    for _sr in _sr_list:
+                        _sr_max_abs = max(_sr_max_abs,
+                                          abs(_sr.x), abs(_sr.y),
+                                          _sr.dx if _sr.dx > 0 else 0.0,
+                                          _sr.dy if _sr.dy > 0 else 0.0)
+                if 0 < _sr_max_abs < unit_w:
+                    step_hierarchy = _parse_step_repeat(job_root, 25.4)
+                    warnings.append(
+                        f"⚠️ Step-repeat inch quirk (post-profile): max SR coord {_sr_max_abs:.3f} < "
+                        f"unit_w {unit_w:.2f} mm — re-parsed with uf=25.4"
+                    )
+
             # Derive panel frame dimensions from ODB++ top-level step profile.
             _panel_w, _panel_h = None, None
             try:
@@ -372,6 +392,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 step_hierarchy, (unit_w, unit_h),
                 panel_width=_panel_w, panel_height=_panel_h,
             )
+
+
 
         # ── Phase 7: build panel SVG for first copper layer ───────────────
         if panel_layout and rendered_layers:

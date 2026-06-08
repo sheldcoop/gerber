@@ -25,8 +25,6 @@ from alignment import (
     GeometryContext,
     FRAME_WIDTH,
     FRAME_HEIGHT,
-    FIXED_OFFSET_X,
-    FIXED_OFFSET_Y,
     FIXED_GAP_X,
     FIXED_GAP_Y,
     INTER_UNIT_GAP,

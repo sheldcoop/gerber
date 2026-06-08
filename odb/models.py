@@ -77,6 +77,7 @@ class StepRepeat:
     nx: int          # number of repeats in X
     ny: int          # number of repeats in Y
     angle: float = 0.0
+    mirror: bool = False  # True when MIRROR=YES in stephdr
 
 
 # ODB++ matrix TYPE → internal layer_type mapping

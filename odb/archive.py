@@ -214,6 +214,8 @@ def _detect_stephdr_units_factor(text: str, default_uf: float) -> tuple:
 
 def _make_step_repeat(fields: dict, uf: float) -> StepRepeat:
     """Construct a StepRepeat from a parsed key=value field dict."""
+    mirror_raw = str(fields.get('MIRROR', 'NO')).upper().strip()
+    mirror = mirror_raw in ('YES', 'Y', '1', 'TRUE')
     return StepRepeat(
         child_step=fields['NAME'],
         x=fields.get('X', 0.0) * uf,
@@ -223,6 +225,7 @@ def _make_step_repeat(fields: dict, uf: float) -> StepRepeat:
         nx=int(fields.get('NX', 1)),
         ny=int(fields.get('NY', 1)),
         angle=fields.get('ANGLE', 0.0),
+        mirror=mirror,
     )
 
 
@@ -288,6 +291,8 @@ def parse_step_repeat(job_root: str, uf: float = 1.0) -> dict:
                     val = val.strip().rstrip(';').strip()
                     if key == 'NAME':
                         sr_fields['NAME'] = val
+                    elif key == 'MIRROR':
+                        sr_fields['MIRROR'] = val
                     elif key in ('X', 'Y', 'DX', 'DY', 'ANGLE'):
                         try:
                             sr_fields[key] = float(val)

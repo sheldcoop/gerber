@@ -3,9 +3,8 @@ import pandas as pd
 from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
 from alignment import calculate_geometry, INTER_UNIT_GAP
 
-@st.cache_data(show_spinner=False)
 def compute_clusters_cached(_df_hash: str, _df: pd.DataFrame, eps: float, min_samples: int):
-    """Run DBSCAN + summary + all hull coords. Cached by df hash + params."""
+    """Run DBSCAN + summary + all hull coords."""
     clustered = compute_clusters(_df, eps=eps, min_samples=min_samples)
     summary = get_cluster_summary(clustered)
     hulls = {}
@@ -17,9 +16,8 @@ def compute_clusters_cached(_df_hash: str, _df: pd.DataFrame, eps: float, min_sa
     return clustered, summary, hulls
 
 
-@st.cache_data(show_spinner=False)
 def compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> list:
-    """Pre-compute all unit cell shape dicts. Cached per grid geometry."""
+    """Pre-compute all unit cell shape dicts."""
     ctx = calculate_geometry(rows, cols, gap_x, gap_y)
     shapes = []
     for _, (q_ox, q_oy) in ctx.quadrant_origins.items():
@@ -38,13 +36,12 @@ def compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> li
     return shapes
 
 
-@st.cache_data(show_spinner=False)
 def compute_cm_geometry(
     unit_positions: tuple,       # tuple of (x, y) — ODB++ display (panel-absolute) coords
     first_layer_bounds: tuple,   # (min_x, min_y, max_x, max_y) of CAM layer in local space
     unit_bounds: tuple = None,   # (width_mm, height_mm) from board profile — preferred when available
 ) -> tuple:
-    """Return (origins_dict, cell_w, cell_h). Cached per unique TGZ layout.
+    """Return (origins_dict, cell_w, cell_h).
 
     origins_dict maps (row_index, col_index) → (origin_x, origin_y) where:
       - row_index / col_index are 0-based sorted position indices
@@ -77,7 +74,7 @@ def filter_aoi_cm(
     buildup_filter: tuple,
     side_filter: tuple,
 ) -> pd.DataFrame:
-    """Scope-filter AOI defects for Commonality. Cached by filter combo."""
+    """Scope-filter AOI defects for Commonality."""
     src = _df.copy()
     if buildup_filter and 'BUILDUP' in src.columns:
         src = src[src['BUILDUP'].isin(buildup_filter)]

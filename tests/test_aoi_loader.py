@@ -97,7 +97,10 @@ class TestExtractBuildupSide:
         bu, side, warnings = _extract_buildup_side('BU-02F.xlsx')
         assert bu == 2
         assert side == 'F'
-        assert len(warnings) == 0
+        # Code correctly warns that 'BU-02F.xlsx' uses legacy naming and
+        # recommends the multi-panel format. The warning is expected behaviour.
+        assert len(warnings) == 1
+        assert 'legacy' in warnings[0].lower()
 
     def test_back_side(self):
         bu, side, _ = _extract_buildup_side('BU-01B.xlsx')
