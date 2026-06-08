@@ -17,15 +17,22 @@ def render_panelization_data(parsed, aoi, align_args):
     uw, uh = pl.unit_bounds
     positions = pl.unit_positions  # list of (x_mm, y_mm) — panel display coords
 
+    # For rotated units (90°/270°), panel X footprint = local Y, panel Y footprint = local X
+    _dom = getattr(pl, 'dominant_angle', 0.0)
+    if _dom in (90.0, 270.0):
+        cell_w, cell_h = uh, uw   # panel X footprint, panel Y footprint
+    else:
+        cell_w, cell_h = uw, uh
+
     # ── 1. High-level summary ─────────────────────────────────────────────────
     st.markdown("#### Panel Summary")
     _c1, _c2, _c3, _c4, _c5 = st.columns(5)
     _c1.metric("Panel Width",  f"{pl.panel_width:.2f} mm")
     _c2.metric("Panel Height", f"{pl.panel_height:.2f} mm")
-    _c3.metric("Unit Width (profile)", f"{uw:.3f} mm",
-               help="From ODB++ board profile — the physical board edge. Used for centering and alignment.")
-    _c4.metric("Unit Height (profile)", f"{uh:.3f} mm",
-               help="From ODB++ board profile — the physical board edge. Used for centering and alignment.")
+    _c3.metric("Unit Width (panel X)", f"{cell_w:.3f} mm",
+               help="Physical unit width in panel space. For rotated units (90°/270°) this is the local Y dimension.")
+    _c4.metric("Unit Height (panel Y)", f"{cell_h:.3f} mm",
+               help="Physical unit height in panel space. For rotated units (90°/270°) this is the local X dimension.")
     _c5.metric("Total Units",  pl.total_units)
 
     _c6, _c7, _c8 = st.columns(3)
@@ -211,8 +218,8 @@ def render_panelization_data(parsed, aoi, align_args):
                         'Col': _ix,
                         'X mm (left edge)':  round(_ux, 3),
                         'Y mm (bottom edge)': round(_uy, 3),
-                        'X right edge (mm)': round(_ux + uw, 3),
-                        'Y top edge (mm)':   round(_uy + uh, 3),
+                        'X right edge (mm)': round(_ux + cell_w, 3),
+                        'Y top edge (mm)':   round(_uy + cell_h, 3),
                     })
 
         _df_units = pd.DataFrame(_unit_rows)
@@ -250,8 +257,8 @@ def render_panelization_data(parsed, aoi, align_args):
                 _uy_sel = _uniq_y[_sel_row]
                 _sample['X_MM - unit_origin_X'] = (_sample['X_MM'] - _ux_sel).round(3)
                 _sample['Y_MM - unit_origin_Y'] = (_sample['Y_MM'] - _uy_sel).round(3)
-                _sample['In range X?'] = _sample['X_MM - unit_origin_X'].between(0, uw)
-                _sample['In range Y?'] = _sample['Y_MM - unit_origin_Y'].between(0, uh)
+                _sample['In range X?'] = _sample['X_MM - unit_origin_X'].between(0, cell_w)
+                _sample['In range Y?'] = _sample['Y_MM - unit_origin_Y'].between(0, cell_h)
                 _sample = _sample.round(3)
 
                 _all_ok_x = _sample['In range X?'].all()
@@ -271,5 +278,5 @@ def render_panelization_data(parsed, aoi, align_args):
                 )
                 st.caption(
                     f"Unit ({_sel_row},{_sel_col}) position: X={_ux_sel:.3f} mm, Y={_uy_sel:.3f} mm. "
-                    f"Expected range: X=[{_ux_sel:.1f}, {_ux_sel+uw:.1f}], Y=[{_uy_sel:.1f}, {_uy_sel+uh:.1f}]"
+                    f"Expected range: X=[{_ux_sel:.1f}, {_ux_sel+cell_w:.1f}], Y=[{_uy_sel:.1f}, {_uy_sel+cell_h:.1f}]"
                 )

@@ -329,10 +329,13 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     (l for l in _rodb_cm.layers.values() if l.layer_type != 'drill'),
                     next(iter(_rodb_cm.layers.values()))
                 )
+                _raw_ubs = _rodb_cm.panel_layout.unit_bounds
+                _dom_ubs = getattr(_rodb_cm.panel_layout, 'dominant_angle', 0.0)
+                _panel_ubs = (_raw_ubs[1], _raw_ubs[0]) if _dom_ubs in (90.0, 270.0) else _raw_ubs
                 _cm_origins, _cam_cell_w, _cam_cell_h = compute_cm_geometry(
                     unit_positions=tuple(_rodb_cm.panel_layout.unit_positions),
                     first_layer_bounds=tuple(_first_lyr_cm.bounds),
-                    unit_bounds=_rodb_cm.panel_layout.unit_bounds,
+                    unit_bounds=_panel_ubs,
                 )
                 _cam_min_x = _first_lyr_cm.bounds[0]
                 _cam_min_y = _first_lyr_cm.bounds[1]
@@ -465,22 +468,14 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
 
-                if _dom_angle in (90.0, 270.0):
-                    # For 90°/270° units the unit is rotated in the panel:
-                    # panel Y offset → local X axis; panel X offset → local Y axis.
-                    _ax, _ay = _align_defects(
-                        tuple(_cm_src['Y_MM'].values.tolist()),
-                        tuple(_cm_src['X_MM'].values.tolist()),
-                        tuple(_oy_arr), tuple(_ox_arr),
-                        _cm_off_y, _cm_off_x,
-                    )
-                else:
-                    _ax, _ay = _align_defects(
-                        tuple(_cm_src['X_MM'].values.tolist()),
-                        tuple(_cm_src['Y_MM'].values.tolist()),
-                        tuple(_ox_arr), tuple(_oy_arr),
-                        _cm_off_x, _cm_off_y,
-                    )
+                # Defects are always in panel space. The CAD background is auto-rotated
+                # by dominant_angle so the visual matches the physical panel orientation.
+                _ax, _ay = _align_defects(
+                    tuple(_cm_src['X_MM'].values.tolist()),
+                    tuple(_cm_src['Y_MM'].values.tolist()),
+                    tuple(_ox_arr), tuple(_oy_arr),
+                    _cm_off_x, _cm_off_y,
+                )
                 _cm_plot = _cm_src.copy()
                 _cm_plot['ALIGNED_X'] = list(_ax)
                 _cm_plot['ALIGNED_Y'] = list(_ay)
