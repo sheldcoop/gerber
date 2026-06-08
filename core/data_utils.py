@@ -87,35 +87,27 @@ def filter_aoi_cm(
     return src
 
 
-def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y, unit_angle=0.0):
-    """Map defect X_MM/Y_MM into the unit-local (0°) frame.
+def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
+    """Map defect X_MM/Y_MM into the unit's native design frame by translation.
 
-    Subtracts the unit origin (+ manual offset) to get the panel-space delta, then
-    applies the inverse of the unit's placement rotation so every selected unit's
-    defects land in the same unrotated reference frame.
-
-    The unit placement angle comes from PanelLayout.dominant_angle, which is the
-    cumulative rotation down the whole STEP-REPEAT hierarchy (see
-    core/step_layout.py:_expand) — so rotation declared at the cluster level or the
-    unit level is handled identically, and unit_angle=0 (no rotation) is the identity.
-    Only orthogonal angles (0/90/180/270) are transformed; any other value falls
-    through to the identity.
+    AOI reports X_MM/Y_MM such that, after subtracting the unit's step origin
+    (+ optional manual offset), each defect lands in the unit's native (un-rotated)
+    coordinate frame in [0, cell_w] x [0, cell_h]. This holds for both un-rotated and
+    rotated (cluster-level) panels — verified against fhr0010 (0°) and fhr0020 (270°),
+    where pure translation fits ~99-100% of defects in-cell. Placement rotation is a
+    DISPLAY concern handled separately (see views/unit_commonality._rotate_for_display);
+    the defect coordinates themselves are never inverse-rotated.
 
     All arrays are passed as tuples so this stays hashable for st.cache_data callers.
     """
     import numpy as _np
-    if len(x_mm) != len(y_mm) or len(x_mm) != len(ox_arr) or len(ox_arr) != len(oy_arr):
+    if not (len(x_mm) == len(y_mm) == len(ox_arr) == len(oy_arr)):
         raise ValueError(
             f"_align_defects array length mismatch: "
             f"x={len(x_mm)} y={len(y_mm)} ox={len(ox_arr)} oy={len(oy_arr)}"
         )
-    dx = _np.array(x_mm) - _np.array(ox_arr) + off_x
-    dy = _np.array(y_mm) - _np.array(oy_arr) + off_y
-    a = round(unit_angle) % 360
-    if   a == 90:  ax, ay = dy, -dx
-    elif a == 180: ax, ay = -dx, -dy
-    elif a == 270: ax, ay = -dy, dx
-    else:          ax, ay = dx, dy
+    ax = _np.array(x_mm) - _np.array(ox_arr) + off_x
+    ay = _np.array(y_mm) - _np.array(oy_arr) + off_y
     return tuple(ax.tolist()), tuple(ay.tolist())
 
 

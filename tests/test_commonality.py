@@ -10,7 +10,6 @@ Covers the pure helpers behind views/unit_commonality.py:
   5. compute_unit_positions — dominant_angle provenance (cluster vs unit vs none)
 """
 
-import math
 import os
 import sys
 
@@ -112,29 +111,96 @@ class TestFilterAoiCm:
 # ---------------------------------------------------------------------------
 
 class TestAlignDefects:
-    def test_identity_at_zero_angle(self):
+    def test_translation_only(self):
         ax, ay = _align_defects((110.0,), (220.0,), (100.0,), (200.0,), 0.0, 0.0)
         assert ax == pytest.approx((10.0,))
         assert ay == pytest.approx((20.0,))
 
-    def test_inverse_rotation_270_roundtrip(self):
-        ox, oy, lx, ly = 100.0, 200.0, 10.0, 20.0
-        a = math.radians(270)
-        px = ox + lx * math.cos(a) - ly * math.sin(a)
-        py = oy + lx * math.sin(a) + ly * math.cos(a)
-        ax, ay = _align_defects((px,), (py,), (ox,), (oy,), 0.0, 0.0, unit_angle=270)
-        assert ax[0] == pytest.approx(lx)
-        assert ay[0] == pytest.approx(ly)
-
-    def test_non_orthogonal_angle_is_identity(self):
-        # 45° is not a handled orthogonal angle → falls through to identity delta
-        ax, ay = _align_defects((5.0,), (7.0,), (0.0,), (0.0,), 0.0, 0.0, unit_angle=45)
-        assert ax == pytest.approx((5.0,))
-        assert ay == pytest.approx((7.0,))
+    def test_manual_offset(self):
+        ax, ay = _align_defects((110.0,), (220.0,), (100.0,), (200.0,), 5.0, -3.0)
+        assert ax == pytest.approx((15.0,))
+        assert ay == pytest.approx((17.0,))
 
     def test_length_mismatch_raises(self):
         with pytest.raises(ValueError):
             _align_defects((1.0, 2.0), (1.0,), (0.0,), (0.0,), 0.0, 0.0)
+
+
+class TestRotateForDisplay:
+    """Display rotation: native points → panel-oriented frame (views/unit_commonality)."""
+
+    def _import(self):
+        from views.unit_commonality import _rotate_for_display
+        return _rotate_for_display
+
+    def test_zero_is_identity(self):
+        r = self._import()
+        xs, ys, w, h = r([1.0, 5.0], [2.0, 6.0], 40.0, 80.0, 0)
+        assert list(xs) == [1.0, 5.0] and list(ys) == [2.0, 6.0]
+        assert (w, h) == (40.0, 80.0)
+
+    def test_180_keeps_dims_flips(self):
+        r = self._import()
+        xs, ys, w, h = r([0.0, 40.0], [0.0, 80.0], 40.0, 80.0, 180)
+        assert (w, h) == (40.0, 80.0)
+        assert list(xs) == [40.0, 0.0] and list(ys) == [80.0, 0.0]
+
+    def test_90_and_270_swap_dims_and_stay_in_box(self):
+        r = self._import()
+        import numpy as np
+        cw, ch = 40.0, 80.0
+        xs = np.array([0.0, cw, cw / 2])
+        ys = np.array([0.0, ch, ch / 3])
+        for ang in (90, 270):
+            rx, ry, w, h = r(xs, ys, cw, ch, ang)
+            assert (w, h) == (ch, cw)  # swapped → 80×40
+            assert rx.min() >= -1e-9 and rx.max() <= w + 1e-9
+            assert ry.min() >= -1e-9 and ry.max() <= h + 1e-9
+
+    def test_roundtrip_270_then_90_is_identity(self):
+        r = self._import()
+        import numpy as np
+        xs = np.array([3.0, 30.0, 18.0])
+        ys = np.array([7.0, 70.0, 41.0])
+        rx, ry, w, h = r(xs, ys, 40.0, 80.0, 270)
+        bx, by, _, _ = r(rx, ry, w, h, 90)
+        assert np.allclose(bx, xs) and np.allclose(by, ys)
+
+
+@pytest.mark.parametrize("tgz,xlsx,angle", [
+    ("fhr0010_bkm.tgz", "test_fhr0010.xlsx", 0),
+    ("fhr0020_bkm.tgz", "test_fhr0020.xlsx", 270),
+])
+def test_real_data_translation_aligns(tgz, xlsx, angle):
+    """Regression: translation-only puts ≥95% of real defects in-cell, locking in the
+    Round-2 fix. Skips if the (large) committed test assets are absent."""
+    import os
+    root = os.path.join(os.path.dirname(__file__), "..")
+    tgz_p, xlsx_p = os.path.join(root, tgz), os.path.join(root, xlsx)
+    if not (os.path.exists(tgz_p) and os.path.exists(xlsx_p)):
+        pytest.skip(f"{tgz}/{xlsx} not present")
+
+    from core.pipeline import _render_pipeline
+    r = _render_pipeline(open(tgz_p, "rb").read(), tgz, None)
+    pl = r.panel_layout
+    assert round(pl.dominant_angle) % 360 == angle
+    first = next((l for l in r.layers.values() if l.layer_type != 'drill'),
+                 next(iter(r.layers.values())))
+    origins, cw, ch = compute_cm_geometry(tuple(pl.unit_positions), tuple(first.bounds), pl.unit_bounds)
+
+    df = pd.read_excel(xlsx_p)
+    df.columns = [c.strip().upper().replace(' ', '_') for c in df.columns]
+    X = pd.to_numeric(df['X_COORDINATES'], errors='coerce') / 1000.0
+    Y = pd.to_numeric(df['Y_COORDINATES'], errors='coerce') / 1000.0
+    rows = pd.to_numeric(df['UNIT_INDEX_Y'], errors='coerce').fillna(0).astype(int)
+    cols = pd.to_numeric(df['UNIT_INDEX_X'], errors='coerce').fillna(0).astype(int)
+    ox = [origins.get((int(r_), int(c_)), (0.0, 0.0))[0] for r_, c_ in zip(rows, cols)]
+    oy = [origins.get((int(r_), int(c_)), (0.0, 0.0))[1] for r_, c_ in zip(rows, cols)]
+
+    ax, ay = _align_defects(tuple(X.tolist()), tuple(Y.tolist()), tuple(ox), tuple(oy), 0.0, 0.0)
+    ax, ay = np.array(ax), np.array(ay)
+    in_cell = np.mean((ax >= -1) & (ax <= cw + 1) & (ay >= -1) & (ay <= ch + 1))
+    assert in_cell >= 0.95, f"{tgz}: only {in_cell:.0%} of defects in-cell with translation"
 
 
 # ---------------------------------------------------------------------------

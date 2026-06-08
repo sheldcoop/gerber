@@ -33,11 +33,80 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool) -> float:
 
 
 def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool) -> str:
-    """Reference-layer SVG url honouring the invert-polarity toggle."""
-    return build_rotated_svg_url(
-        lyr_obj, rot_deg, is_multi,
-        invert=st.session_state.get('invert_polarity', False),
-    )
+    """Reference-layer SVG url honouring the invert-polarity toggle.
+
+    Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
+    rerun for every shown layer on a rotated panel. The un-rotated path is already O(1)
+    (precomputed data URL). For the rotating path we memoise the result per session,
+    keyed by (layer name, rotation, invert, multi). The cache is tied to the current
+    rendered_odb object identity so it auto-resets when a new TGZ is uploaded.
+    """
+    invert = st.session_state.get('invert_polarity', False)
+    # Cheap path: no rotation, no inversion → precomputed URL, nothing to cache.
+    name = getattr(lyr_obj, 'name', None)
+    if (abs(rot_deg) < 0.01 and not invert) or name is None:
+        return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert)
+
+    gen = id(st.session_state.get('rendered_odb'))
+    store = st.session_state.get('_cm_svg_cache')
+    if store is None or store.get('gen') != gen:
+        store = {'gen': gen, 'data': {}}
+        st.session_state['_cm_svg_cache'] = store
+    cache = store['data']
+
+    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi))
+    url = cache.get(key)
+    if url is None:
+        url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert)
+        cache[key] = url
+    return url
+
+
+def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi):
+    """Add one reference-design layer as a Plotly background image.
+
+    Single source of the layer-placement + 90/270 dimension-swap convention shared by
+    the empty-state, empty-layers, and defect-state overlays.
+
+    Args:
+        ref_shift: (sx, sy) translation so the reference layer sits at the cell origin.
+        svg_rot:   degrees to rotate the SVG *content* (auto angle + manual nudge).
+        swap:      True for orthogonal 90/270 placement (image fills the swapped cell).
+    """
+    b = lyr.bounds
+    im_w, im_h = b[2] - b[0], b[3] - b[1]
+    sx, sy = ref_shift
+    if swap:
+        szx, szy, x, y = im_h, im_w, 0.0, im_w
+    else:
+        szx, szy, x, y = im_w, im_h, b[0] + sx, b[3] + sy
+    fig.add_layout_image(dict(
+        source=_svg_url(lyr, svg_rot, is_multi),
+        xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
+        sizing="stretch", layer="below",
+        opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi),
+    ))
+
+
+def _rotate_for_display(xs, ys, cell_w, cell_h, angle):
+    """Rotate native-frame points into the panel-oriented display frame.
+
+    Defects are aligned in the unit's native (un-rotated) frame; for a unit placed at
+    `angle` degrees we rotate the whole overlay (design + points together) so it reads as
+    it physically sits on the panel. Only orthogonal angles rotate; others are identity.
+
+    Returns (xs', ys', disp_w, disp_h). For 90/270 the cell dimensions are swapped.
+    """
+    a = round(angle) % 360
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if a == 90:
+        return cell_h - ys, xs, cell_h, cell_w
+    if a == 180:
+        return cell_w - xs, cell_h - ys, cell_w, cell_h
+    if a == 270:
+        return ys, cell_w - xs, cell_h, cell_w
+    return xs, ys, cell_w, cell_h
 
 
 def _render_sidebar_controls(rodb_cm_check: Any) -> List[Tuple[str, Any]]:
@@ -87,33 +156,20 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
         ch = _rb[3] - _rb[1]
 
     _ref_b  = _ref_lyr.bounds
-    _ref_sx = -_ref_b[0]
-    _ref_sy = -_ref_b[1]
+    _ref_shift = (-_ref_b[0], -_ref_b[1])
     _is_multi = len(na_checked) > 1
     _sorted = sorted(na_checked, key=_layer_sort_key)
 
     _unit_angle = getattr(rodb_cm_check.panel_layout, 'dominant_angle', 0.0) if rodb_cm_check.panel_layout else 0.0
     _rot_deg = float(round(_unit_angle) % 360)
+    _swap = _rot_deg in (90.0, 270.0)
     # At 90/270 the unit footprint is rotated — swap canvas dims once (not per layer).
-    if _rot_deg in (90.0, 270.0):
+    if _swap:
         cw, ch = ch, cw
 
     fig = go.Figure()
     for _n, _l in _sorted:
-        _url = _svg_url(_l, _rot_deg, _is_multi)
-        _b = _l.bounds
-        _im_w = _b[2] - _b[0]
-        _im_h = _b[3] - _b[1]
-        if _rot_deg in (90.0, 270.0):
-            _sx, _sy, _x, _y = _im_h, _im_w, 0.0, _im_w
-        else:
-            _sx, _sy, _x, _y = _im_w, _im_h, _b[0] + _ref_sx, _b[3] + _ref_sy
-        fig.add_layout_image(dict(
-            source=_url, xref="x", yref="y",
-            x=_x, y=_y, sizex=_sx, sizey=_sy,
-            sizing="stretch", layer="below",
-            opacity=_layer_opacity(_n, _l.layer_type, _is_multi),
-        ))
+        _place_layer_image(fig, _n, _l, _ref_shift, _rot_deg, _swap, _is_multi)
 
     _lbl = " + ".join(n for n, _ in na_checked)
     _add_dim_annotations(fig, cw, ch, _lbl)
@@ -267,9 +323,13 @@ def _compute_origins(rodb, q_rows, q_cols, gap_x, gap_y):
 # Reference design layer overlay
 # ---------------------------------------------------------------------------
 
-def _overlay_reference_layers(fig, rodb, manual_rot, first_lyr, cfg):
+def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
     """Draw checked reference design layers under the defect cloud. Returns the
-    active (top-most) layer name, or None."""
+    active (top-most) layer name, or None.
+
+    svg_rot: degrees to rotate the SVG content (auto panel angle + manual nudge).
+    swap_angle: the auto panel angle (orthogonal) that decides the 90/270 placement swap.
+    """
     if not (rodb and rodb.layers and first_lyr):
         return None
 
@@ -282,25 +342,10 @@ def _overlay_reference_layers(fig, rodb, manual_rot, first_lyr, cfg):
     active = pairs[-1][0]
 
     _ref_b = first_lyr.bounds
-    _sx = -_ref_b[0]
-    _sy = -_ref_b[1]
-    _swap = round(manual_rot) % 360 in (90, 270)
-
+    ref_shift = (-_ref_b[0], -_ref_b[1])
+    swap = round(swap_angle) % 360 in (90, 270)
     for _ln, _lyr in pairs:
-        _url = _svg_url(_lyr, manual_rot, is_multi)
-        _b = _lyr.bounds
-        _im_w = _b[2] - _b[0]
-        _im_h = _b[3] - _b[1]
-        if _swap:
-            _szx, _szy, _x, _y = _im_h, _im_w, 0.0, _im_w
-        else:
-            _szx, _szy, _x, _y = _im_w, _im_h, _b[0] + _sx, _b[3] + _sy
-        fig.add_layout_image(dict(
-            source=_url, xref="x", yref="y",
-            x=_x, y=_y, sizex=_szx, sizey=_szy,
-            sizing="stretch", layer="below",
-            opacity=_layer_opacity(_ln, _lyr.layer_type, is_multi),
-        ))
+        _place_layer_image(fig, _ln, _lyr, ref_shift, svg_rot, swap, is_multi)
     _apply_layout(fig, cfg)
     return active
 
@@ -409,7 +454,7 @@ def _fault_site_table(fp_df):
 # Defect state — the interactive superposition view
 # ---------------------------------------------------------------------------
 
-def _render_defect_state(rodb, aoi, align_args, get_svg_url):
+def _render_defect_state(rodb, aoi, align_args):
     sel_units, all_pairs, q_rows, q_cols, gap_x, gap_y = _select_units(rodb, aoi)
     if not sel_units:
         st.info("Select at least one unit to display.")
@@ -436,7 +481,7 @@ def _render_defect_state(rodb, aoi, align_args, get_svg_url):
 
     if src.empty:
         st.info("No defects found for the selected units / scope filters.")
-        _render_empty_layers(rodb, first_lyr, cell_w, cell_h, get_svg_url)
+        _render_empty_layers(rodb, first_lyr, cell_w, cell_h)
         return
 
     if 'X_MM' not in src.columns or 'Y_MM' not in src.columns:
@@ -467,18 +512,19 @@ def _render_defect_state(rodb, aoi, align_args, get_svg_url):
             tuple(src['X_MM'].values.tolist()),
             tuple(src['Y_MM'].values.tolist()),
             tuple(ox_arr), tuple(oy_arr),
-            off_x, off_y, unit_angle=dom_angle,
+            off_x, off_y,
         )
     except ValueError as e:
         st.error(f"Cannot align defects: {e}")
         return
 
+    # Defects are aligned in the unit's native frame (translation only). Fault-site
+    # grouping below also runs in this native frame so sites are rotation-invariant.
     cm_plot = src.copy()
     cm_plot['ALIGNED_X'] = list(ax)
     cm_plot['ALIGNED_Y'] = list(ay)
 
     cfg = OverlayConfig()
-    cfg.board_bounds   = (-1.0, -1.0, cell_w + 1.0, cell_h + 1.0)
     cfg.color_mode     = st.session_state.get('color_mode_select', 'by_type')
     cfg.marker_style   = st.session_state.get('marker_style_select', 'dot')
     cfg.buildup_filter = bu
@@ -505,27 +551,49 @@ def _render_defect_state(rodb, aoi, align_args, get_svg_url):
         verif_severity_map=tuple(st.session_state.get('verif_severity_map', {}).items()),
     )
 
-    if fp_mode and not fp_df.empty:
-        fig = _build_fingerprint_figure(fp_df, len(sel_units))
-    else:
-        fig = build_defect_only_figure(cm_plot, cfg)
+    # ── Display rotation: rotate the whole overlay (design + defects) to panel
+    #    orientation so a unit placed at `theta` reads as it sits on the panel. ──
+    theta = round(dom_angle) % 360
+    svg_rot = (theta + manual_rot) % 360  # manual nudge sits on top of the auto angle
 
-    active_layer = _overlay_reference_layers(fig, rodb, manual_rot, first_lyr, cfg)
+    if fp_mode and not fp_df.empty:
+        fcx, fcy, disp_w, disp_h = _rotate_for_display(
+            fp_df['cx'].values, fp_df['cy'].values, cell_w, cell_h, theta)
+        fp_plot = fp_df.copy()
+        fp_plot['cx'] = fcx
+        fp_plot['cy'] = fcy
+        cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
+        fig = _build_fingerprint_figure(fp_plot, len(sel_units))
+    else:
+        rx, ry, disp_w, disp_h = _rotate_for_display(
+            cm_plot['ALIGNED_X'].values, cm_plot['ALIGNED_Y'].values, cell_w, cell_h, theta)
+        cm_disp = cm_plot.copy()
+        cm_disp['ALIGNED_X'] = rx
+        cm_disp['ALIGNED_Y'] = ry
+        cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
+        fig = build_defect_only_figure(cm_disp, cfg)
+
+    active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
     if active_layer is None:
         # No reference layers — draw the unit cell outline and apply layout.
-        fig.add_shape(type="rect", x0=0, y0=0, x1=cell_w, y1=cell_h,
+        fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
                       line=dict(color="rgba(0,180,80,0.5)", width=1.5),
                       fillcolor="rgba(0,0,0,0)", layer="below")
         _apply_layout(fig, cfg)
 
-    _add_grid(fig, cell_w, cell_h)
-    _add_dim_annotations(fig, cell_w, cell_h, active_layer)
+    _add_grid(fig, disp_w, disp_h)
+    _add_dim_annotations(fig, disp_w, disp_h, active_layer)
 
     _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
                               help="Overlay a 2D defect density heatmap instead of individual dots",
                               key="cm_heatmap_toggle")
     if _show_heatmap and len(cm_plot) >= 3:
-        _add_density_heatmap(fig, cm_plot, cell_w, cell_h)
+        _hx, _hy, _hw, _hh = _rotate_for_display(
+            cm_plot['ALIGNED_X'].values, cm_plot['ALIGNED_Y'].values, cell_w, cell_h, theta)
+        _hm_df = cm_plot.copy()
+        _hm_df['ALIGNED_X'] = _hx
+        _hm_df['ALIGNED_Y'] = _hy
+        _add_density_heatmap(fig, _hm_df, _hw, _hh)
 
     n_def, n_units = len(cm_plot), len(sel_units)
     fig.update_layout(title=dict(
@@ -580,27 +648,24 @@ def _add_density_heatmap(fig, cm_plot, cell_w, cell_h):
         st.warning("Heatmap requires scipy. Install with: pip install scipy")
 
 
-def _render_empty_layers(rodb, first_lyr, cell_w, cell_h, get_svg_url):
-    """Show the reference design (no defects) when the scope filter matched nothing."""
+def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
+    """Show the reference design (no defects) when the scope filter matched nothing.
+    Rotated to panel orientation, consistent with the defect/empty states."""
     if not (rodb and rodb.layers and first_lyr):
         return
     checked = [(n, l) for n, l in rodb.layers.items() if st.session_state.get(f"vis_{n}", False)]
     if not checked:
         st.caption("☝️ Select a layer in the sidebar to view the design.")
         return
-    _ref_b = first_lyr.bounds
-    _sx, _sy = -_ref_b[0], -_ref_b[1]
+    _ref_shift = (-first_lyr.bounds[0], -first_lyr.bounds[1])
     is_multi = len(checked) > 1
+    _rot = float(round(getattr(rodb.panel_layout, 'dominant_angle', 0.0)) % 360) if rodb.panel_layout else 0.0
+    _swap = _rot in (90.0, 270.0)
+    if _swap:
+        cell_w, cell_h = cell_h, cell_w
     fig = go.Figure()
     for _n, _l in sorted(checked, key=_layer_sort_key):
-        _b = _l.bounds
-        fig.add_layout_image(dict(
-            source=get_svg_url(_l), xref="x", yref="y",
-            x=_b[0] + _sx, y=_b[3] + _sy,
-            sizex=_b[2] - _b[0], sizey=_b[3] - _b[1],
-            sizing="stretch", layer="below",
-            opacity=_layer_opacity(_n, _l.layer_type, is_multi),
-        ))
+        _place_layer_image(fig, _n, _l, _ref_shift, _rot, _swap, is_multi)
     _add_dim_annotations(fig, cell_w, cell_h, " + ".join(n for n, _ in checked))
     fig.update_layout(
         xaxis=dict(range=[-1, cell_w + 1], scaleanchor='y', scaleratio=1,
@@ -638,4 +703,4 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
     if not has_aoi_cm:
         _render_empty_state(rodb, na_checked)
     else:
-        _render_defect_state(rodb, aoi, align_args, get_svg_url)
+        _render_defect_state(rodb, aoi, align_args)

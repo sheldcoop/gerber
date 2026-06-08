@@ -227,125 +227,50 @@ class TestDimensionSwap:
 
 
 # ---------------------------------------------------------------------------
-# 5. _align_defects inverse rotation — the core of the fix
+# 5. _align_defects — translation into the unit's native frame
 # ---------------------------------------------------------------------------
+#
+# NOTE: AOI X/Y are reported in each unit's native (un-rotated) frame, so alignment
+# is pure translation (verified against fhr0010 @0° and fhr0020 @270°, ~99-100% in-cell).
+# Placement rotation is a DISPLAY concern, tested separately in
+# tests/test_commonality.py::TestRotateForDisplay. We exercise the REAL production
+# function here so these tests guard core/data_utils.py:_align_defects.
 
-# Exercise the REAL production transform (not a reimplementation), so these tests
-# actually guard core/data_utils.py:_align_defects.
-from core.data_utils import _align_defects as _align_defects_py
+from core.data_utils import _align_defects
 
 
-class TestAlignDefectsRotation:
-    """
-    Verify that _align_defects produces coordinates in the unit's local
-    (0°) frame for each placement angle.
-
-    Setup: unit W=40mm, H=80mm. Origin at (100, 200).
-    A defect at unit-local position (lx=10, ly=20) should map to:
-
-        ANGLE=0   → panel (110, 220)  → inverse → local (10, 20) ✓
-        ANGLE=90  → panel (120, 190)  → inverse → local (10, 20) ✓
-        ANGLE=180 → panel ( 90, 180)  → inverse → local (10, 20) ✓
-        ANGLE=270 → panel ( 80, 210)  → inverse → local (10, 20) ✓
-
-    Forward transform derivation (ODB++ CCW):
-        panel_x = ox + lx·cos(a) - ly·sin(a)
-        panel_y = oy + lx·sin(a) + ly·cos(a)
-    """
+class TestAlignDefectsTranslation:
+    """_align_defects subtracts the unit origin (+ manual offset); no rotation."""
 
     OX, OY = 100.0, 200.0
-    LX, LY = 10.0, 20.0   # unit-local target position
 
-    def _panel_pos(self, lx, ly, angle_deg):
-        """Forward transform: unit-local → panel-absolute."""
-        a = math.radians(angle_deg)
-        px = self.OX + lx * math.cos(a) - ly * math.sin(a)
-        py = self.OY + lx * math.sin(a) + ly * math.cos(a)
-        return px, py
+    def test_simple_translation(self):
+        ax, ay = _align_defects((110.0,), (220.0,), (self.OX,), (self.OY,), 0.0, 0.0)
+        assert abs(ax[0] - 10.0) < 1e-9
+        assert abs(ay[0] - 20.0) < 1e-9
 
-    def _run(self, angle):
-        px, py = self._panel_pos(self.LX, self.LY, angle)
-        ax, ay = _align_defects_py(
-            (px,), (py,), (self.OX,), (self.OY,), 0.0, 0.0, unit_angle=angle
-        )
-        return ax[0], ay[0]
+    def test_defect_at_origin_maps_to_zero(self):
+        ax, ay = _align_defects((self.OX,), (self.OY,), (self.OX,), (self.OY,), 0.0, 0.0)
+        assert abs(ax[0]) < 1e-9 and abs(ay[0]) < 1e-9
 
-    def test_angle_0_identity(self):
-        ax, ay = self._run(0)
-        assert abs(ax - self.LX) < 1e-9, f"ax={ax}, expected {self.LX}"
-        assert abs(ay - self.LY) < 1e-9, f"ay={ay}, expected {self.LY}"
-
-    def test_angle_90(self):
-        ax, ay = self._run(90)
-        assert abs(ax - self.LX) < 1e-6, f"ax={ax}, expected {self.LX}"
-        assert abs(ay - self.LY) < 1e-6, f"ay={ay}, expected {self.LY}"
-
-    def test_angle_180(self):
-        ax, ay = self._run(180)
-        assert abs(ax - self.LX) < 1e-6, f"ax={ax}, expected {self.LX}"
-        assert abs(ay - self.LY) < 1e-6, f"ay={ay}, expected {self.LY}"
-
-    def test_angle_270(self):
-        ax, ay = self._run(270)
-        assert abs(ax - self.LX) < 1e-6, f"ax={ax}, expected {self.LX}"
-        assert abs(ay - self.LY) < 1e-6, f"ay={ay}, expected {self.LY}"
-
-    def test_defect_at_origin_stays_at_origin(self):
-        """A defect sitting exactly at the unit origin maps to (0,0) for any angle."""
-        for angle in (0, 90, 180, 270):
-            ax, ay = _align_defects_py(
-                (self.OX,), (self.OY,), (self.OX,), (self.OY,), 0.0, 0.0,
-                unit_angle=angle
-            )
-            assert abs(ax[0]) < 1e-9, f"angle={angle} ax={ax[0]}"
-            assert abs(ay[0]) < 1e-9, f"angle={angle} ay={ay[0]}"
-
-    def test_manual_offset_applied_before_rotation(self):
-        """off_x/off_y shift is added BEFORE rotation, so it moves in panel space."""
-        px, py = self._panel_pos(self.LX, self.LY, 270)
-        off_x, off_y = 5.0, 3.0
-        ax_with, ay_with = _align_defects_py(
-            (px,), (py,), (self.OX,), (self.OY,), off_x, off_y, unit_angle=270
-        )
-        ax_base, ay_base = _align_defects_py(
-            (px,), (py,), (self.OX,), (self.OY,), 0.0, 0.0, unit_angle=270
-        )
-        # After inverse-rotation of a panel-space shift (+off_x, +off_y) at 270°:
-        # inverse of 270° on (off_x, off_y) → (-off_y, off_x)
-        assert abs(ax_with[0] - (ax_base[0] - off_y)) < 1e-9
-        assert abs(ay_with[0] - (ay_base[0] + off_x)) < 1e-9
+    def test_manual_offset_added_in_panel_space(self):
+        ax, ay = _align_defects((110.0,), (220.0,), (self.OX,), (self.OY,), 5.0, 3.0)
+        assert abs(ax[0] - 15.0) < 1e-9
+        assert abs(ay[0] - 23.0) < 1e-9
 
     def test_multiple_defects_vectorised(self):
-        """Vectorisation: all defects in a unit at 270° map correctly."""
-        local_pts = [(0, 0), (10, 0), (0, 20), (10, 20), (5, 10)]
-        px_list, py_list = zip(*[self._panel_pos(lx, ly, 270) for lx, ly in local_pts])
-        ox_arr = [self.OX] * len(local_pts)
-        oy_arr = [self.OY] * len(local_pts)
-        ax, ay = _align_defects_py(
-            px_list, py_list, ox_arr, oy_arr, 0.0, 0.0, unit_angle=270
-        )
-        for i, (lx, ly) in enumerate(local_pts):
-            assert abs(ax[i] - lx) < 1e-6, f"pt{i}: ax={ax[i]} expected lx={lx}"
-            assert abs(ay[i] - ly) < 1e-6, f"pt{i}: ay={ay[i]} expected ly={ly}"
+        xs = (100.0, 110.0, 100.0, 110.0, 105.0)
+        ys = (200.0, 200.0, 220.0, 220.0, 210.0)
+        ox = (self.OX,) * 5
+        oy = (self.OY,) * 5
+        ax, ay = _align_defects(xs, ys, ox, oy, 0.0, 0.0)
+        expect = [(0, 0), (10, 0), (0, 20), (10, 20), (5, 10)]
+        for i, (lx, ly) in enumerate(expect):
+            assert abs(ax[i] - lx) < 1e-9 and abs(ay[i] - ly) < 1e-9
 
-    def test_real_example_five_units_270(self):
-        """
-        Reproduce the real STEP-REPEAT from the user's job:
-          5 units at ANGLE=270, Y=1.496, X stepping by ~1.51mm.
-          A defect at unit-local (5mm, 10mm) should round-trip correctly.
-        """
-        origins_x = [1.507810, 3.017690, 4.527559, 6.037429, 7.547309]
-        origins_y = [1.496060] * 5
-        lx, ly = 5.0, 10.0
-
-        for ox, oy in zip(origins_x, origins_y):
-            px = ox + lx * math.cos(math.radians(270)) - ly * math.sin(math.radians(270))
-            py = oy + lx * math.sin(math.radians(270)) + ly * math.cos(math.radians(270))
-            ax, ay = _align_defects_py(
-                (px,), (py,), (ox,), (oy,), 0.0, 0.0, unit_angle=270
-            )
-            assert abs(ax[0] - lx) < 1e-5, f"origin=({ox:.3f},{oy:.3f}) ax={ax[0]}"
-            assert abs(ay[0] - ly) < 1e-5, f"origin=({ox:.3f},{oy:.3f}) ay={ay[0]}"
+    def test_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            _align_defects((1.0, 2.0), (1.0,), (0.0,), (0.0,), 0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
