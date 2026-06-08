@@ -285,23 +285,16 @@ def render_panel_overview(parsed, aoi, align_args):
         lyr = rendered_odb.layers[want_layer]
         needs_save = False
         
-        # Step 1: Build SVG if not cached (SVG is intermediate step for PNG)
+        # Step 1: Build SVG if not cached
         if not lyr.panel_svg_data_url:
-            with st.spinner(f"⏳ Building panel SVG for {want_layer}... (step 1/2)"):
+            with st.spinner(f"⏳ Building panel SVG for {want_layer}..."):
                 try:
                     lyr.panel_svg_data_url = build_panel_svg(lyr.svg_string, pl)
                     needs_save = True
                 except Exception as e:
                     st.error(f"❌ Failed to build panel SVG: {e}")
         
-        # Step 2: Convert SVG to PNG if not cached (PNG for fast Plotly rendering)
-        if lyr.panel_svg_data_url and not lyr.panel_png_data_url:
-            with st.spinner(f"⏳ Converting to PNG for {want_layer}... (step 2/2 - faster display)"):
-                lyr.panel_png_data_url = _svg_to_png_data_url(lyr.panel_svg_data_url, pw, ph, png_quality)
-                if lyr.panel_png_data_url:
-                    needs_save = True
-        
-        # Step 3: Save to disk cache (persists PNG + SVG)
+        # Step 2: Save to disk cache
         if needs_save:
             tgz_b = st.session_state.get('_tgz_bytes_for_cache')
             tgz_d = st.session_state.get('_tgz_digest')
@@ -309,10 +302,10 @@ def render_panel_overview(parsed, aoi, align_args):
                 save_render_cache(rendered_odb, digest=tgz_d, tgz_bytes=tgz_b if not tgz_d else None)
                 st.success(f"✅ Cached to disk for instant future loads")
         
-        # Step 4: Display PNG ONLY (no SVG fallback for Panel Overview)
-        if lyr.panel_png_data_url:
+        # Step 3: Display SVG directly (like main branch)
+        if lyr.panel_svg_data_url:
             fig.update_layout(images=[dict(
-                source=lyr.panel_png_data_url,
+                source=lyr.panel_svg_data_url,
                 xref="x", yref="y",
                 x=0, y=ph,
                 sizex=pw, sizey=ph,
@@ -321,14 +314,13 @@ def render_panel_overview(parsed, aoi, align_args):
             extra = len(all_checked) - 1
             if extra > 0:
                 st.caption(
-                    f"🖼️ Panel (PNG): **{want_layer}** "
+                    f"🖼️ Panel (SVG): **{want_layer}** "
                     f"(+{extra} more selected — showing one layer)"
                 )
             else:
-                st.caption(f"🖼️ Panel (PNG): **{want_layer}**")
+                st.caption(f"🖼️ Panel (SVG): **{want_layer}**")
         else:
-            st.error("❌ PNG conversion failed. Cannot display panel overview without PNG.")
-            st.info("💡 Try installing PNG conversion libraries or check error messages above.")
+            st.error("❌ SVG generation failed.")
     else:
         st.caption("☝️ Select a layer in the sidebar to display the panel image.")
 
