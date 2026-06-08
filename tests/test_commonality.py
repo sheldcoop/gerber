@@ -126,45 +126,28 @@ class TestAlignDefects:
             _align_defects((1.0, 2.0), (1.0,), (0.0,), (0.0,), 0.0, 0.0)
 
 
-class TestRotateForDisplay:
-    """Display rotation: native points → panel-oriented frame (views/unit_commonality)."""
+class TestDisplayDims:
+    """_display_dims swaps the on-screen cell footprint for 90/270 placements only."""
 
     def _import(self):
-        from views.unit_commonality import _rotate_for_display
-        return _rotate_for_display
+        from views.unit_commonality import _display_dims
+        return _display_dims
 
-    def test_zero_is_identity(self):
-        r = self._import()
-        xs, ys, w, h = r([1.0, 5.0], [2.0, 6.0], 40.0, 80.0, 0)
-        assert list(xs) == [1.0, 5.0] and list(ys) == [2.0, 6.0]
-        assert (w, h) == (40.0, 80.0)
+    def test_zero_no_swap(self):
+        d = self._import()
+        assert d(43.5, 37.5, 0) == (43.5, 37.5)
 
-    def test_180_keeps_dims_flips(self):
-        r = self._import()
-        xs, ys, w, h = r([0.0, 40.0], [0.0, 80.0], 40.0, 80.0, 180)
-        assert (w, h) == (40.0, 80.0)
-        assert list(xs) == [40.0, 0.0] and list(ys) == [80.0, 0.0]
+    def test_180_no_swap(self):
+        d = self._import()
+        assert d(43.5, 37.5, 180) == (43.5, 37.5)
 
-    def test_90_and_270_swap_dims_and_stay_in_box(self):
-        r = self._import()
-        import numpy as np
-        cw, ch = 40.0, 80.0
-        xs = np.array([0.0, cw, cw / 2])
-        ys = np.array([0.0, ch, ch / 3])
-        for ang in (90, 270):
-            rx, ry, w, h = r(xs, ys, cw, ch, ang)
-            assert (w, h) == (ch, cw)  # swapped → 80×40
-            assert rx.min() >= -1e-9 and rx.max() <= w + 1e-9
-            assert ry.min() >= -1e-9 and ry.max() <= h + 1e-9
+    def test_270_swaps_to_portrait(self):
+        d = self._import()
+        assert d(43.5, 37.5, 270) == (37.5, 43.5)
 
-    def test_roundtrip_270_then_90_is_identity(self):
-        r = self._import()
-        import numpy as np
-        xs = np.array([3.0, 30.0, 18.0])
-        ys = np.array([7.0, 70.0, 41.0])
-        rx, ry, w, h = r(xs, ys, 40.0, 80.0, 270)
-        bx, by, _, _ = r(rx, ry, w, h, 90)
-        assert np.allclose(bx, xs) and np.allclose(by, ys)
+    def test_90_swaps_to_portrait(self):
+        d = self._import()
+        assert d(43.5, 37.5, 90) == (37.5, 43.5)
 
 
 @pytest.mark.parametrize("tgz,xlsx,angle", [
@@ -172,9 +155,11 @@ class TestRotateForDisplay:
     ("fhr0020_bkm.tgz", "test_fhr0020.xlsx", 270),
 ])
 def test_real_data_translation_aligns(tgz, xlsx, angle):
-    """Regression: translation-only puts ≥95% of real defects in-cell, locking in the
-    Round-2 fix. Skips if the (large) committed test assets are absent."""
+    """Regression: translation-only puts ≥95% of real defects inside the DISPLAY cell
+    (swapped to portrait for rotated panels), locking in the rotation fix. Skips if the
+    (large) committed test assets are absent."""
     import os
+    from views.unit_commonality import _display_dims
     root = os.path.join(os.path.dirname(__file__), "..")
     tgz_p, xlsx_p = os.path.join(root, tgz), os.path.join(root, xlsx)
     if not (os.path.exists(tgz_p) and os.path.exists(xlsx_p)):
@@ -187,6 +172,7 @@ def test_real_data_translation_aligns(tgz, xlsx, angle):
     first = next((l for l in r.layers.values() if l.layer_type != 'drill'),
                  next(iter(r.layers.values())))
     origins, cw, ch = compute_cm_geometry(tuple(pl.unit_positions), tuple(first.bounds), pl.unit_bounds)
+    disp_w, disp_h = _display_dims(cw, ch, angle)
 
     df = pd.read_excel(xlsx_p)
     df.columns = [c.strip().upper().replace(' ', '_') for c in df.columns]
@@ -199,8 +185,8 @@ def test_real_data_translation_aligns(tgz, xlsx, angle):
 
     ax, ay = _align_defects(tuple(X.tolist()), tuple(Y.tolist()), tuple(ox), tuple(oy), 0.0, 0.0)
     ax, ay = np.array(ax), np.array(ay)
-    in_cell = np.mean((ax >= -1) & (ax <= cw + 1) & (ay >= -1) & (ay <= ch + 1))
-    assert in_cell >= 0.95, f"{tgz}: only {in_cell:.0%} of defects in-cell with translation"
+    in_cell = np.mean((ax >= -1) & (ax <= disp_w + 1) & (ay >= -1) & (ay <= disp_h + 1))
+    assert in_cell >= 0.95, f"{tgz}: only {in_cell:.0%} of defects in display cell with translation"
 
 
 # ---------------------------------------------------------------------------

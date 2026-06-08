@@ -88,25 +88,17 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi)
     ))
 
 
-def _rotate_for_display(xs, ys, cell_w, cell_h, angle):
-    """Rotate native-frame points into the panel-oriented display frame.
+def _display_dims(cell_w, cell_h, angle):
+    """Return the on-screen (panel-oriented) cell dimensions.
 
-    Defects are aligned in the unit's native (un-rotated) frame; for a unit placed at
-    `angle` degrees we rotate the whole overlay (design + points together) so it reads as
-    it physically sits on the panel. Only orthogonal angles rotate; others are identity.
-
-    Returns (xs', ys', disp_w, disp_h). For 90/270 the cell dimensions are swapped.
+    `compute_cm_geometry` reports the unit's NATIVE (un-rotated) footprint. AOI defect
+    coordinates, after subtracting the unit origin, are already in the panel frame — i.e.
+    for a unit placed at 90/270 the defects span the swapped (portrait) footprint. So we
+    only swap the *display* dimensions and rotate the reference DESIGN to match; the defect
+    points themselves are never rotated (verified: 100% of fhr0020 defects land in the
+    swapped 37.5x43.5 cell with translation alone).
     """
-    a = round(angle) % 360
-    xs = np.asarray(xs, dtype=float)
-    ys = np.asarray(ys, dtype=float)
-    if a == 90:
-        return cell_h - ys, xs, cell_h, cell_w
-    if a == 180:
-        return cell_w - xs, cell_h - ys, cell_w, cell_h
-    if a == 270:
-        return ys, cell_w - xs, cell_h, cell_w
-    return xs, ys, cell_w, cell_h
+    return (cell_h, cell_w) if round(angle) % 360 in (90, 270) else (cell_w, cell_h)
 
 
 def _render_sidebar_controls(rodb_cm_check: Any) -> List[Tuple[str, Any]]:
@@ -551,27 +543,17 @@ def _render_defect_state(rodb, aoi, align_args):
         verif_severity_map=tuple(st.session_state.get('verif_severity_map', {}).items()),
     )
 
-    # ── Display rotation: rotate the whole overlay (design + defects) to panel
-    #    orientation so a unit placed at `theta` reads as it sits on the panel. ──
+    # ── Display orientation: defects are already in the panel frame (translation), so we
+    #    only swap the displayed cell dims and rotate the reference DESIGN to match. ──
     theta = round(dom_angle) % 360
     svg_rot = (theta + manual_rot) % 360  # manual nudge sits on top of the auto angle
+    disp_w, disp_h = _display_dims(cell_w, cell_h, theta)
+    cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
 
     if fp_mode and not fp_df.empty:
-        fcx, fcy, disp_w, disp_h = _rotate_for_display(
-            fp_df['cx'].values, fp_df['cy'].values, cell_w, cell_h, theta)
-        fp_plot = fp_df.copy()
-        fp_plot['cx'] = fcx
-        fp_plot['cy'] = fcy
-        cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
-        fig = _build_fingerprint_figure(fp_plot, len(sel_units))
+        fig = _build_fingerprint_figure(fp_df, len(sel_units))
     else:
-        rx, ry, disp_w, disp_h = _rotate_for_display(
-            cm_plot['ALIGNED_X'].values, cm_plot['ALIGNED_Y'].values, cell_w, cell_h, theta)
-        cm_disp = cm_plot.copy()
-        cm_disp['ALIGNED_X'] = rx
-        cm_disp['ALIGNED_Y'] = ry
-        cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
-        fig = build_defect_only_figure(cm_disp, cfg)
+        fig = build_defect_only_figure(cm_plot, cfg)
 
     active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
     if active_layer is None:
@@ -588,12 +570,7 @@ def _render_defect_state(rodb, aoi, align_args):
                               help="Overlay a 2D defect density heatmap instead of individual dots",
                               key="cm_heatmap_toggle")
     if _show_heatmap and len(cm_plot) >= 3:
-        _hx, _hy, _hw, _hh = _rotate_for_display(
-            cm_plot['ALIGNED_X'].values, cm_plot['ALIGNED_Y'].values, cell_w, cell_h, theta)
-        _hm_df = cm_plot.copy()
-        _hm_df['ALIGNED_X'] = _hx
-        _hm_df['ALIGNED_Y'] = _hy
-        _add_density_heatmap(fig, _hm_df, _hw, _hh)
+        _add_density_heatmap(fig, cm_plot, disp_w, disp_h)
 
     n_def, n_units = len(cm_plot), len(sel_units)
     fig.update_layout(title=dict(
