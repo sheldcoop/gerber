@@ -329,10 +329,13 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     (l for l in _rodb_cm.layers.values() if l.layer_type != 'drill'),
                     next(iter(_rodb_cm.layers.values()))
                 )
+                _raw_ubs = _rodb_cm.panel_layout.unit_bounds
+                _dom_ubs = getattr(_rodb_cm.panel_layout, 'dominant_angle', 0.0)
+                _panel_ubs = (_raw_ubs[1], _raw_ubs[0]) if _dom_ubs in (90.0, 270.0) else _raw_ubs
                 _cm_origins, _cam_cell_w, _cam_cell_h = compute_cm_geometry(
                     unit_positions=tuple(_rodb_cm.panel_layout.unit_positions),
                     first_layer_bounds=tuple(_first_lyr_cm.bounds),
-                    unit_bounds=_rodb_cm.panel_layout.unit_bounds,
+                    unit_bounds=_panel_ubs,
                 )
                 _cam_min_x = _first_lyr_cm.bounds[0]
                 _cam_min_y = _first_lyr_cm.bounds[1]
@@ -444,16 +447,29 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
 
+                _dom_angle = getattr(
+                    getattr(st.session_state.get('rendered_odb'), 'panel_layout', None),
+                    'dominant_angle', 0.0,
+                )
+
+                # Auto-reset background rotation when dominant_angle changes (new design loaded)
+                if st.session_state.get('_cm_prev_dom_angle') != _dom_angle:
+                    st.session_state['cm_rotation_deg'] = _dom_angle
+                    st.session_state['_cm_prev_dom_angle'] = _dom_angle
+
                 # ── Background rotation (SVG only — defect positions unchanged) ──
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
                         "Background rotation (°)", min_value=0.0, max_value=360.0,
-                        value=0.0, step=0.5, format="%.1f",
+                        value=float(st.session_state.get('cm_rotation_deg', _dom_angle)),
+                        step=0.5, format="%.1f",
                         key='cm_rotation_deg',
-                        help="Rotate the CAD background to align with the defect cloud. Defect point positions do not move.",
+                        help="Auto-set from ODB++ cluster rotation. Adjust manually if needed.",
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
 
+                # Defects are always in panel space. The CAD background is auto-rotated
+                # by dominant_angle so the visual matches the physical panel orientation.
                 _ax, _ay = _align_defects(
                     tuple(_cm_src['X_MM'].values.tolist()),
                     tuple(_cm_src['Y_MM'].values.tolist()),
