@@ -230,20 +230,9 @@ class TestDimensionSwap:
 # 5. _align_defects inverse rotation — the core of the fix
 # ---------------------------------------------------------------------------
 
-def _align_defects_py(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y, unit_angle=0.0):
-    """Pure-Python reimplementation of _align_defects for testing without Streamlit."""
-    dx = np.array(x_mm) - np.array(ox_arr) + off_x
-    dy = np.array(y_mm) - np.array(oy_arr) + off_y
-    angle_norm = round(unit_angle) % 360
-    if angle_norm == 90:
-        ax, ay = dy, -dx
-    elif angle_norm == 180:
-        ax, ay = -dx, -dy
-    elif angle_norm == 270:
-        ax, ay = -dy, dx
-    else:
-        ax, ay = dx, dy
-    return tuple(ax.tolist()), tuple(ay.tolist())
+# Exercise the REAL production transform (not a reimplementation), so these tests
+# actually guard core/data_utils.py:_align_defects.
+from core.data_utils import _align_defects as _align_defects_py
 
 
 class TestAlignDefectsRotation:

@@ -7,7 +7,8 @@ _re_svg = re.compile(r'<svg[^>]+>', re.IGNORECASE)
 _re_viewbox = re.compile(r'viewBox=[\"\'][^\"\']+[\"\']')
 _re_viewbox_capture = re.compile(r'viewBox=[\"\']([^\'\"]+)[\"\']')
 
-def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False) -> str:
+def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
+                          invert: bool = False) -> str:
     """
     Builds a data URL for an SVG layer, optionally rotating the SVG contents
     and injecting colours based on layer type.
@@ -16,23 +17,23 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False) 
         lyr_obj: Layer object containing svg_string or color_svg_urls.
         rot_deg: Background rotation in degrees.
         is_multi: True if rendering multiple layers simultaneously.
+        invert: Swap foreground/background colours (invert polarity).
 
     Returns:
         A base64 encoded data URI string for the SVG.
     """
-    if is_multi and getattr(lyr_obj, 'color_svg_urls', None):
-        if rot_deg == 0:
-            return next(iter(lyr_obj.color_svg_urls.values()))
-    else:
-        if rot_deg == 0 and getattr(lyr_obj, 'svg_data_url', None):
-            return lyr_obj.svg_data_url
+    # Precomputed URLs only apply when neither rotating nor inverting.
+    if not invert:
+        if is_multi and getattr(lyr_obj, 'color_svg_urls', None):
+            if rot_deg == 0:
+                return next(iter(lyr_obj.color_svg_urls.values()))
+        else:
+            if rot_deg == 0 and getattr(lyr_obj, 'svg_data_url', None):
+                return lyr_obj.svg_data_url
 
     svg = getattr(lyr_obj, 'svg_string', "")
-    
-    # Invert colors logic if needed
-    # TODO: This should ideally be passed in or configured, but hardcoding for now
-    _invert = False # If we want to invert, we could pass it as an argument
-    if _invert:
+
+    if invert:
         _fg = '#FFD700' if getattr(lyr_obj, 'layer_type', '') == 'drill' else '#b87333'
         _t = '__PS__'
         svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
