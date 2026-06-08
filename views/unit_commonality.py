@@ -76,10 +76,28 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi)
     b = lyr.bounds
     im_w, im_h = b[2] - b[0], b[3] - b[1]
     sx, sy = ref_shift
+    
+    # Center of the layer in the standard (unswapped) coordinate system
+    layer_cx = b[0] + sx + im_w / 2.0
+    layer_cy = b[3] + sy - im_h / 2.0
+    
+    # If the canvas itself is swapped (e.g. panel is rotated 90 deg), the center moves
     if swap:
-        szx, szy, x, y = im_h, im_w, 0.0, im_w
+        final_cx, final_cy = im_h / 2.0, im_w / 2.0
     else:
-        szx, szy, x, y = im_w, im_h, b[0] + sx, b[3] + sy
+        final_cx, final_cy = layer_cx, layer_cy
+
+    # If the SVG content is rotated 90/270, its viewBox dimensions are swapped
+    svg_is_swapped = round(svg_rot) % 360 in (90, 270)
+    if svg_is_swapped:
+        szx, szy = im_h, im_w
+    else:
+        szx, szy = im_w, im_h
+
+    # Plotly anchors images at top-left by default
+    x = final_cx - szx / 2.0
+    y = final_cy + szy / 2.0
+
     fig.add_layout_image(dict(
         source=_svg_url(lyr, svg_rot, is_multi),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
@@ -172,7 +190,7 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
                    zeroline=False, showticklabels=False),
         plot_bgcolor='#000000', paper_bgcolor='#000000',
         font=dict(color='#cccccc'),
-        margin=dict(l=0, r=0, t=36, b=0), height=600,
+        margin=dict(l=0, r=0, t=36, b=0), height=800,
     )
     st.plotly_chart(fig, width='stretch',
                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
@@ -490,12 +508,12 @@ def _render_defect_state(rodb, aoi, align_args):
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
 
-    # Optional manual background nudge (rotates the reference SVG only).
+    # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
         manual_rot = st.number_input(
-            "Background rotation (°)", min_value=0.0, max_value=360.0,
+            "View rotation override (°)", min_value=0.0, max_value=360.0,
             value=0.0, step=0.5, format="%.1f", key='cm_rotation_deg',
-            help="Fine-tune the CAD background orientation. Defects are auto-aligned to the unit's detected angle; this only nudges the background image.",
+            help="Rotate the entire view (CAD background, defects, and canvas dimensions). Useful if you want to look at the unit vertically instead of horizontally.",
         )
         st.form_submit_button("Apply rotation", use_container_width=True)
 
@@ -649,7 +667,7 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
                    showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(range=[-1, cell_h + 1], showgrid=False, zeroline=False, showticklabels=False),
         plot_bgcolor='#000000', paper_bgcolor='#000000', font=dict(color='#cccccc'),
-        margin=dict(l=0, r=0, t=36, b=0), height=600,
+        margin=dict(l=0, r=0, t=36, b=0), height=800,
     )
     st.plotly_chart(fig, width='stretch',
                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
