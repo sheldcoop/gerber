@@ -255,7 +255,7 @@ def load_user_symbols(job_root: str, uf: float) -> dict:
         if text is None:
             continue
         try:
-            inner_geoms, _, _, _, _ = parse_features_text(text, uf, set())
+            inner_geoms, _, _, _, _, _ = parse_features_text(text, uf, set())
             if not inner_geoms:
                 continue
             bounds = compute_bounds(inner_geoms)

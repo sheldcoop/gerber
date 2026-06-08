@@ -38,7 +38,7 @@ def parse_profile_layer(job_root: str, step_name: str, uf: float,
     if text is None:
         return None
 
-    geoms, widths, warnings, _, _ = parse_features_text(text, uf, unknown_symbols)
+    geoms, widths, warnings, _, _, _ = parse_features_text(text, uf, unknown_symbols)
     if not geoms:
         return None
 
@@ -207,7 +207,7 @@ def parse_odb_archive(data: bytes, filename: str = '') -> ParsedODB:
                 )
 
             try:
-                geoms, widths, layer_warnings, fiducials, layer_drill_hits = \
+                geoms, widths, layer_warnings, fiducials, layer_drill_hits, _ = \
                     parse_features_text(text, layer_uf, unknown_symbols, user_sym_map, sym_scale)
                 all_fiducials.extend(fiducials)
                 if layer_type == 'drill':

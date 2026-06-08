@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from alignment import calculate_geometry, INTER_UNIT_GAP
 from visualizer import build_defect_only_figure, OverlayConfig, _apply_layout
 from core.data_utils import compute_cm_geometry, filter_aoi_cm
+from scoring import classify_severity, classify_severity_by_verification
 
 
 @st.cache_data(max_entries=64, ttl=3600, show_spinner=False)
@@ -16,26 +17,116 @@ def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
     return tuple(ax.tolist()), tuple(ay.tolist())
 
 
-@st.cache_data(max_entries=16, ttl=3600, show_spinner=False)
-def _compute_hotspot(ax, ay, cell_w, cell_h):
-    """Run KDE and return (cx, cy, radius) of the density peak, or None. Tuples for caching."""
-    try:
-        from sklearn.neighbors import KernelDensity
-        import numpy as _np
-        xy = _np.column_stack([list(ax), list(ay)])
-        if len(xy) < 5:
-            return None
-        kde = KernelDensity(bandwidth=1.5, kernel='gaussian')
-        kde.fit(xy)
-        nx, ny = 40, 40
-        gxv = _np.linspace(0, cell_w, nx)
-        gyv = _np.linspace(0, cell_h, ny)
-        gxx, gyy = _np.meshgrid(gxv, gyv)
-        dens = _np.exp(kde.score_samples(_np.column_stack([gxx.ravel(), gyy.ravel()]))).reshape(ny, nx)
-        peak = _np.unravel_index(dens.argmax(), dens.shape)
-        return float(gxv[peak[1]]), float(gyv[peak[0]]), min(cell_w, cell_h) * 0.06
-    except Exception:
-        return None
+# Severity label + colour used by both the chart overlay and the fingerprint table
+_SEV_LABEL = {3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low'}
+_SEV_COLOR = {3: '#FF3B3B', 2: '#FF9900', 1: '#FFD700', 0: '#66BB6A'}
+_SEV_DOT_SCALE = {3: 18, 2: 13, 1: 9, 0: 6}   # base marker size per severity
+
+
+@st.cache_data(max_entries=32, ttl=3600, show_spinner=False)
+def _compute_pad_fingerprint(
+    ax_tuple: tuple,
+    ay_tuple: tuple,
+    defect_types: tuple,
+    unit_keys: tuple,
+    buildup_vals: tuple,
+    verification_vals: tuple = (),
+    verif_severity_map: tuple = (),   # tuple of (code, int) pairs — hashable for cache
+    snap_mm: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Group aligned defects by fault site (snapped to snap_mm grid) and compute:
+      - unit_count      : how many UNIQUE units contributed a defect at this location
+      - unit_pct        : unit_count / total_unique_units  (0-1)
+      - severity        : worst classify_severity() among defect types at this location
+      - top_type        : most frequent defect type
+      - top_verif       : most frequent verification code (e.g. CU22, SH, OP)
+      - all_verif       : all unique verification codes at this site
+      - buildup_list    : sorted unique buildup values
+      - cx, cy          : snap-grid centre coordinates (mm)
+
+    Returns a DataFrame sorted by (severity DESC, unit_count DESC).
+    """
+    import numpy as _np
+
+    if not ax_tuple:
+        return pd.DataFrame()
+
+    ax = _np.array(ax_tuple)
+    ay = _np.array(ay_tuple)
+
+    # Convert verif_severity_map tuple back to dict
+    _vsmap = dict(verif_severity_map) if verif_severity_map else {}
+
+    # Snap to grid
+    snap_x = _np.round(ax / snap_mm).astype(int)
+    snap_y = _np.round(ay / snap_mm).astype(int)
+
+    total_units = len(set(unit_keys))
+
+    rows = []
+    from collections import defaultdict, Counter
+    buckets: dict = defaultdict(list)
+    for i in range(len(ax)):
+        key = (int(snap_x[i]), int(snap_y[i]))
+        buckets[key].append(i)
+
+    for (sx, sy), indices in buckets.items():
+        cx = sx * snap_mm
+        cy = sy * snap_mm
+        types_here  = [defect_types[i] for i in indices]
+        units_here  = set(unit_keys[i] for i in indices)
+
+        # Verification
+        if verification_vals:
+            verif_here = [str(verification_vals[i]) for i in indices
+                          if verification_vals[i] is not None]
+            top_v = Counter(verif_here).most_common(1)[0][0] if verif_here else '—'
+            all_v = ', '.join(sorted(set(verif_here))) if verif_here else '—'
+        else:
+            verif_here = []
+            top_v = '—'
+            all_v = '—'
+
+        # Severity — user map via verification code wins over keyword heuristic
+        sev_here = max(
+            classify_severity_by_verification(
+                verif_here[i] if i < len(verif_here) else '—',
+                types_here[i],
+                _vsmap,
+            )
+            for i in range(len(types_here))
+        )
+
+        top_t = Counter(types_here).most_common(1)[0][0]
+
+        if buildup_vals:
+            bu_set = sorted(set(str(buildup_vals[i]) for i in indices if buildup_vals[i] is not None))
+            bu_str = ', '.join(bu_set)
+        else:
+            bu_str = '—'
+
+        rows.append({
+            'cx': round(cx, 3),
+            'cy': round(cy, 3),
+            'unit_count': len(units_here),
+            'unit_pct': round(len(units_here) / max(total_units, 1) * 100, 1),
+            'severity': sev_here,
+            'severity_label': _SEV_LABEL[sev_here],
+            'top_verif': top_v,
+            'all_verif': all_v,
+            'top_type': top_t,
+            'buildup': bu_str,
+            'defect_count': len(indices),
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df.sort_values(['severity', 'unit_count'], ascending=[False, False], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
 
 
 @st.fragment
@@ -385,7 +476,88 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_cfg.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
                 _cm_cfg.side_filter   = 'Both'
 
-                _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
+                # ── Fingerprint mode toggle ───────────────────────────────
+                _fp_mode = st.toggle(
+                    "🔬 Fault Site Fingerprint Mode",
+                    value=False,
+                    key="cm_fingerprint_toggle",
+                    help=(
+                        "Replace raw dots with one marker per recurring fault site. "
+                        "Size = how many units were hit. "
+                        "Colour = worst defect severity (red=Critical, orange=High, yellow=Medium, green=Low). "
+                        "Hover to see the top verification code (e.g. CU22, SH, OP)."
+                    ),
+                )
+
+                # ── Build pad fingerprint (always computed, used for table too) ──
+                _fp_unit_keys = tuple(
+                    zip(
+                        _cm_src['UNIT_INDEX_Y'].astype(int).tolist(),
+                        _cm_src['UNIT_INDEX_X'].astype(int).tolist(),
+                    )
+                )
+                _fp_bu = tuple(
+                    _cm_plot['BUILDUP'].tolist()
+                    if 'BUILDUP' in _cm_plot.columns
+                    else []
+                )
+                _fp_verif = tuple(
+                    _cm_plot['VERIFICATION'].tolist()
+                    if 'VERIFICATION' in _cm_plot.columns
+                    else []
+                )
+                _fp_vsmap = tuple(
+                    st.session_state.get('verif_severity_map', {}).items()
+                )
+                _fp_df = _compute_pad_fingerprint(
+                    ax_tuple=tuple(_cm_plot['ALIGNED_X'].tolist()),
+                    ay_tuple=tuple(_cm_plot['ALIGNED_Y'].tolist()),
+                    defect_types=tuple(
+                        _cm_plot['DEFECT_TYPE'].tolist()
+                        if 'DEFECT_TYPE' in _cm_plot.columns
+                        else ['unknown'] * len(_cm_plot)
+                    ),
+                    unit_keys=_fp_unit_keys,
+                    buildup_vals=_fp_bu,
+                    verification_vals=_fp_verif,
+                    verif_severity_map=_fp_vsmap,
+                )
+
+                if _fp_mode and not _fp_df.empty:
+                    # Build figure from fingerprint (no raw dots)
+                    _cm_fig = go.Figure()
+                    for _sev in [3, 2, 1, 0]:
+                        _sev_rows = _fp_df[_fp_df['severity'] == _sev]
+                        if _sev_rows.empty:
+                            continue
+                        _dot_sizes = (_sev_rows['unit_count']
+                                      .clip(upper=len(_cm_sel_units))
+                                      .apply(lambda n: _SEV_DOT_SCALE[_sev] + n * 1.2))
+                        _cm_fig.add_trace(go.Scatter(
+                            x=_sev_rows['cx'],
+                            y=_sev_rows['cy'],
+                            mode='markers',
+                            name=_SEV_LABEL[_sev],
+                            marker=dict(
+                                color=_SEV_COLOR[_sev],
+                                size=_dot_sizes,
+                                opacity=0.82,
+                                line=dict(color='rgba(0,0,0,0.4)', width=0.8),
+                            ),
+                            customdata=_sev_rows[['unit_count', 'unit_pct', 'top_verif', 'all_verif', 'top_type', 'buildup', 'defect_count']].values,
+                            hovertemplate=(
+                                "<b>Verification: %{customdata[2]}</b><br>"
+                                "All codes at this site: %{customdata[3]}<br>"
+                                "Defect type: %{customdata[4]}<br>"
+                                "Units hit: <b>%{customdata[0]}</b> (%{customdata[1]}%)<br>"
+                                "Total defects at site: %{customdata[6]}<br>"
+                                "Buildup: %{customdata[5]}<br>"
+                                "X: %{x:.2f} mm  Y: %{y:.2f} mm"
+                                "<extra></extra>"
+                            ),
+                        ))
+                else:
+                    _cm_fig = build_defect_only_figure(_cm_plot, _cm_cfg)
 
                 _rendered_cm      = st.session_state.get('rendered_odb')
                 _active_layer_name = None
@@ -508,25 +680,6 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         xref="x", yref="y",
                     )
 
-                _hs = _compute_hotspot(
-                    tuple(_cm_plot['ALIGNED_X'].dropna().values.tolist()),
-                    tuple(_cm_plot['ALIGNED_Y'].dropna().values.tolist()),
-                    _cam_cell_w, _cam_cell_h,
-                )
-                if _hs:
-                    _hs_cx, _hs_cy, _hs_r = _hs
-                    _cm_fig.add_shape(type="circle",
-                        x0=_hs_cx - _hs_r, y0=_hs_cy - _hs_r,
-                        x1=_hs_cx + _hs_r, y1=_hs_cy + _hs_r,
-                        line=dict(color="rgba(255,80,80,0.9)", width=2, dash="dot"),
-                        fillcolor="rgba(255,80,80,0.08)", layer="above")
-                    _cm_fig.add_annotation(
-                        x=_hs_cx, y=_hs_cy + _hs_r + _cam_cell_h * 0.02,
-                        text="hotspot", showarrow=False,
-                        font=dict(color="rgba(255,100,100,0.9)", size=10, family="monospace"),
-                        xref="x", yref="y",
-                    )
-
                 _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
                                           help="Overlay a 2D defect density heatmap instead of individual dots",
                                           key="cm_heatmap_toggle")
@@ -585,13 +738,85 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False},
                 )
 
-                _cm_s1, _cm_s2, _cm_s3, _cm_s4 = st.columns(4)
-                _cm_s1.metric("Units Selected", len(_cm_sel_units))
-                _cm_s2.metric("Defects Shown",  len(_cm_plot))
-                _cm_s3.metric("Avg / Unit",     f"{len(_cm_plot)/len(_cm_sel_units):.1f}")
-                _top_cm = (
-                    str(_cm_plot['DEFECT_TYPE'].value_counts().index[0])
-                    if 'DEFECT_TYPE' in _cm_plot.columns and not _cm_plot.empty
-                    else '—'
-                )
-                _cm_s4.metric("Top Defect Type", _top_cm)
+                _cm_s1, _cm_s2, _cm_s3 = st.columns(3)
+
+                if not _fp_df.empty:
+                    _systemic_pads = int((_fp_df['unit_pct'] >= 50.0).sum())
+                    _worst_row     = _fp_df.iloc[0]  # already sorted by severity DESC, unit_count DESC
+                    _worst_hit     = f"{_worst_row['unit_pct']:.0f}% — {_worst_row['top_verif']}"
+                    _crit_sys      = int(((_fp_df['severity'] == 3) & (_fp_df['unit_pct'] >= 50.0)).sum())
+
+                    _cm_s1.metric(
+                        "Systemic Fault Sites (≥ 50 % units)",
+                        _systemic_pads,
+                        help="Fault sites where ≥ 50 % of selected units had a defect. These are process faults, not random.",
+                    )
+                    _cm_s2.metric(
+                        "Worst Site Hit Rate",
+                        _worst_hit,
+                        help="The fault site with the highest unit hit % and the top verification code driving it.",
+                    )
+                    _cm_s3.metric(
+                        "Critical + Systemic",
+                        _crit_sys,
+                        delta=f"of {len(_fp_df)} total fault sites",
+                        delta_color="inverse",
+                        help="Critical-severity fault sites also failing on ≥ 50 % of units — the highest-priority items to fix.",
+                    )
+                else:
+                    _cm_s1.metric("Units Selected", len(_cm_sel_units))
+                    _cm_s2.metric("Defects Shown",  len(_cm_plot))
+                    _cm_s3.metric("Avg / Unit",     f"{len(_cm_plot)/len(_cm_sel_units):.1f}")
+
+                # ── Fault Site Fingerprint Table ──────────────────────────
+                if not _fp_df.empty:
+                    st.divider()
+                    st.markdown("#### 🔬 Fault Site Recurrence Fingerprint")
+                    st.caption(
+                        "Each row is a distinct fault site (defects snapped to 0.5 mm grid). "
+                        "**Unit hit %** = how many of the selected units had a defect here. "
+                        "A site at 100 % is a **systemic process fault** — it fails on every unit, every time."
+                    )
+
+                    # Systemic threshold warning
+                    _fp_systemic = _fp_df[_fp_df['unit_pct'] >= 80.0]
+                    if not _fp_systemic.empty:
+                        _fp_crit_sys = _fp_systemic[_fp_systemic['severity'] == 3]
+                        if not _fp_crit_sys.empty:
+                            st.error(
+                                f"🚨 **{len(_fp_crit_sys)} Critical fault site(s) are failing on ≥ 80 % of units.** "
+                                "This is a systemic process fault — not random defects."
+                            )
+                        else:
+                            st.warning(
+                                f"⚠️ **{len(_fp_systemic)} fault site(s) are failing on ≥ 80 % of units.**"
+                            )
+
+                    _fp_display = _fp_df.copy()
+                    _fp_display.insert(0, 'Rank', range(1, len(_fp_display) + 1))
+                    _fp_display = _fp_display.rename(columns={
+                        'cx': 'X (mm)',
+                        'cy': 'Y (mm)',
+                        'unit_count': 'Units Hit',
+                        'unit_pct': 'Hit %',
+                        'severity_label': 'Severity',
+                        'top_verif': 'Top Verification',
+                        'all_verif': 'All Verif. Codes',
+                        'top_type': 'Top Defect Type',
+                        'buildup': 'Buildup(s)',
+                        'defect_count': 'Total Defects',
+                    }).drop(columns=['severity'])
+
+                    # Colour-code severity column via pandas Styler
+                    def _colour_sev(val):
+                        c = {'Critical': '#FF3B3B', 'High': '#FF9900',
+                             'Medium': '#FFD700', 'Low': '#66BB6A'}.get(val, '')
+                        return f'color: {c}; font-weight: bold' if c else ''
+
+                    _fp_styled = (
+                        _fp_display.style
+                        .applymap(_colour_sev, subset=['Severity'])
+                        .background_gradient(subset=['Hit %'], cmap='Reds', vmin=0, vmax=100)
+                        .format({'X (mm)': '{:.2f}', 'Y (mm)': '{:.2f}', 'Hit %': '{:.1f}'})
+                    )
+                    st.dataframe(_fp_styled, use_container_width=True, height=320)
