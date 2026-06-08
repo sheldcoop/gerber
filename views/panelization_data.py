@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from collections import defaultdict
 
 
 def render_panelization_data(parsed, aoi, align_args):
@@ -63,50 +64,89 @@ def render_panelization_data(parsed, aoi, align_args):
         for _parent, _repeats in _hier.items():
             for _sr in _repeats:
                 _rows_h.append({
-                    'Parent Step':  _parent,
-                    'Child Step':   _sr.child_step,
+                    'Parent Step':   _parent,
+                    'Child Step':    _sr.child_step,
                     'Origin X (mm)': round(_sr.x, 4),
                     'Origin Y (mm)': round(_sr.y, 4),
                     'Repeat X (nx)': _sr.nx,
                     'Repeat Y (ny)': _sr.ny,
                     'Pitch X (mm)':  round(_sr.dx, 4),
                     'Pitch Y (mm)':  round(_sr.dy, 4),
+                    'Angle (°)':     int(_sr.angle),
                 })
         _df_h = pd.DataFrame(_rows_h)
         st.dataframe(_df_h, use_container_width=True, hide_index=True)
 
         # ── Derived gaps from hierarchy ───────────────────────────────────────
+        # Group entries by (parent, child) to handle both encoding styles:
+        #   Compact grid:  1 entry with NX>1 and DX>0  (e.g. ANGLE=0 designs)
+        #   Individual:    N entries each NX=1 DX=0     (e.g. ANGLE=270 designs)
         st.markdown("#### Derived Gaps")
+        _groups = defaultdict(list)
+        for _r in _rows_h:
+            _groups[(_r['Parent Step'], _r['Child Step'])].append(_r)
+
         _gap_rows = []
-        for _sr_row in _rows_h:
-            _px = _sr_row['Pitch X (mm)']
-            _py = _sr_row['Pitch Y (mm)']
-            _nx = _sr_row['Repeat X (nx)']
-            _ny = _sr_row['Repeat Y (ny)']
-            if _nx > 1 and _px > 0:
-                _gap_rows.append({
-                    'Level':    f"{_sr_row['Parent Step']} → {_sr_row['Child Step']}",
-                    'Axis':     'X',
-                    'Pitch (mm)': _px,
-                    'Unit size used (mm)': uw,
-                    'Gap (mm)': round(_px - uw, 4),
-                    'Repeats':  _nx,
-                })
-            if _ny > 1 and _py > 0:
-                _gap_rows.append({
-                    'Level':    f"{_sr_row['Parent Step']} → {_sr_row['Child Step']}",
-                    'Axis':     'Y',
-                    'Pitch (mm)': _py,
-                    'Unit size used (mm)': uh,
-                    'Gap (mm)': round(_py - uh, 4),
-                    'Repeats':  _ny,
-                })
+        for (_parent, _child), _entries in _groups.items():
+            _level = f"{_parent} → {_child}"
+            # Dominant angle for this group → swap unit dimensions if 90° or 270°
+            _dom_angle = max(
+                set(_r['Angle (°)'] for _r in _entries),
+                key=[_r['Angle (°)'] for _r in _entries].count
+            )
+            _eff_uw = uh if _dom_angle in (90, 270) else uw  # effective X footprint
+            _eff_uh = uw if _dom_angle in (90, 270) else uh  # effective Y footprint
+
+            if len(_entries) == 1:
+                # ── Compact grid path (NX/NY > 1 with explicit DX/DY) ──────────
+                _r = _entries[0]
+                if _r['Repeat X (nx)'] > 1 and _r['Pitch X (mm)'] > 0:
+                    _gap_rows.append({
+                        'Level': _level, 'Axis': 'X',
+                        'Pitch (mm)': _r['Pitch X (mm)'],
+                        'Unit size used (mm)': round(_eff_uw, 4),
+                        'Gap (mm)': round(_r['Pitch X (mm)'] - _eff_uw, 4),
+                        'Repeats': _r['Repeat X (nx)'],
+                    })
+                if _r['Repeat Y (ny)'] > 1 and _r['Pitch Y (mm)'] > 0:
+                    _gap_rows.append({
+                        'Level': _level, 'Axis': 'Y',
+                        'Pitch (mm)': _r['Pitch Y (mm)'],
+                        'Unit size used (mm)': round(_eff_uh, 4),
+                        'Gap (mm)': round(_r['Pitch Y (mm)'] - _eff_uh, 4),
+                        'Repeats': _r['Repeat Y (ny)'],
+                    })
+            else:
+                # ── Individual-placement path (NX=1, DX=0 per entry) ─────────
+                # Derive pitch from sorted position differences.
+                _xs = sorted(set(round(_r['Origin X (mm)'], 3) for _r in _entries))
+                _ys = sorted(set(round(_r['Origin Y (mm)'], 3) for _r in _entries))
+                if len(_xs) > 1:
+                    _derived_dx = (_xs[-1] - _xs[0]) / (len(_xs) - 1)
+                    _gap_rows.append({
+                        'Level': _level, 'Axis': 'X',
+                        'Pitch (mm)': round(_derived_dx, 4),
+                        'Unit size used (mm)': round(_eff_uw, 4),
+                        'Gap (mm)': round(_derived_dx - _eff_uw, 4),
+                        'Repeats': len(_xs),
+                    })
+                if len(_ys) > 1:
+                    _derived_dy = (_ys[-1] - _ys[0]) / (len(_ys) - 1)
+                    _gap_rows.append({
+                        'Level': _level, 'Axis': 'Y',
+                        'Pitch (mm)': round(_derived_dy, 4),
+                        'Unit size used (mm)': round(_eff_uh, 4),
+                        'Gap (mm)': round(_derived_dy - _eff_uh, 4),
+                        'Repeats': len(_ys),
+                    })
+
         if _gap_rows:
             st.dataframe(pd.DataFrame(_gap_rows), use_container_width=True, hide_index=True)
             st.caption(
                 "Gap = Pitch − Unit size. "
                 "At the unit level this is the inter-unit spacing. "
-                "At higher levels (cluster, panel) it is the spacing between groups."
+                "At higher levels (cluster, panel) it is the spacing between groups. "
+                "Pitch is derived from position differences when DX/DY=0 (individual placements)."
             )
         else:
             st.info("Single unit — no repeats to compute gaps from.")
