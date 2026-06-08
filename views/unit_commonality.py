@@ -449,13 +449,19 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     'dominant_angle', 0.0,
                 )
 
+                # Auto-reset background rotation when dominant_angle changes (new design loaded)
+                if st.session_state.get('_cm_prev_dom_angle') != _dom_angle:
+                    st.session_state['cm_rotation_deg'] = _dom_angle
+                    st.session_state['_cm_prev_dom_angle'] = _dom_angle
+
                 # ── Background rotation (SVG only — defect positions unchanged) ──
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
                         "Background rotation (°)", min_value=0.0, max_value=360.0,
-                        value=0.0, step=0.5, format="%.1f",
+                        value=float(st.session_state.get('cm_rotation_deg', _dom_angle)),
+                        step=0.5, format="%.1f",
                         key='cm_rotation_deg',
-                        help="Rotate the CAD background to align with the defect cloud. Defect point positions do not move.",
+                        help="Auto-set from ODB++ cluster rotation. Adjust manually if needed.",
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
 
