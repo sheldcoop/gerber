@@ -8,7 +8,8 @@ from core.data_utils import compute_cm_geometry, filter_aoi_cm
 from scoring import classify_severity, classify_severity_by_verification
 
 
-def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y, unit_angle: float = 0.0):
+@st.cache_data(max_entries=64, ttl=3600, show_spinner=False)
+def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y):
     """Map defect X_MM/Y_MM to unit-local coordinates. All arrays as tuples for cache key."""
     import numpy as _np
     ax = _np.array(x_mm) - _np.array(ox_arr) + off_x
@@ -22,6 +23,7 @@ _SEV_COLOR = {3: '#FF3B3B', 2: '#FF9900', 1: '#FFD700', 0: '#66BB6A'}
 _SEV_DOT_SCALE = {3: 18, 2: 13, 1: 9, 0: 6}   # base marker size per severity
 
 
+@st.cache_data(max_entries=32, ttl=3600, show_spinner=False)
 def _compute_pad_fingerprint(
     ax_tuple: tuple,
     ay_tuple: tuple,
@@ -442,44 +444,21 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
 
-                # Read dominant placement angle from panel layout (0 when no TGZ loaded)
-                _rodb_cm_angle = st.session_state.get('rendered_odb')
-                _unit_angle_cm = 0.0
-                if _rodb_cm_angle and _rodb_cm_angle.panel_layout:
-                    _unit_angle_cm = getattr(_rodb_cm_angle.panel_layout, 'dominant_angle', 0.0)
-
                 # ── Background rotation (SVG only — defect positions unchanged) ──
-                _default_rot = float(round(_unit_angle_cm) % 360)
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
                         "Background rotation (°)", min_value=0.0, max_value=360.0,
-                        value=_default_rot, step=0.5, format="%.1f",
-                        key=f'cm_rotation_deg_{_default_rot}',
+                        value=0.0, step=0.5, format="%.1f",
+                        key='cm_rotation_deg',
                         help="Rotate the CAD background to align with the defect cloud. Defect point positions do not move.",
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
-
-                _auto_shift_x, _auto_shift_y = 0.0, 0.0
-                if _first_lyr_cm:
-                    _rot_norm = round(_rot_deg) % 360
-                    _rb = _first_lyr_cm.bounds
-                    if _rot_norm == 90:
-                        _new_min_x, _new_min_y = -_rb[3], _rb[0]
-                    elif _rot_norm == 180:
-                        _new_min_x, _new_min_y = -_rb[2], -_rb[3]
-                    elif _rot_norm == 270:
-                        _new_min_x, _new_min_y = _rb[1], -_rb[2]
-                    else:
-                        _new_min_x, _new_min_y = _rb[0], _rb[1]
-                    _auto_shift_x = -_new_min_x
-                    _auto_shift_y = -_new_min_y
 
                 _ax, _ay = _align_defects(
                     tuple(_cm_src['X_MM'].values.tolist()),
                     tuple(_cm_src['Y_MM'].values.tolist()),
                     tuple(_ox_arr), tuple(_oy_arr),
-                    _cm_off_x + _auto_shift_x, _cm_off_y + _auto_shift_y,
-                    _unit_angle_cm,
+                    _cm_off_x, _cm_off_y,
                 )
                 _cm_plot = _cm_src.copy()
                 _cm_plot['ALIGNED_X'] = list(_ax)
@@ -617,6 +596,7 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                             svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
                         if abs(rot) < 0.01:
                             return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
+                        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
                         vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
                         if vb:
                             vx, vy, vw, vh = map(float, vb.group(1).split())
@@ -626,21 +606,8 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                                 close = svg.rfind('</svg>')
                                 if close >= 0:
                                     inner = svg[tag.end():close]
-                                    rot_norm = round(rot) % 360
-                                    new_vb = f"{vx} {vy} {vw} {vh}"
-                                    if rot_norm in (90, 270):
-                                        # Swap width and height, keeping the center cx, cy the same
-                                        # new width = vh, new height = vw
-                                        new_vx = cx - vh / 2
-                                        new_vy = cy - vw / 2
-                                        new_vb = f"{new_vx:.4f} {new_vy:.4f} {vh:.4f} {vw:.4f}"
-                                    
-                                    # Replace the old viewBox with the new one
-                                    svg_start = svg[:tag.end()]
-                                    svg_start = _re_svg.sub(r'viewBox=[\"\'][^\"\']+[\"\']', f'viewBox="{new_vb}"', svg_start)
-                                    
                                     svg = (
-                                        svg_start
+                                        svg[:tag.end()]
                                         + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
                                         + inner + '</g>' + svg[close:]
                                     )
@@ -650,33 +617,15 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                         _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg)
 
                         _cb_cm = _cm_cam_lyr.bounds
-                        _im_w_nat = _cb_cm[2] - _cb_cm[0]   # natural (unrotated) width
-                        _im_h_nat = _cb_cm[3] - _cb_cm[1]   # natural (unrotated) height
-
-                        # For 90°/270° placements the canvas is swapped (cell_w=nat_h,
-                        # cell_h=nat_w). Plotly places images top-left at (x, y) with
-                        # sizex along X and sizey along Y. We must swap sizex/sizey so
-                        # the image fills the swapped canvas, and fix the y anchor
-                        # (Plotly uses top-left corner: y = top of image in data coords).
-                        _angle_norm_img = round(_unit_angle_cm) % 360
-                        if _angle_norm_img in (90, 270):
-                            # Canvas: cell_w=nat_h, cell_h=nat_w
-                            # Image must fill [0, cell_w] × [0, cell_h] → sizex=nat_h, sizey=nat_w
-                            _place_sizex = _im_h_nat
-                            _place_sizey = _im_w_nat
-                            _place_x     = 0.0
-                            _place_y     = _im_w_nat   # top of image = nat_w = cell_h
-                        else:
-                            _place_sizex = _im_w_nat
-                            _place_sizey = _im_h_nat
-                            _place_x     = _cb_cm[0] + _ref_shift_x
-                            _place_y     = _cb_cm[3] + _ref_shift_y
-
+                        _im_x  = _cb_cm[0] + _ref_shift_x
+                        _im_y  = _cb_cm[3] + _ref_shift_y
+                        _im_w  = _cb_cm[2] - _cb_cm[0]
+                        _im_h  = _cb_cm[3] - _cb_cm[1]
                         _cm_fig.add_layout_image(dict(
                             source=_cm_data_url,
                             xref="x", yref="y",
-                            x=_place_x, y=_place_y,
-                            sizex=_place_sizex, sizey=_place_sizey,
+                            x=_im_x, y=_im_y,
+                            sizex=_im_w, sizey=_im_h,
                             sizing="stretch", layer="below",
                             opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
                         ))
