@@ -52,29 +52,34 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
             panel_width=panel_width, panel_height=panel_height,
         )
 
-    def _expand(step_name: str, offset_x: float, offset_y: float) -> list:
-        """Recursively expand step-repeat placements, returning leaf (unit) positions."""
+    def _expand(step_name: str, offset_x: float, offset_y: float,
+                cumulative_angle: float = 0.0) -> list:
+        """Recursively expand step-repeat placements, returning (x, y, angle) for each leaf."""
         repeats = step_hierarchy.get(step_name.lower(), [])
         if not repeats:
-            # Leaf step (unit) — return this position
-            return [(offset_x, offset_y)]
+            return [(offset_x, offset_y, cumulative_angle % 360)]
 
         positions = []
         for sr in repeats:
+            new_angle = (cumulative_angle + sr.angle) % 360
             for iy in range(sr.ny):
                 for ix in range(sr.nx):
                     child_x = offset_x + sr.x + ix * sr.dx
                     child_y = offset_y + sr.y + iy * sr.dy
-                    positions.extend(_expand(sr.child_step, child_x, child_y))
+                    positions.extend(_expand(sr.child_step, child_x, child_y, new_angle))
         return positions
 
     # Start expansion from top step at origin
-    positions = _expand(top_step, 0.0, 0.0)
+    positions_with_angle = _expand(top_step, 0.0, 0.0, 0.0)
+
+    # Determine dominant rotation angle across all leaf placements
+    _angles = [a for _, _, a in positions_with_angle]
+    dominant_angle = max(set(_angles), key=_angles.count) if _angles else 0.0
 
     # Deduplicate (floating point tolerance)
     seen = set()
     unique = []
-    for px, py in positions:
+    for px, py, _ in positions_with_angle:
         key = (round(px, 3), round(py, 3))
         if key not in seen:
             seen.add(key)
@@ -100,6 +105,9 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
     ph = panel_height if panel_height is not None else 515.0
     if unique:
         uw, uh = unit_bounds
+        # At 90° or 270° rotation the unit's width and height are swapped in panel space.
+        if dominant_angle in (90.0, 270.0):
+            uw, uh = uh, uw
         raw_min_x = min(p[0] for p in unique)
         raw_max_x = max(p[0] for p in unique) + uw
         raw_min_y = min(p[1] for p in unique)
