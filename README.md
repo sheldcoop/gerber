@@ -147,6 +147,104 @@ This project is a Streamlit-based web application for visualizing ODB++ (Open Da
 - **Export Capabilities**: Export visualizations and processed data
 - **Testing Suite**: Comprehensive unit tests for all major components
 
+---
+
+## ODB++ Step-Repeat: NX, NY and Where to Find Them
+
+### What are NX and NY?
+
+Every STEP-REPEAT block in an ODB++ `stephdr` file has two repeat-count fields:
+
+| Field | Meaning |
+|---|---|
+| `NX` | How many times the child step is repeated along the **X axis** |
+| `NY` | How many times the child step is repeated along the **Y axis** |
+| `DX` | Spacing between repeats in X (in the file's native units) |
+| `DY` | Spacing between repeats in Y |
+
+A single STEP-REPEAT with `NX=6, NY=2, DX=1.35, DY=1.35` places 12 child units in a 6×2 grid. If NX=1 and NY=1 with DX=DY=0, it places exactly one child at position (X, Y).
+
+### Where to find them in the archive
+
+Inside the `.tgz` archive, every step level has a `stephdr` file:
+
+```
+<job_name>/
+  steps/
+    unit/stephdr        ← leaf unit (usually no STEP-REPEAT here)
+    cluster/stephdr     ← places UNIT children  ← NX/NY for unit grid
+    qtr_panel/stephdr   ← places CLUSTER children
+    panel/stephdr       ← places QTR_PANEL children  ← top-level grid
+```
+
+Example from a working design (`cluster/stephdr`):
+```
+STEP-REPEAT {
+    NAME=UNIT
+    X=1.151496062992126
+    Y=0.8208503937007874
+    DX=1.350425196850394    ← pitch between units in X
+    DY=1.350425196850394    ← pitch between units in Y
+    NX=6                    ← 6 columns
+    NY=2                    ← 2 rows
+    ANGLE=0
+    MIRROR=NO
+}
+```
+
+### Two encoding styles InCAM Pro uses — and why it matters
+
+When `ANGLE=0`, InCAM Pro writes a **compact grid**: one STEP-REPEAT with NX/NY > 1 and non-zero DX/DY.
+
+When `ANGLE ≠ 0` (e.g. 270°), InCAM Pro writes **individual placements**: one STEP-REPEAT per unit, each with NX=1, NY=1, DX=0, DY=0, because each may have its own rotation.
+
+```
+# ANGLE=270 design — 5 separate entries instead of one NX=5 entry:
+STEP-REPEAT { NAME=UNIT  X=1.5078  Y=1.4961  DX=0  DY=0  NX=1  NY=1  ANGLE=270 }
+STEP-REPEAT { NAME=UNIT  X=3.0177  Y=1.4961  DX=0  DY=0  NX=1  NY=1  ANGLE=270 }
+STEP-REPEAT { NAME=UNIT  X=4.5276  Y=1.4961  DX=0  DY=0  NX=1  NY=1  ANGLE=270 }
+...
+```
+
+This encoding difference was the root cause of the unit coordinate bug described below.
+
+---
+
+## Unit Coordinate Fix — InCAM Pro Undeclared Inches + ANGLE=270
+
+### The problem
+
+InCAM Pro (v6.01SP2) saves ODB++ archives with coordinates in **inches** but does **not** write a `UNITS=INCH` line in `misc/info`. The app must auto-detect the unit system.
+
+The existing detection worked for ANGLE=0 designs (compact NX/NY grids produce non-zero DX/DY values that trigger the inch heuristic), but **failed for ANGLE=270 designs** where all DX/DY are zero at the cluster and qtr_panel levels — leaving the step-repeat hierarchy in raw inch values while the profile parser correctly returned mm dimensions. The mismatch crammed all 60 units into a ~16mm blob at the centre of a 510mm panel.
+
+### The fix (committed in `core/pipeline.py` and `core/step_layout.py`)
+
+**1. Post-profile scale check** (`core/pipeline.py`):
+
+After the unit profile parser correctly derives `unit_w` in mm, a second inch-detection pass checks whether the maximum absolute coordinate in the step_hierarchy is smaller than `unit_w`. If it is, the entire hierarchy is still in inch scale and is re-parsed with `uf=25.4`.
+
+```
+if max_SR_coord < unit_w_mm  →  re-parse step_hierarchy with uf=25.4
+```
+
+| Design | max SR coord | unit_w | Triggers? |
+|---|---|---|---|
+| fhr0010 (ANGLE=0, already re-parsed) | 243 mm | 33.5 mm | No — already correct |
+| fhr0020 (ANGLE=270, not yet re-parsed) | 9.606 (inch) | 43.5 mm | **Yes** → re-parses ✓ |
+
+**2. ANGLE-aware bounding box** (`core/step_layout.py`):
+
+`_expand()` now tracks cumulative rotation through the hierarchy. When the dominant leaf angle is 90° or 270°, `unit_width` and `unit_height` are swapped before computing the content bounding box used for panel centering — because a 270°-rotated unit occupies its height in X and its width in Y.
+
+### How to verify it works
+
+Load either design and check the **Step-Repeat Hierarchy** table in the app:
+- All Origin and Pitch values should be in **mm scale** (e.g. −115 mm, 243 mm, 79 mm)
+- Unit count, rows, and cols must be correct (e.g. 60 units, 6 rows × 10 cols)
+- The warning log should contain: `Step-repeat inch quirk (post-profile): max SR coord X.XXX < unit_w XX.XX mm`
+- Exported unit coordinates CSV: column X values must span the full panel width (e.g. 35 mm → 475 mm), not be bunched in a narrow band (e.g. 225–284 mm)
+
 ## Architecture
 
 The application follows a modular architecture:
