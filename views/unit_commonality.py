@@ -9,34 +9,10 @@ from scoring import classify_severity, classify_severity_by_verification
 
 
 def _align_defects(x_mm, y_mm, ox_arr, oy_arr, off_x, off_y, unit_angle: float = 0.0):
-    """Map defect X_MM/Y_MM to unit-local coordinates.
-
-    Subtracts the unit origin, applies the optional manual offset, then applies
-    the inverse rotation for the unit's placement angle so that defects land in
-    the unit's own (0°) local coordinate frame — matching the CAM SVG.
-
-    Rotation convention (ODB++ CCW positive):
-        ANGLE=0   → identity             local_x = dx,  local_y = dy
-        ANGLE=90  → rotate -90° inverse  local_x = dy,  local_y = -dx
-        ANGLE=180 → rotate -180° inverse local_x = -dx, local_y = -dy
-        ANGLE=270 → rotate -270° inverse local_x = -dy, local_y = dx
-
-    All arrays passed as tuples for Streamlit cache key compatibility.
-    """
+    """Map defect X_MM/Y_MM to unit-local coordinates. All arrays as tuples for cache key."""
     import numpy as _np
-    dx = _np.array(x_mm) - _np.array(ox_arr) + off_x
-    dy = _np.array(y_mm) - _np.array(oy_arr) + off_y
-
-    angle_norm = round(unit_angle) % 360
-    if angle_norm == 90:
-        ax, ay = dy, -dx
-    elif angle_norm == 180:
-        ax, ay = -dx, -dy
-    elif angle_norm == 270:
-        ax, ay = -dy, dx
-    else:  # 0° or any unrecognised angle — identity
-        ax, ay = dx, dy
-
+    ax = _np.array(x_mm) - _np.array(ox_arr) + off_x
+    ay = _np.array(y_mm) - _np.array(oy_arr) + off_y
     return tuple(ax.tolist()), tuple(ay.tolist())
 
 
@@ -473,20 +449,36 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     _unit_angle_cm = getattr(_rodb_cm_angle.panel_layout, 'dominant_angle', 0.0)
 
                 # ── Background rotation (SVG only — defect positions unchanged) ──
+                _default_rot = float(round(_unit_angle_cm) % 360)
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
                         "Background rotation (°)", min_value=0.0, max_value=360.0,
-                        value=0.0, step=0.5, format="%.1f",
-                        key='cm_rotation_deg',
+                        value=_default_rot, step=0.5, format="%.1f",
+                        key=f'cm_rotation_deg_{_default_rot}',
                         help="Rotate the CAD background to align with the defect cloud. Defect point positions do not move.",
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
+
+                _auto_shift_x, _auto_shift_y = 0.0, 0.0
+                if _first_lyr_cm:
+                    _rot_norm = round(_rot_deg) % 360
+                    _rb = _first_lyr_cm.bounds
+                    if _rot_norm == 90:
+                        _new_min_x, _new_min_y = -_rb[3], _rb[0]
+                    elif _rot_norm == 180:
+                        _new_min_x, _new_min_y = -_rb[2], -_rb[3]
+                    elif _rot_norm == 270:
+                        _new_min_x, _new_min_y = _rb[1], -_rb[2]
+                    else:
+                        _new_min_x, _new_min_y = _rb[0], _rb[1]
+                    _auto_shift_x = -_new_min_x
+                    _auto_shift_y = -_new_min_y
 
                 _ax, _ay = _align_defects(
                     tuple(_cm_src['X_MM'].values.tolist()),
                     tuple(_cm_src['Y_MM'].values.tolist()),
                     tuple(_ox_arr), tuple(_oy_arr),
-                    _cm_off_x, _cm_off_y,
+                    _cm_off_x + _auto_shift_x, _cm_off_y + _auto_shift_y,
                     _unit_angle_cm,
                 )
                 _cm_plot = _cm_src.copy()
@@ -625,7 +617,6 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                             svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
                         if abs(rot) < 0.01:
                             return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
-                        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
                         vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
                         if vb:
                             vx, vy, vw, vh = map(float, vb.group(1).split())
@@ -635,8 +626,21 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                                 close = svg.rfind('</svg>')
                                 if close >= 0:
                                     inner = svg[tag.end():close]
+                                    rot_norm = round(rot) % 360
+                                    new_vb = f"{vx} {vy} {vw} {vh}"
+                                    if rot_norm in (90, 270):
+                                        # Swap width and height, keeping the center cx, cy the same
+                                        # new width = vh, new height = vw
+                                        new_vx = cx - vh / 2
+                                        new_vy = cy - vw / 2
+                                        new_vb = f"{new_vx:.4f} {new_vy:.4f} {vh:.4f} {vw:.4f}"
+                                    
+                                    # Replace the old viewBox with the new one
+                                    svg_start = svg[:tag.end()]
+                                    svg_start = _re_svg.sub(r'viewBox=[\"\'][^\"\']+[\"\']', f'viewBox="{new_vb}"', svg_start)
+                                    
                                     svg = (
-                                        svg[:tag.end()]
+                                        svg_start
                                         + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
                                         + inner + '</g>' + svg[close:]
                                     )
