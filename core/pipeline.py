@@ -269,17 +269,16 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             unit_w = board_bounds[2] - board_bounds[0]
             unit_h = board_bounds[3] - board_bounds[1]
 
-            # Detect InCAM Pro inches quirk in STEP-REPEAT only.
-            # If smallest step-repeat spacing < 5 mm but × 25.4 matches copper extent,
-            # coordinates are in inches — re-parse with the correct factor.
-            _all_spacings = []
+            # Detect InCAM Pro inches quirk in STEP-REPEAT.
+            # If the maximum absolute placement coordinate is suspiciously small 
+            # (e.g. < 25.0) but the unit width is > 10.0, the coordinates are in inches.
+            _max_abs = 0.0
             for _sr_list in step_hierarchy.values():
                 for _sr in _sr_list:
-                    if _sr.dx > 0: _all_spacings.append(_sr.dx)
-                    if _sr.dy > 0: _all_spacings.append(_sr.dy)
-            if _all_spacings and unit_w > 10:
-                _min_spacing = min(_all_spacings)
-                if _min_spacing < 5.0 and _min_spacing * 25.4 > unit_w * 0.8:
+                    _max_abs = max(_max_abs, abs(_sr.x), abs(_sr.y), _sr.dx, _sr.dy)
+            
+            if _max_abs > 0 and _max_abs < 25.0 and unit_w > 10.0:
+                if _max_abs * 25.4 > unit_w * 0.8:
                     step_hierarchy = _parse_step_repeat(job_root, 25.4)
                     warnings.append("⚠️ STEP-REPEAT inches quirk detected: hierarchy re-parsed with uf=25.4")
 

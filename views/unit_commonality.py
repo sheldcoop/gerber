@@ -149,6 +149,49 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
         d = _LAYER_OPACITY_MULTI if multi else _LAYER_OPACITY_SINGLE
         return d.get(lyr_type, 0.70 if multi else 0.85)
 
+    def _build_layer_url(lyr_obj, rot, is_multi=False):
+        """Return data URL with optional SVG rotation. Uses precomputed URL when rot==0."""
+        _invert = st.session_state.get('invert_polarity', False)
+        if abs(rot) < 0.01 and not _invert:
+            if is_multi and lyr_obj.color_svg_urls:
+                return next(iter(lyr_obj.color_svg_urls.values()))
+            return lyr_obj.svg_data_url
+        svg = lyr_obj.svg_string
+        if _invert:
+            _fg = '#FFD700' if lyr_obj.layer_type == 'drill' else '#b87333'
+            _t = '__PS__'
+            svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
+        if abs(rot) < 0.01:
+            return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
+        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
+        vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
+        if vb:
+            vx, vy, vw, vh = map(float, vb.group(1).split())
+            cx, cy = vx + vw / 2, vy + vh / 2
+            tag = _re_svg.search(r'<svg[^>]*>', svg)
+            if tag:
+                close = svg.rfind('</svg>')
+                if close >= 0:
+                    inner = svg[tag.end():close]
+                    rot_norm = round(rot) % 360
+                    new_vb = f"{vx} {vy} {vw} {vh}"
+                    if rot_norm in (90, 270):
+                        new_vx = cx - vh / 2
+                        new_vy = cy - vw / 2
+                        new_vb = f"{new_vx:.4f} {new_vy:.4f} {vh:.4f} {vw:.4f}"
+                    
+                    import re as _re_plain
+                    svg_start = svg[:tag.end()]
+                    svg_start = _re_plain.sub(r'viewBox=[\"\'][^\"\']+[\"\']', f'viewBox="{new_vb}"', svg_start)
+                    
+                    svg = (
+                        svg_start
+                        + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
+                        + inner + '</g>' + svg[close:]
+                    )
+        return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
+
+
     _rodb_cm_check = st.session_state.get('rendered_odb')
     _has_aoi_cm = (
         aoi and aoi.has_data
@@ -192,16 +235,36 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _is_multi_na = len(_na_checked) > 1
                 _na_sorted = sorted(_na_checked, key=_layer_sort_key)
 
+                _unit_angle_na = 0.0
+                if _rodb_cm_check and _rodb_cm_check.panel_layout:
+                    _unit_angle_na = getattr(_rodb_cm_check.panel_layout, 'dominant_angle', 0.0)
+                _rot_deg_na = float(round(_unit_angle_na) % 360)
+
                 _design_fig = go.Figure()
                 for _na_n, _na_l in _na_sorted:
+                    _na_data_url = _build_layer_url(_na_l, _rot_deg_na, _is_multi_na)
+                    
                     _lyr_b_na = _na_l.bounds
+                    _im_w_nat = _lyr_b_na[2] - _lyr_b_na[0]
+                    _im_h_nat = _lyr_b_na[3] - _lyr_b_na[1]
+                    
+                    if _rot_deg_na in (90.0, 270.0):
+                        _place_sizex = _im_h_nat
+                        _place_sizey = _im_w_nat
+                        _place_x     = 0.0
+                        _place_y     = _im_w_nat
+                        _no_aoi_cw, _no_aoi_ch = _no_aoi_ch, _no_aoi_cw
+                    else:
+                        _place_sizex = _im_w_nat
+                        _place_sizey = _im_h_nat
+                        _place_x     = _lyr_b_na[0] + _ref_sx_na
+                        _place_y     = _lyr_b_na[3] + _ref_sy_na
+
                     _design_fig.add_layout_image(dict(
-                        source=get_svg_url(_na_l),
+                        source=_na_data_url,
                         xref="x", yref="y",
-                        x=_lyr_b_na[0] + _ref_sx_na,
-                        y=_lyr_b_na[3] + _ref_sy_na,
-                        sizex=_lyr_b_na[2] - _lyr_b_na[0],
-                        sizey=_lyr_b_na[3] - _lyr_b_na[1],
+                        x=_place_x, y=_place_y,
+                        sizex=_place_sizex, sizey=_place_sizey,
                         sizing="stretch", layer="below",
                         opacity=_layer_opacity(_na_n, _na_l.layer_type, _is_multi_na),
                     ))
@@ -582,50 +645,30 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
 
                     import re as _re_svg, base64 as _b64_svg
 
-                    def _build_layer_url(lyr_obj, rot):
-                        """Return data URL with optional SVG rotation. Uses precomputed URL when rot==0."""
-                        _invert = st.session_state.get('invert_polarity', False)
-                        if abs(rot) < 0.01 and not _invert:
-                            if _is_multi_cm and lyr_obj.color_svg_urls:
-                                return next(iter(lyr_obj.color_svg_urls.values()))
-                            return lyr_obj.svg_data_url
-                        svg = lyr_obj.svg_string
-                        if _invert:
-                            _fg = '#FFD700' if lyr_obj.layer_type == 'drill' else '#b87333'
-                            _t = '__PS__'
-                            svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
-                        if abs(rot) < 0.01:
-                            return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
-                        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
-                        vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
-                        if vb:
-                            vx, vy, vw, vh = map(float, vb.group(1).split())
-                            cx, cy = vx + vw / 2, vy + vh / 2
-                            tag = _re_svg.search(r'<svg[^>]*>', svg)
-                            if tag:
-                                close = svg.rfind('</svg>')
-                                if close >= 0:
-                                    inner = svg[tag.end():close]
-                                    svg = (
-                                        svg[:tag.end()]
-                                        + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
-                                        + inner + '</g>' + svg[close:]
-                                    )
-                        return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
-
                     for _cm_cam_ln, _cm_cam_lyr in _cm_cam_pairs:
-                        _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg)
+                        _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg, _is_multi_cm)
 
                         _cb_cm = _cm_cam_lyr.bounds
-                        _im_x  = _cb_cm[0] + _ref_shift_x
-                        _im_y  = _cb_cm[3] + _ref_shift_y
-                        _im_w  = _cb_cm[2] - _cb_cm[0]
-                        _im_h  = _cb_cm[3] - _cb_cm[1]
+                        _im_w_nat = _cb_cm[2] - _cb_cm[0]
+                        _im_h_nat = _cb_cm[3] - _cb_cm[1]
+                        
+                        _angle_norm_img = round(_unit_angle_cm) % 360
+                        if _angle_norm_img in (90, 270):
+                            _place_sizex = _im_h_nat
+                            _place_sizey = _im_w_nat
+                            _place_x     = 0.0
+                            _place_y     = _im_w_nat
+                        else:
+                            _place_sizex = _im_w_nat
+                            _place_sizey = _im_h_nat
+                            _place_x     = _cb_cm[0] + _ref_shift_x
+                            _place_y     = _cb_cm[3] + _ref_shift_y
+
                         _cm_fig.add_layout_image(dict(
                             source=_cm_data_url,
                             xref="x", yref="y",
-                            x=_im_x, y=_im_y,
-                            sizex=_im_w, sizey=_im_h,
+                            x=_place_x, y=_place_y,
+                            sizex=_place_sizex, sizey=_place_sizey,
                             sizing="stretch", layer="below",
                             opacity=_layer_opacity(_cm_cam_ln, _cm_cam_lyr.layer_type, _is_multi_cm),
                         ))
