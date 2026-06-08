@@ -35,6 +35,8 @@ import collections as _collections
 
 # Module-level in-process LRU: survives Streamlit re-runs within the same worker process.
 # Eliminates disk I/O for repeated renders of the same file in one session.
+# Bump _MEM_CACHE_VER to evict all in-process entries (e.g. after adding new fields to PanelLayout).
+_MEM_CACHE_VER = 2
 _RENDER_MEM_CACHE: '_collections.OrderedDict[str, RenderedODB]' = _collections.OrderedDict()
 _RENDER_MEM_CACHE_MAX = 3
 
@@ -111,15 +113,17 @@ def render_odb_to_cam(data: bytes, filename: str = '',
     if digest is None:
         digest = compute_tgz_digest(data)
 
+    _cache_key = f"v{_MEM_CACHE_VER}:{digest}"
+
     # 1. In-process LRU (zero I/O, zero hashing)
-    if digest in _RENDER_MEM_CACHE:
-        _RENDER_MEM_CACHE.move_to_end(digest)
-        return _RENDER_MEM_CACHE[digest]
+    if _cache_key in _RENDER_MEM_CACHE:
+        _RENDER_MEM_CACHE.move_to_end(_cache_key)
+        return _RENDER_MEM_CACHE[_cache_key]
 
     # 2. Disk cache
     cache_hit = load_render_cache(digest=digest)
     if cache_hit:
-        _RENDER_MEM_CACHE[digest] = cache_hit
+        _RENDER_MEM_CACHE[_cache_key] = cache_hit
         if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
             _RENDER_MEM_CACHE.popitem(last=False)
         return cache_hit
@@ -127,7 +131,7 @@ def render_odb_to_cam(data: bytes, filename: str = '',
     # 3. Full render
     result = _render_pipeline(data, filename, layer_filter)
     save_render_cache(result, digest=digest)
-    _RENDER_MEM_CACHE[digest] = result
+    _RENDER_MEM_CACHE[_cache_key] = result
     if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
         _RENDER_MEM_CACHE.popitem(last=False)
     return result
@@ -150,7 +154,7 @@ def clear_render_cache(digest: str = None):
         if cam_dir.exists():
             _shutil.rmtree(cam_dir, ignore_errors=True)
     else:
-        _RENDER_MEM_CACHE.pop(digest, None)
+        _RENDER_MEM_CACHE.pop(f"v{_MEM_CACHE_VER}:{digest}", None)
         from core.cache import _cache_dir
         entry = _cache_dir(digest)
         _shutil.rmtree(entry, ignore_errors=True)

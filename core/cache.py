@@ -119,6 +119,7 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
             }
 
         manifest = {
+            'cache_version': 2,
             'board_bounds': list(rendered.board_bounds),
             'step_name': rendered.step_name,
             'units': rendered.units,
@@ -178,6 +179,8 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
             return None
 
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        if manifest.get('cache_version', 1) < 2:
+            return None  # stale cache — missing dominant_angle; force full re-render
         from gerber_renderer import RenderedLayer, RenderedODB
 
         layers = {}
