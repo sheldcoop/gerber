@@ -128,4 +128,5 @@ def compute_unit_positions(step_hierarchy: dict, unit_bounds: tuple,
         step_hierarchy=step_hierarchy,
         panel_width=pw if unique else (panel_width or 0),
         panel_height=ph if unique else (panel_height or 0),
+        dominant_angle=dominant_angle,
     )

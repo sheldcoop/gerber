@@ -444,6 +444,11 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                 _cm_off_x = align_args.get('manual_offset_x', 0.0)
                 _cm_off_y = align_args.get('manual_offset_y', 0.0)
 
+                _dom_angle = getattr(
+                    getattr(st.session_state.get('rendered_odb'), 'panel_layout', None),
+                    'dominant_angle', 0.0,
+                )
+
                 # ── Background rotation (SVG only — defect positions unchanged) ──
                 with st.form("cm_rotation_form", border=False):
                     _rot_deg = st.number_input(
@@ -454,12 +459,22 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     )
                     st.form_submit_button("Apply rotation", use_container_width=True)
 
-                _ax, _ay = _align_defects(
-                    tuple(_cm_src['X_MM'].values.tolist()),
-                    tuple(_cm_src['Y_MM'].values.tolist()),
-                    tuple(_ox_arr), tuple(_oy_arr),
-                    _cm_off_x, _cm_off_y,
-                )
+                if _dom_angle in (90.0, 270.0):
+                    # For 90°/270° units the unit is rotated in the panel:
+                    # panel Y offset → local X axis; panel X offset → local Y axis.
+                    _ax, _ay = _align_defects(
+                        tuple(_cm_src['Y_MM'].values.tolist()),
+                        tuple(_cm_src['X_MM'].values.tolist()),
+                        tuple(_oy_arr), tuple(_ox_arr),
+                        _cm_off_y, _cm_off_x,
+                    )
+                else:
+                    _ax, _ay = _align_defects(
+                        tuple(_cm_src['X_MM'].values.tolist()),
+                        tuple(_cm_src['Y_MM'].values.tolist()),
+                        tuple(_ox_arr), tuple(_oy_arr),
+                        _cm_off_x, _cm_off_y,
+                    )
                 _cm_plot = _cm_src.copy()
                 _cm_plot['ALIGNED_X'] = list(_ax)
                 _cm_plot['ALIGNED_Y'] = list(_ay)

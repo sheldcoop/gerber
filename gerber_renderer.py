@@ -76,6 +76,7 @@ class PanelLayout:
     panel_width: float = 510.0    # mm (from ODB++ panel profile)
     panel_height: float = 515.0   # mm (from ODB++ panel profile)
     unit_positions_raw: list = field(default_factory=list)  # raw ODB++ coords (pre-centering)
+    dominant_angle: float = 0.0   # dominant leaf rotation in degrees (0, 90, 180, 270)
 
 
 @dataclass
