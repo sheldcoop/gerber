@@ -19,6 +19,9 @@ def _svg_to_data_url_fast(svg_str: str) -> str:
 # ── Cache directory ────────────────────────────────────────────────────────────
 _CAM_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs' / 'cam'
 
+# Bump when cached object schema changes — forces automatic re-render of stale entries.
+CACHE_VERSION = 2
+
 
 def compute_tgz_digest(tgz_bytes: bytes) -> str:
     """Return MD5 hex digest for TGZ bytes.
@@ -53,6 +56,7 @@ def _panel_layout_to_dict(pl) -> Optional[dict]:
         'panel_width': pl.panel_width,
         'panel_height': pl.panel_height,
         'unit_positions_raw': [list(p) for p in pl.unit_positions_raw],
+        'dominant_angle': pl.dominant_angle,
     }
 
 
@@ -75,6 +79,7 @@ def _panel_layout_from_dict(d: Optional[dict]):
         panel_width=d['panel_width'],
         panel_height=d['panel_height'],
         unit_positions_raw=[tuple(p) for p in d['unit_positions_raw']],
+        dominant_angle=d.get('dominant_angle', 0.0),
     )
 
 
@@ -117,6 +122,7 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
             }
 
         manifest = {
+            'cache_version': CACHE_VERSION,
             'board_bounds': list(rendered.board_bounds),
             'step_name': rendered.step_name,
             'units': rendered.units,
@@ -176,6 +182,8 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
             return None
 
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        if manifest.get('cache_version', 1) != CACHE_VERSION:
+            return None  # stale schema — force full re-render
         from gerber_renderer import RenderedLayer, RenderedODB
 
         layers = {}
