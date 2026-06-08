@@ -184,11 +184,40 @@ _RENDER_PRIORITY = {
 }
 
 
-_RASTER_THRESHOLD = 8_000  # polygon count above which we rasterize to PNG
+def _get_raster_threshold(layer) -> int:
+    """Dynamic raster threshold based on geometric complexity."""
+    base_threshold = 8000
+    if not layer.polygons:
+        return base_threshold
 
+    # Heuristic: count total points in a small sample to gauge complexity
+    sample_size = min(100, len(layer.polygons))
+    sample = layer.polygons[:sample_size]
+
+    pt_count = 0
+    for poly in sample:
+        try:
+            pt_count += len(poly.exterior.coords)
+            for inner in poly.interiors:
+                pt_count += len(inner.coords)
+        except AttributeError:
+            continue
+
+    avg_pts = pt_count / sample_size if sample_size > 0 else 0
+
+    # If shapes are complex (>50 points each on average), rasterize sooner
+    if avg_pts > 50:
+        return 3000
+    # If shapes are simple (e.g. rectangles), we can push vector limits higher
+    elif avg_pts < 10:
+        return 15000
+
+    return base_threshold
 
 def _rasterize_layer(layer, bounds: tuple, color_dict: dict,
                       opacity: float, px: int = 2048) -> str | None:
+    import logging
+    logger = logging.getLogger(__name__)
     """
     Render a dense layer (>_RASTER_THRESHOLD polygons) to a transparent PNG
     and return a base64 data URL.  PIL/Pillow is used for speed.
@@ -244,13 +273,14 @@ def _rasterize_layer(layer, bounds: tuple, color_dict: dict,
         buf.seek(0)
         return "data:image/png;base64," + base64.b64encode(buf.read()).decode()
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Matplotlib rasterization failed: {e}. Falling back to PIL.")
 
     # Fallback: PIL per-polygon (slower but no matplotlib dependency)
     try:
         from PIL import Image, ImageDraw  # type: ignore
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"PIL not available for rasterization fallback: {e}")
         return None
 
     aspect = bh / bw
@@ -339,7 +369,8 @@ def _add_layer_traces(
         # browser rendering. Sending 50k+ SVG paths freezes any browser.
         poly_count = len(layer.polygons)
         _is_outline = (layer.layer_type == 'outline')
-        if poly_count > _RASTER_THRESHOLD and not _is_outline:
+        raster_threshold = _get_raster_threshold(layer)
+        if poly_count > raster_threshold and not _is_outline:
             render_bounds = config.board_bounds
             if render_bounds and render_bounds != (0, 0, 0, 0):
                 rbnds = render_bounds
@@ -378,6 +409,14 @@ def _add_layer_traces(
         all_x, all_y = [], []
         has_widths = hasattr(layer, 'trace_widths') and len(layer.trace_widths) == len(layer.polygons)
         min_size = config.min_feature_size
+
+        # Determine LOD simplification tolerance based on total bounds (if applicable)
+        simplification_tolerance = 0.0
+        if config.board_bounds:
+            bw = config.board_bounds[2] - config.board_bounds[0]
+            # At full panel zoom (e.g. 500mm), 0.05mm features don't need sub-micron detail
+            simplification_tolerance = min(0.05, bw / 5000.0) if bw > 0 else 0.0
+
         for poly_idx, poly in enumerate(layer.polygons):
             # --- LOD FILTERING: skip sub-threshold features at full-panel zoom ---
             if min_size is not None and has_widths:
@@ -389,6 +428,14 @@ def _add_layer_traces(
                 # Frustum Collision Check: if trace sits entirely outside bounding box edges, implicitly bin it
                 if minx > cx2 or maxx < cx1 or miny > cy2 or maxy < cy1:
                     continue
+
+            # --- LOD SIMPLIFICATION ---
+            if simplification_tolerance > 0.001 and not is_outline:
+                try:
+                    # preserve_topology=False is much faster and fine for rendering
+                    poly = poly.simplify(simplification_tolerance, preserve_topology=False)
+                except Exception:
+                    pass
                     
             px, py = _geometry_to_coords(poly)
             # Apply visual offset directly so axes reflect physical panel topology

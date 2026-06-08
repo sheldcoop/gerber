@@ -2,21 +2,11 @@
 aoi_loader.py — AOI (Automated Optical Inspection) defect data loader.
 
 Loads Orbotech AOI defect data from Excel files, auto-detects column mappings,
-extracts buildup layer, side (Front/Back), panel number and section from filenames,
-and converts coordinates from microns to mm.
+extracts buildup layer and side (Front/Back) from filenames using the InCam Pro
+naming convention (BU-XXF / BU-XXB), and converts coordinates from microns to mm.
 
-Filename convention (new format):
-  BU_01F_Panel1_S1.xlsx  → Buildup 1, Front, Panel 1, Section 1
-  BU_02B_Panel2_S3.xlsx  → Buildup 2, Back,  Panel 2, Section 3
-  BU_01F_Panel1.xlsx     → Buildup 1, Front, Panel 1, Section 1 (section optional)
-
-  Multiple section files for the same Panel+BU+Side are merged automatically:
-    BU_01F_Panel1_S1.xlsx  ┐
-    BU_01F_Panel1_S2.xlsx  ├─ all merged as Panel 1, Buildup 1, Front
-    BU_01F_Panel1_S3.xlsx  ┘
-
-Legacy filename convention (still supported):
-  BU-02F  → Buildup layer 2, Front side  (assumes Panel_01, Section 1)
+Filename convention:
+  BU-02F  → Buildup layer 2, Front side
   BU-02B  → Buildup layer 2, Back side
   BU-01 F → Also accepted (space before F/B)
 
@@ -26,8 +16,10 @@ Expected Excel columns (auto-detected by alias matching):
   ENHANCED_IMAGE, VERIFICATION
 """
 
+import hashlib
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -37,21 +29,18 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Parquet cache directory
+# ---------------------------------------------------------------------------
+import cache_manager
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 # Regex to extract buildup number and side from filename
-# New format:  BU_01F_Panel1_S2  or  BU_01F_Panel1  (section optional)
-# Legacy format: BU-02F, BU-02B, BU-02 F, bu-1f, BU02F, etc.
-FILENAME_PATTERN_NEW = re.compile(
-    r'BU[_\-]?(\d{1,2})\s*([FfBb])[_\-]Panel(\d+)(?:[_\-]S(\d+))?',
-    re.IGNORECASE
-)
-FILENAME_PATTERN_LEGACY = re.compile(r'BU[-_]?(\d{1,2})\s*([FfBb])', re.IGNORECASE)
-# Backward-compatible alias — sidebar.py and tests still import this name
-FILENAME_PATTERN = FILENAME_PATTERN_LEGACY
+# Matches: BU-02F, BU-02B, BU-02 F, bu-1f, BU02F, etc.
+FILENAME_PATTERN = re.compile(r'BU[-_]?(\d{1,2})\s*([FfBb])', re.IGNORECASE)
 
 # Column name aliases for auto-detection (canonical name → list of aliases)
 # All comparisons done in lowercase with spaces/underscores normalized
@@ -119,7 +108,6 @@ class AOIDataset:
     defect_types: list[str] = field(default_factory=list)
     buildup_numbers: list[int] = field(default_factory=list)
     sides: list[str] = field(default_factory=list)
-    panel_ids: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -241,54 +229,23 @@ def render_column_mapping_ui(df: pd.DataFrame) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Buildup / Side / Panel / Section extraction from filename
+# Buildup / Side extraction from filename
 # ---------------------------------------------------------------------------
 
-def _parse_filename(filename: str) -> tuple[int, str, str, int, list[str]]:
+def _extract_buildup_side(filename: str) -> tuple[int, str, list[str]]:
     """
-    Extract buildup number, side, panel ID and section from the filename.
-
-    Supported formats:
-      New:    BU_01F_Panel1_S2.xlsx  → buildup=1, side='F', panel='Panel_01', section=2
-              BU_01F_Panel1.xlsx     → buildup=1, side='F', panel='Panel_01', section=1
-      Legacy: BU-02F.xlsx            → buildup=2, side='F', panel='Panel_01', section=1
+    Extract buildup layer number and side (F/B) from the filename.
 
     Returns:
-        (buildup_number, side_letter, panel_id, section_number, warnings)
+        (buildup_number, side_letter, warnings)
     """
-    warnings = []
+    match = FILENAME_PATTERN.search(filename)
+    if match:
+        buildup = int(match.group(1))
+        side = match.group(2).upper()
+        return (buildup, side, [])
 
-    # ── New format: BU_01F_Panel1_S2 ─────────────────────────────────────
-    m = FILENAME_PATTERN_NEW.search(filename)
-    if m:
-        buildup    = int(m.group(1))
-        side       = m.group(2).upper()
-        panel_id   = f"Panel_{int(m.group(3)):02d}"
-        section    = int(m.group(4)) if m.group(4) else 1
-        return (buildup, side, panel_id, section, warnings)
-
-    # ── Legacy format: BU-02F ─────────────────────────────────────────────
-    m = FILENAME_PATTERN_LEGACY.search(filename)
-    if m:
-        buildup  = int(m.group(1))
-        side     = m.group(2).upper()
-        warnings.append(
-            f"'{filename}' uses legacy naming — panel defaulted to Panel_01. "
-            f"Rename to BU_{int(m.group(1)):02d}{m.group(2).upper()}_Panel1_S1.xlsx for multi-panel support."
-        )
-        return (buildup, side, 'Panel_01', 1, warnings)
-
-    # ── Fallback ──────────────────────────────────────────────────────────
-    warnings.append(
-        f"Could not parse buildup/side from '{filename}' — defaulting to BU-0, Front, Panel_01, S1."
-    )
-    return (0, 'F', 'Panel_01', 1, warnings)
-
-
-# Keep legacy name as a thin wrapper so nothing else breaks
-def _extract_buildup_side(filename: str) -> tuple[int, str, list[str]]:
-    buildup, side, _panel, _section, warnings = _parse_filename(filename)
-    return (buildup, side, warnings)
+    return (0, 'F', [f"Could not extract buildup/side from filename '{filename}' — defaulting to BU-0 Front"])
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +258,6 @@ def _load_single_aoi(
     buildup: int,
     side: str,
     column_mapping: Optional[dict] = None,
-    panel_id: str = 'Panel_01',
-    section: int = 1,
 ) -> AOILoadResult:
     """
     Load a single AOI Excel file and return standardized data.
@@ -316,27 +271,16 @@ def _load_single_aoi(
     """
     warnings = []
 
-    # Read Excel — try polars first (3-10× faster), fallback to pandas
+    # Read Excel
     import io
-    df = None
     try:
-        # Try polars for faster Excel reading if available
+        # Try 'Defects' sheet first (common in Orbotech exports)
         try:
-            import polars as pl
-            # Try 'Defects' sheet first (common in Orbotech exports)
-            try:
-                pl_df = pl.read_excel(file_bytes, sheet_name='Defects')
-            except Exception:
-                pl_df = pl.read_excel(file_bytes, sheet_id=0)
-            df = pl_df.to_pandas()  # Convert to pandas for compatibility
-        except (ImportError, Exception):
-            # Polars not available or failed — use pandas
-            try:
-                df = pd.read_excel(
-                    io.BytesIO(file_bytes), sheet_name='Defects', engine='openpyxl'
-                )
-            except (ValueError, KeyError):
-                df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, engine='openpyxl')
+            df = pd.read_excel(
+                io.BytesIO(file_bytes), sheet_name='Defects', engine='openpyxl'
+            )
+        except (ValueError, KeyError):
+            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, engine='openpyxl')
     except Exception as e:
         return AOILoadResult(
             df=pd.DataFrame(),
@@ -394,8 +338,6 @@ def _load_single_aoi(
     df['BUILDUP'] = buildup
     df['SIDE'] = side
     df['SOURCE_FILE'] = filename
-    df['PANEL_ID'] = panel_id
-    df['SECTION'] = section
 
     # Optional column cleanup
     if 'DEFECT_ID' in df.columns:
@@ -420,20 +362,56 @@ def _load_single_aoi(
 
 
 # ---------------------------------------------------------------------------
+# Parquet caching
+# ---------------------------------------------------------------------------
+
+def _compute_files_hash(uploaded_files: list) -> str:
+    """Compute MD5 hash of uploaded file contents for cache key."""
+    h = hashlib.md5()
+    for uf in uploaded_files:
+        h.update(uf.read())
+        uf.seek(0)
+    return h.hexdigest()
+
+
+def _try_load_from_cache(file_hash: str) -> Optional[AOIDataset]:
+    """Try to load AOI data from Parquet cache. Returns None on miss."""
+    cached = cache_manager.load_aoi_cache(file_hash)
+    if cached is None:
+        return None
+
+    df, meta = cached
+
+    return AOIDataset(
+        all_defects=df,
+        defect_types=meta['defect_types'],
+        buildup_numbers=meta['buildup_numbers'],
+        sides=meta['sides'],
+        warnings=meta.get('warnings', []) + [f"Loaded from cache"],
+    )
+
+
+def _save_to_cache(file_hash: str, dataset: AOIDataset) -> None:
+    """Persist AOI dataset to Parquet cache."""
+    meta = {
+        'defect_types': dataset.defect_types,
+        'buildup_numbers': dataset.buildup_numbers,
+        'sides': dataset.sides,
+        'warnings': [w for w in dataset.warnings if 'cache' not in w.lower()],
+    }
+    cache_manager.save_aoi_cache(file_hash, dataset.all_defects, meta)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_aoi_files(uploaded_files: list, classifications: Optional[list] = None) -> AOIDataset:
+def load_aoi_files(uploaded_files: list) -> AOIDataset:
     """
     Load multiple AOI Excel files into a unified AOIDataset.
 
-    If `classifications` is provided (list of dicts from the sidebar UI), each
-    entry must contain: {'file', 'panel', 'buildup', 'side', 'section'}.
-    Otherwise buildup/side/panel/section are parsed from the filename.
-
-    Args:
-        uploaded_files:  list of Streamlit UploadedFile objects
-        classifications: optional list of per-file classification dicts from the UI
+    Each file's buildup number and side are extracted from its filename.
+    All DataFrames are concatenated with consistent column names.
 
     Args:
         uploaded_files: list of Streamlit UploadedFile objects
@@ -444,41 +422,27 @@ def load_aoi_files(uploaded_files: list, classifications: Optional[list] = None)
     if not uploaded_files:
         return AOIDataset(warnings=["No AOI files uploaded"])
 
+    # Check Parquet cache first (warm load path)
+    file_hash = _compute_files_hash(uploaded_files)
+    cached = _try_load_from_cache(file_hash)
+    if cached is not None:
+        return cached
+
     # Cold load: parse from Excel
     all_results = []
     all_warnings = []
 
-    # If classifications provided, it's a list of dicts with keys:
-    # {'file', 'panel', 'buildup', 'side', 'section'} in the same order as uploaded_files
-    for i, uf in enumerate(uploaded_files):
+    for uf in uploaded_files:
         filename = uf.name
         file_bytes = uf.read()
         uf.seek(0)  # reset for potential re-read
 
-        # Prefer UI-provided classification when available
-        if classifications and i < len(classifications) and classifications[i].get('file'):
-            _cl = classifications[i]
-            try:
-                panel_id = f"Panel_{int(_cl.get('panel', 1)):02d}"
-            except Exception:
-                panel_id = 'Panel_01'
-            try:
-                buildup = int(_cl.get('buildup', 0))
-            except Exception:
-                buildup = 0
-            side = 'F' if str(_cl.get('side', 'Front')).lower().startswith('f') else 'B'
-            try:
-                section = int(_cl.get('section', 1))
-            except Exception:
-                section = 1
-        else:
-            # Extract buildup, side, panel and section from filename
-            buildup, side, panel_id, section, extract_warnings = _parse_filename(filename)
-            all_warnings.extend(extract_warnings)
+        # Extract buildup and side from filename
+        buildup, side, extract_warnings = _extract_buildup_side(filename)
+        all_warnings.extend(extract_warnings)
 
         # Load and process the file
-        result = _load_single_aoi(file_bytes, filename, buildup, side,
-                                  panel_id=panel_id, section=section)
+        result = _load_single_aoi(file_bytes, filename, buildup, side)
         all_warnings.extend(result.warnings)
 
         if not result.df.empty:
@@ -495,16 +459,17 @@ def load_aoi_files(uploaded_files: list, classifications: Optional[list] = None)
     defect_types = sorted(combined['DEFECT_TYPE'].unique().tolist())
     buildup_numbers = sorted(combined['BUILDUP'].unique().tolist())
     sides = sorted(combined['SIDE'].unique().tolist())
-    panel_ids = sorted(combined['PANEL_ID'].unique().tolist()) if 'PANEL_ID' in combined.columns else []
 
     dataset = AOIDataset(
         all_defects=combined,
         defect_types=defect_types,
         buildup_numbers=buildup_numbers,
         sides=sides,
-        panel_ids=panel_ids,
         warnings=all_warnings,
     )
+
+    # Persist to Parquet cache for warm loads
+    _save_to_cache(file_hash, dataset)
 
     return dataset
 
@@ -525,11 +490,22 @@ def load_aoi_with_manual_side(
     Returns:
         AOIDataset
     """
+    import json
+
+    # Cache key: file contents + manual map
+    h = hashlib.md5()
     all_bytes = []
     for uf in uploaded_files:
         b = uf.read()
+        h.update(b)
         all_bytes.append((uf.name, b))
         uf.seek(0)
+    h.update(json.dumps(buildup_side_map, sort_keys=True).encode())
+    file_hash = h.hexdigest() + '_manual'
+
+    cached = _try_load_from_cache(file_hash)
+    if cached is not None:
+        return cached
 
     all_results = []
     all_warnings = []
@@ -550,7 +526,7 @@ def load_aoi_with_manual_side(
         defect_types=sorted(combined['DEFECT_TYPE'].unique().tolist()),
         buildup_numbers=sorted(combined['BUILDUP'].unique().tolist()),
         sides=sorted(combined['SIDE'].unique().tolist()),
-        panel_ids=sorted(combined['PANEL_ID'].unique().tolist()) if 'PANEL_ID' in combined.columns else [],
         warnings=all_warnings
     )
+    _save_to_cache(file_hash, dataset)
     return dataset
