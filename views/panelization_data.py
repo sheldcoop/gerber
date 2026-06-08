@@ -74,7 +74,36 @@ def render_panelization_data(parsed, aoi, align_args):
                     'Pitch Y (mm)':  round(_sr.dy, 4),
                     'Angle (°)':     int(_sr.angle),
                 })
-        _df_h = pd.DataFrame(_rows_h)
+        # Consolidate multiple NX=1/NY=1 individual-placement entries (written by
+        # InCAM Pro for ANGLE≠0) into a single summary row per (parent, child) pair,
+        # matching the compact format used for ANGLE=0 designs.
+        _groups_display = defaultdict(list)
+        for _r in _rows_h:
+            _groups_display[(_r['Parent Step'], _r['Child Step'])].append(_r)
+
+        _rows_consolidated = []
+        for (_parent, _child), _entries in _groups_display.items():
+            if len(_entries) == 1:
+                _rows_consolidated.append(_entries[0])
+            else:
+                _xs = sorted(set(round(_r['Origin X (mm)'], 4) for _r in _entries))
+                _ys = sorted(set(round(_r['Origin Y (mm)'], 4) for _r in _entries))
+                _nx = len(_xs)
+                _ny = len(_ys)
+                _angles = [_r['Angle (°)'] for _r in _entries]
+                _rows_consolidated.append({
+                    'Parent Step':   _parent,
+                    'Child Step':    _child,
+                    'Origin X (mm)': min(_xs),
+                    'Origin Y (mm)': min(_ys),
+                    'Repeat X (nx)': _nx,
+                    'Repeat Y (ny)': _ny,
+                    'Pitch X (mm)':  round((_xs[-1] - _xs[0]) / (_nx - 1), 4) if _nx > 1 else 0,
+                    'Pitch Y (mm)':  round((_ys[-1] - _ys[0]) / (_ny - 1), 4) if _ny > 1 else 0,
+                    'Angle (°)':     max(set(_angles), key=_angles.count),
+                })
+
+        _df_h = pd.DataFrame(_rows_consolidated)
         st.dataframe(_df_h, use_container_width=True, hide_index=True)
 
         # ── Derived gaps from hierarchy ───────────────────────────────────────
