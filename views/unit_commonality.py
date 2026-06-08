@@ -599,7 +599,12 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     import re as _re_svg, base64 as _b64_svg
 
                     def _build_layer_url(lyr_obj, rot):
-                        """Return data URL with optional SVG rotation. Uses precomputed URL when rot==0."""
+                        """Return data URL with optional SVG rotation.
+
+                        For 90°/270°, the SVG viewBox is recomputed to the swapped
+                        (panel-space) dimensions so Plotly's stretch mode doesn't
+                        undo the rotation by re-squishing the image.
+                        """
                         _invert = st.session_state.get('invert_polarity', False)
                         if abs(rot) < 0.01 and not _invert:
                             if _is_multi_cm and lyr_obj.color_svg_urls:
@@ -612,11 +617,22 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                             svg = svg.replace(_fg, _t).replace('#060A06', _fg).replace(_t, '#060A06')
                         if abs(rot) < 0.01:
                             return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
-                        vb = _re_svg.search(r'viewBox=["\']([\'"]+)', svg)
-                        vb = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
-                        if vb:
-                            vx, vy, vw, vh = map(float, vb.group(1).split())
+                        vb_m = _re_svg.search(r"viewBox=[\"']([^\"']+)[\"']", svg)
+                        if vb_m:
+                            vx, vy, vw, vh = map(float, vb_m.group(1).split())
                             cx, cy = vx + vw / 2, vy + vh / 2
+                            r = rot % 360
+                            svg_rot = rot
+                            if r == 270.0:
+                                # 270° CCW = 90° CW in SVG; swap viewBox to panel-space dims
+                                svg_rot = 90
+                                new_vb = f"{cx+vy-cy:.4f} {cy-(vx+vw)+cx:.4f} {vh:.4f} {vw:.4f}"
+                                svg = svg.replace(vb_m.group(0), f'viewBox="{new_vb}"', 1)
+                            elif r == 90.0:
+                                # 90° CCW = -90° in SVG; swap viewBox to panel-space dims
+                                svg_rot = -90
+                                new_vb = f"{cx-(vy+vh)+cy:.4f} {cy+vx-cx:.4f} {vh:.4f} {vw:.4f}"
+                                svg = svg.replace(vb_m.group(0), f'viewBox="{new_vb}"', 1)
                             tag = _re_svg.search(r'<svg[^>]*>', svg)
                             if tag:
                                 close = svg.rfind('</svg>')
@@ -624,7 +640,7 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                                     inner = svg[tag.end():close]
                                     svg = (
                                         svg[:tag.end()]
-                                        + f'<g transform="rotate({rot},{cx:.4f},{cy:.4f})">'
+                                        + f'<g transform="rotate({svg_rot},{cx:.4f},{cy:.4f})">'
                                         + inner + '</g>' + svg[close:]
                                     )
                         return 'data:image/svg+xml;base64,' + _b64_svg.b64encode(svg.encode()).decode()
@@ -632,11 +648,19 @@ def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
                     for _cm_cam_ln, _cm_cam_lyr in _cm_cam_pairs:
                         _cm_data_url = _build_layer_url(_cm_cam_lyr, _rot_deg)
 
-                        _cb_cm = _cm_cam_lyr.bounds
-                        _im_x  = _cb_cm[0] + _ref_shift_x
-                        _im_y  = _cb_cm[3] + _ref_shift_y
-                        _im_w  = _cb_cm[2] - _cb_cm[0]
-                        _im_h  = _cb_cm[3] - _cb_cm[1]
+                        _r_mod = _rot_deg % 360
+                        if _r_mod in (90.0, 270.0):
+                            # viewBox was swapped; place image using panel-space dimensions
+                            _im_x = 0.0
+                            _im_y = _cam_cell_h
+                            _im_w = _cam_cell_w
+                            _im_h = _cam_cell_h
+                        else:
+                            _cb_cm = _cm_cam_lyr.bounds
+                            _im_x  = _cb_cm[0] + _ref_shift_x
+                            _im_y  = _cb_cm[3] + _ref_shift_y
+                            _im_w  = _cb_cm[2] - _cb_cm[0]
+                            _im_h  = _cb_cm[3] - _cb_cm[1]
                         _cm_fig.add_layout_image(dict(
                             source=_cm_data_url,
                             xref="x", yref="y",
