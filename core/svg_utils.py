@@ -6,6 +6,9 @@ from typing import Any
 _re_svg = re.compile(r'<svg[^>]+>', re.IGNORECASE)
 _re_viewbox = re.compile(r'viewBox=[\"\'][^\"\']+[\"\']')
 _re_viewbox_capture = re.compile(r'viewBox=[\"\']([^\'\"]+)[\"\']')
+_re_width = re.compile(r'\s+width=[\"\'][^\"\']+[\"\']', re.IGNORECASE)
+_re_height = re.compile(r'\s+height=[\"\'][^\"\']+[\"\']', re.IGNORECASE)
+
 
 def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                           invert: bool = False) -> str:
@@ -61,6 +64,10 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                 
                 svg_start = svg[:tag.end()]
                 svg_start = _re_viewbox.sub(f'viewBox="{new_vb}"', svg_start)
+                
+                # Strip hardcoded width/height so it scales fluidly by viewBox
+                svg_start = _re_width.sub('', svg_start)
+                svg_start = _re_height.sub('', svg_start)
                 
                 svg = (
                     svg_start
