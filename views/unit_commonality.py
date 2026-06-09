@@ -43,13 +43,14 @@ def _place_pairs(fig, pairs, ref_shift, rot, swap, is_multi, color_map):
     colour then stays visible. The sidebar toggle forces outlines on even for a single
     layer.
     """
-    manual_outline = _copper_outline_on()
+    outline_on = _copper_outline_on()  # defaults True — copper never renders solid
     dense_n = sum(1 for _, l in pairs if l.layer_type in _COPPER_TYPES)
-    auto_outline = dense_n > 1  # stacked solid copper pours occlude → outline them
     for _n, _l in pairs:
         is_copper = _l.layer_type in _COPPER_TYPES
         _lc = None if _l.layer_type == 'drill' else color_map.get(_n)
-        _ol = is_copper and (manual_outline or auto_outline)
+        # Copper as a wireframe so plane/pour layers show their design, not a solid block.
+        # (dense_n>1 keeps outlines on even if a user turns the toggle off mid-stack.)
+        _ol = is_copper and (outline_on or dense_n > 1)
         _place_layer_image(fig, _n, _l, ref_shift, rot, swap, is_multi,
                            layer_color=_lc, outline=_ol, dense_n=dense_n)
 

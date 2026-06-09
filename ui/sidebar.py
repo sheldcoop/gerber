@@ -461,9 +461,10 @@ def render_sidebar():
                 st.toggle(
                     "✏️ Copper outline mode",
                     key="copper_outline_mode",
-                    value=False,
-                    help="Draw copper as thin outlines instead of solid pours so stacked "
-                         "copper layers stay distinguishable.",
+                    value=True,
+                    help="Draw copper as a coloured wireframe (traces, pads, clearances and "
+                         "pour edges) instead of a solid pour, so you can always see the "
+                         "design. Turn off for solid copper fill.",
                 )
 
                 st.divider()
