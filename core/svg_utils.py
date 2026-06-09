@@ -70,7 +70,7 @@ def _inject_outline(svg: str, color: str) -> str:
 
 def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                           invert: bool = False, layer_color: str = None,
-                          outline: bool = False) -> str:
+                          outline: bool = False, filled: bool = False) -> str:
     """
     Builds a data URL for an SVG layer, optionally rotating the SVG contents
     and injecting colours based on layer type.
@@ -145,10 +145,13 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     # so a copper pour never mashes into a solid blob.
     if outline:
         color = layer_color or _natural
-        # Default copper view is the filled-field contour: dark wireframe on a coloured
-        # field (reads like real copper) — never mashes because fills stay 'none'. The
-        # Invert-polarity toggle flips to a coloured wireframe on a transparent bg.
-        if not invert:
+        # Two contour styles (decided by the caller via `filled`):
+        #   filled=True  → dark wireframe on an opaque coloured field (reads like real
+        #                  copper). Good for a SINGLE layer; occludes layers beneath.
+        #   filled=False → coloured wireframe on a transparent bg. Lets multiple copper
+        #                  layers stack and all stay visible, each in its own colour.
+        # Neither mashes, because the solid fills are always forced to 'none'.
+        if filled:
             # The bg replace runs first; the dark stroke colour injected afterwards is a
             # fresh literal, so it isn't retro-replaced by the field colour.
             svg = svg.replace(_SVG_BG, color)

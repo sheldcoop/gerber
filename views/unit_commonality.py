@@ -92,7 +92,8 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
 
 
 def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
-             layer_color: str = None, outline: bool = False, invert: bool = False) -> str:
+             layer_color: str = None, outline: bool = False, invert: bool = False,
+             filled: bool = False) -> str:
     """Reference-layer SVG url honouring the invert-polarity toggle.
 
     Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
@@ -104,7 +105,7 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
     name = getattr(lyr_obj, 'name', None)
     if (abs(rot_deg) < 0.01 and not invert and not layer_color and not outline) or name is None:
         return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                     layer_color=layer_color, outline=outline)
+                                     layer_color=layer_color, outline=outline, filled=filled)
 
     gen = id(st.session_state.get('rendered_odb'))
     store = st.session_state.get('_cm_svg_cache')
@@ -113,11 +114,12 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
         st.session_state['_cm_svg_cache'] = store
     cache = store['data']
 
-    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color, bool(outline))
+    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color,
+           bool(outline), bool(filled))
     url = cache.get(key)
     if url is None:
         url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                    layer_color=layer_color, outline=outline)
+                                    layer_color=layer_color, outline=outline, filled=filled)
         cache[key] = url
     return url
 
@@ -164,9 +166,14 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
     # Invert polarity applies to copper and soldermask only — never to drill/via layers.
     _inv = st.session_state.get('invert_polarity', False) and lyr.layer_type != 'drill'
 
+    # Copper contour fill style: a SINGLE copper layer gets the opaque coloured field
+    # (looks like real copper); 2+ stacked copper layers use the transparent wireframe so
+    # every layer stays visible. Invert flips a single layer to the wireframe too.
+    filled = outline and dense_n <= 1 and not _inv
+
     fig.add_layout_image(dict(
         source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color,
-                        outline=outline, invert=_inv),
+                        outline=outline, invert=_inv, filled=filled),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
         sizing="stretch", layer="below",
         opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi,
