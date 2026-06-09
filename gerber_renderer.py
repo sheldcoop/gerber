@@ -20,6 +20,8 @@ from typing import Optional
 
 from gerbonara import GerberFile
 
+from core.constants import COPPER_FG, SVG_BG
+
 from odb_parser import (
     _extract_odb_tgz,
     _parse_matrix,
@@ -182,7 +184,7 @@ def scan_available_layers(data: bytes) -> list:
 
 
 def render_layer_svg(data: bytes, layer_name: str,
-                     fg_color: str = '#b87333', bg_color: str = '#060A06') -> Optional[str]:
+                     fg_color: str = COPPER_FG, bg_color: str = SVG_BG) -> Optional[str]:
     """Convenience: render a single layer and return SVG string."""
     result = render_odb_to_cam(data, layer_filter=[layer_name])
     layer = result.layers.get(layer_name) or next(iter(result.layers.values()), None)

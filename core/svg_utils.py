@@ -2,22 +2,7 @@ import re
 import base64
 from typing import Any
 
-# Opaque panel-background colour baked into every layer SVG by the renderer.
-_SVG_BG = '#060A06'
-
-# Shared palette for distinguishing layers when several are shown together.
-# Lives here (a leaf module) so both the views and the sidebar import the same
-# colours without risking a circular import.
-LAYER_PALETTE = [
-    '#FF9800',  # amber
-    '#2196F3',  # blue
-    '#4CAF50',  # green
-    '#9C27B0',  # purple
-    '#00BCD4',  # cyan
-    '#E91E63',  # pink
-    '#CDDC39',  # lime
-    '#F44336',  # red
-]
+from core.constants import SVG_BG as _SVG_BG, LAYER_PALETTE, layer_fg
 
 
 def stable_layer_colors(layer_names) -> dict:
@@ -138,7 +123,7 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                 pass  # fall through to the svg_string path below
 
     svg = getattr(lyr_obj, 'svg_string', "")
-    _natural = '#FFD700' if getattr(lyr_obj, 'layer_type', '') == 'drill' else '#b87333'
+    _natural = layer_fg(getattr(lyr_obj, 'layer_type', ''))
 
     # These render modes are mutually exclusive — applying more than one corrupts the
     # colours. Outline (contour) wins for copper and stays a contour even when inverted,

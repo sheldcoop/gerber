@@ -245,9 +245,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
 
     # ── Polarity helper — swap fg/bg colours in a pre-rendered SVG string ───
-    _COPPER_FG  = '#b87333'
-    _DRILL_FG   = '#FFD700'
-    _SVG_BG     = '#060A06'
+    from core.constants import SVG_BG as _SVG_BG, layer_fg
     _invert_pol = st.session_state.get('invert_polarity', False)
 
     def _get_svg_url(layer_obj):
@@ -255,7 +253,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         import base64 as _b64
         svg = layer_obj.svg_string
         if _invert_pol:
-            fg = _DRILL_FG if layer_obj.layer_type == 'drill' else _COPPER_FG
+            fg = layer_fg(layer_obj.layer_type)
             _t = '__PS__'
             svg = (svg
                    .replace(fg, _t)

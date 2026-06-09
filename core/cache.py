@@ -10,16 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 from core.svg_utils import build_stack_svg
+from core.constants import CAM_CACHE_DIR as _CAM_CACHE_DIR, COPPER_FG, DRILL_FG, layer_fg
 
 
 def _svg_to_data_url_fast(svg_str: str) -> str:
     """Convert SVG string to base64 data URL (cached-friendly)."""
     b64 = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
     return f"data:image/svg+xml;base64,{b64}"
-
-
-# ── Cache directory ────────────────────────────────────────────────────────────
-_CAM_CACHE_DIR = Path.home() / '.cache' / 'gerber-vrs' / 'cam'
 
 
 def compute_tgz_digest(tgz_bytes: bytes) -> str:
@@ -116,7 +113,7 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
                 'bounds': list(lyr.bounds),
                 'feature_count': lyr.feature_count,
                 'stats': lyr.stats,
-                'fg_color': '#FFD700' if lyr.layer_type == 'drill' else '#b87333',
+                'fg_color': layer_fg(lyr.layer_type),
                 'stack_color': stack_color,
             }
 
@@ -191,7 +188,7 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
             svg_data_url = _svg_to_data_url_fast(svg_string)
 
             # Reconstruct stack color variant (recolour fg + transparent bg, no to_svg() call)
-            fg_color = meta.get('fg_color', '#b87333')
+            fg_color = meta.get('fg_color', COPPER_FG)
             stack_color = meta.get('stack_color') or fg_color
             stack_svg = build_stack_svg(svg_string, fg_color, stack_color)
             color_svg_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}

@@ -3,6 +3,7 @@ core/panel_builder.py — Composite unit SVG into a panel SVG using <use> tiling
 """
 
 from core.cache import _svg_to_data_url_fast
+from core.constants import SVG_BG
 
 
 def build_panel_svg(svg_string: str, panel_layout) -> str:
@@ -58,7 +59,7 @@ def build_panel_svg(svg_string: str, panel_layout) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'xmlns:xlink="http://www.w3.org/1999/xlink" '
         f'viewBox="0 0 {pw:.4f} {ph:.4f}">'
-        f'<rect width="{pw:.4f}" height="{ph:.4f}" fill="#060A06"/>'
+        f'<rect width="{pw:.4f}" height="{ph:.4f}" fill="{SVG_BG}"/>'
         f'<defs><g id="_u">{inner}</g></defs>'
         f'{"".join(uses)}'
         f'</svg>'

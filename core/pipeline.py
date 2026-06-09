@@ -31,12 +31,13 @@ from core.step_layout import compute_unit_positions
 from core.panel_builder import build_panel_svg
 from core.svg_utils import build_stack_svg
 
+from core.constants import (
+    COPPER_FG, DRILL_FG, SVG_BG, layer_fg,
+    RENDERABLE_TYPES as _RENDERABLE_TYPES, STACK_LAYER_COLORS as LAYER_COLORS,
+)
+
 _DRILL_SPAN_RE = re.compile(r'^\d+[FB](CO)?[-_]\d+[FB](CO)?', re.IGNORECASE)
 _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
-_RENDERABLE_TYPES = {'copper', 'signal', 'power', 'mixed', 'soldermask', 'drill'}
-
-LAYER_COLORS = ['#b87333', '#4488cc', '#44aa44', '#9966bb', '#cc6644',
-                '#44ccaa', '#cc4466', '#44cccc']
 
 
 def _render_pipeline(data: bytes, filename: str, layer_filter: list):
@@ -169,8 +170,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
         all_bounds = []
 
         def _render_layer(name, ltype, gf, stats):
-            fg_color = '#FFD700' if ltype == 'drill' else '#b87333'
-            svg_str = str(gf.to_svg(fg=fg_color, bg='#060A06'))
+            fg_color = layer_fg(ltype)
+            svg_str = str(gf.to_svg(fg=fg_color, bg=SVG_BG))
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             stack_color = layer_color_map[name]
@@ -247,8 +248,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 warnings.append(f"Layer '{_dname}': no drill features within unit bounds")
                 continue
             _gf.objects = _kept
-            _fg = '#FFD700'
-            _svg2 = str(_gf.to_svg(fg=_fg, bg='#060A06'))
+            _fg = DRILL_FG
+            _svg2 = str(_gf.to_svg(fg=_fg, bg=SVG_BG))
             _bb2 = _gf.bounding_box(MM)
             _bounds2 = (_bb2[0][0], _bb2[0][1], _bb2[1][0], _bb2[1][1])
             _dlyr.svg_string = _svg2

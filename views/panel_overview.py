@@ -16,6 +16,7 @@ Performance optimizations:
 import streamlit as st
 import plotly.graph_objects as go
 from gerber_renderer import save_render_cache, build_panel_svg
+from core.constants import SVG_BG
 
 
 def _svg_to_png_data_url(svg_data_url: str, width_mm: float, height_mm: float, pixels_per_mm: int = 8) -> str:
@@ -313,7 +314,7 @@ def render_panel_overview(parsed, aoi, align_args):
                 try:
                     import base64 as _b64
                     _svg = _b64.b64decode(_src.split(',', 1)[1]).decode('utf-8')
-                    _svg = _svg.replace('#060A06', 'none')
+                    _svg = _svg.replace(SVG_BG, 'none')
                     _src = 'data:image/svg+xml;base64,' + _b64.b64encode(_svg.encode()).decode()
                 except Exception:
                     _src = lyr.panel_svg_data_url
