@@ -8,7 +8,7 @@ from export import export_current_view
 
 from views.cm_render import (
     _place_pairs, _layer_color_map, _layer_sort_key, _display_dims,
-    _add_dim_annotations, _add_grid, _add_density_heatmap,
+    _add_dim_annotations, _add_grid, _add_density_heatmap, prewarm_layer_urls,
 )
 from views.cm_geometry import _select_units, _compute_origins
 
@@ -324,6 +324,15 @@ def render_unit_commonality(parsed, aoi, align_args) -> None:
     if not rodb and not has_aoi_cm:
         st.info("Upload a TGZ design file or AOI defect data to use this view.")
         return
+
+    # Warm the per-layer SVG cache in the background (once per board) so the first click
+    # on any layer is instant. Non-blocking; safe to fail.
+    if rodb and rodb.layers:
+        try:
+            _angle = getattr(rodb.panel_layout, 'dominant_angle', 0.0) if rodb.panel_layout else 0.0
+            prewarm_layer_urls(rodb, float(round(_angle) % 360))
+        except Exception:
+            pass
 
     na_checked = _render_sidebar_controls(rodb)
 

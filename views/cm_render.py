@@ -6,12 +6,17 @@ SVG-url cache, and placing each layer as a Plotly background image. Split out of
 unit_commonality.py so the view module stays a thin orchestrator.
 """
 
+import logging
+import threading
+
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from typing import Any, Tuple
 
 from core.svg_utils import build_layer_url, stable_layer_colors, LayerStyle
+
+logger = logging.getLogger(__name__)
 from core.constants import (
     LAYER_Z as _LAYER_Z,
     COPPER_TYPES as _COPPER_TYPES,
@@ -69,6 +74,21 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
     return base
 
 
+def _svg_cache_key(name, rot_deg, is_multi, style: LayerStyle):
+    """Stable cache key shared by _svg_url and the pre-warmer (must stay in lock-step)."""
+    return (name, round(rot_deg, 1), bool(is_multi)) + style.cache_key()
+
+
+def _svg_cache_dict():
+    """Return the per-session styled-SVG cache dict, (re)created per loaded board."""
+    gen = id(st.session_state.get('rendered_odb'))
+    store = st.session_state.get('_cm_svg_cache')
+    if store is None or store.get('gen') != gen:
+        store = {'gen': gen, 'data': {}}
+        st.session_state['_cm_svg_cache'] = store
+    return store['data']
+
+
 def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool, style: LayerStyle) -> str:
     """Reference-layer SVG url for one design layer in the given render `style`.
 
@@ -83,19 +103,68 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool, style: LayerStyle) ->
     if (abs(rot_deg) < 0.01 and _plain) or name is None:
         return build_layer_url(lyr_obj, rot_deg, is_multi, style)
 
-    gen = id(st.session_state.get('rendered_odb'))
-    store = st.session_state.get('_cm_svg_cache')
-    if store is None or store.get('gen') != gen:
-        store = {'gen': gen, 'data': {}}
-        st.session_state['_cm_svg_cache'] = store
-    cache = store['data']
-
-    key = (name, round(rot_deg, 1), bool(is_multi)) + style.cache_key()
+    cache = _svg_cache_dict()
+    key = _svg_cache_key(name, rot_deg, is_multi, style)
     url = cache.get(key)
     if url is None:
         url = build_layer_url(lyr_obj, rot_deg, is_multi, style)
         cache[key] = url
     return url
+
+
+def _single_layer_style(layer_type, color):
+    """The render style a layer gets when shown on its own (the common first click).
+
+    Returns None for layers whose single-layer URL doesn't use the cache anyway (drill is
+    the precomputed O(1) path), so we don't waste work pre-warming them.
+    """
+    if layer_type in _COPPER_TYPES:
+        return LayerStyle(layer_color=color, outline=True, filled=True)   # copper wireframe-on-field
+    if layer_type == 'soldermask':
+        return LayerStyle(layer_color=color)                              # solid colour
+    return None  # drill/other → plain/precomputed path, already instant
+
+
+def prewarm_layer_urls(rodb, swap_angle: float, manual_rot: float = 0.0) -> None:
+    """Background-build the single-layer styled SVG URLs so the FIRST click on any layer
+    is already warm — without blocking the initial render.
+
+    Safe by construction: the worker thread calls only the pure `build_layer_url` and
+    writes into the session SVG-cache dict (a plain dict; GIL-safe setitem). It never
+    touches Streamlit APIs. Runs once per loaded board, keys match `_svg_url` exactly.
+    """
+    if not rodb or not getattr(rodb, 'layers', None):
+        return
+    gen = id(rodb)
+    if st.session_state.get('_cm_prewarm_gen') == gen:
+        return
+    st.session_state['_cm_prewarm_gen'] = gen  # set before spawning → runs once even on error
+
+    cache = _svg_cache_dict()  # main-thread access; worker only mutates the returned dict
+    color_map = stable_layer_colors(rodb.layers.keys())
+    svg_rot = (round(swap_angle) + manual_rot) % 360
+
+    jobs = []
+    for name, lyr in rodb.layers.items():
+        style = _single_layer_style(lyr.layer_type, color_map.get(name))
+        if style is None:
+            continue
+        key = _svg_cache_key(name, svg_rot, False, style)
+        if key not in cache:
+            jobs.append((lyr, style, key))
+    if not jobs:
+        return
+
+    def _worker():
+        for lyr, style, key in jobs:
+            if key in cache:
+                continue
+            try:
+                cache[key] = build_layer_url(lyr, svg_rot, False, style)
+            except Exception:
+                logger.debug("prewarm failed for %s", getattr(lyr, 'name', '?'), exc_info=True)
+
+    threading.Thread(target=_worker, name="cm-prewarm", daemon=True).start()
 
 
 def _layer_placement(b, ref_shift, ref_w, ref_h, swap_angle, svg_rot):
