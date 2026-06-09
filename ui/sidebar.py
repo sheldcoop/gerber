@@ -13,6 +13,7 @@ from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_ca
 from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 from core.svg_utils import stable_layer_colors
+from core.constants import copper_order_index
 
 def handle_bg_render_polling():
     """Check background render status and update state accordingly."""
@@ -400,17 +401,15 @@ def render_sidebar():
                     return visible
 
                 def _copper_sort_key(name: str) -> int:
+                    # Front soldermask first, back soldermask last; copper in physical
+                    # stackup order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (single source: constants).
                     n = name.upper()
-                    # Soldermask front
-                    if 'FSR' in n or ('MASK' in n and 'F' in n and 'B' not in n): return 0
-                    if n.startswith('3F') or n == '3F': return 10
-                    if n.startswith('2F') or n == '2F': return 20
-                    if '1FCO' in n: return 30
-                    if '1BCO' in n: return 40
-                    if n.startswith('2B') or n == '2B': return 50
-                    if n.startswith('3B') or n == '3B': return 60
-                    if 'BSR' in n or ('MASK' in n and 'B' in n): return 70
-                    return 99
+                    if 'FSR' in n or ('MASK' in n and 'F' in n and 'B' not in n):
+                        return -1
+                    if 'BSR' in n or ('MASK' in n and 'B' in n):
+                        return 999
+                    idx = copper_order_index(n)
+                    return idx if idx is not None else 99
 
                 def _drill_sort_key(name: str) -> tuple:
                     nums = re.findall(r'\d+', name)

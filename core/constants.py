@@ -90,6 +90,22 @@ LAYER_Z = {
 # Physical copper stackup, BOTTOM-of-stack first → TOP last (front outer on top).
 COPPER_STACK_ORDER = ['4B', '3B', '2B', '1BCO', '1FCO', '2F', '3F', '4F']
 
+# Same stackup TOP→BOTTOM (front outer first) — the order copper is listed in the sidebar
+# and the index used to assign each copper layer a unique palette colour.
+COPPER_TOP_DOWN = list(reversed(COPPER_STACK_ORDER))  # 4F,3F,2F,1FCO,1BCO,2B,3B,4B
+
+
+def copper_order_index(name: str):
+    """Top→bottom stackup index for a copper layer (4F=0 … 4B=7), else None.
+
+    Single source for: sidebar list order, draw order, and distinct colour assignment.
+    """
+    n = (name or '').upper()
+    for i, key in enumerate(COPPER_TOP_DOWN):
+        if n == key or n.startswith(key):
+            return i
+    return None
+
 # ---------------------------------------------------------------------------
 # Opacity defaults for the design overlay
 # ---------------------------------------------------------------------------

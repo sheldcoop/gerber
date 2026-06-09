@@ -1,19 +1,61 @@
 import re
 import base64
+from dataclasses import dataclass
 from typing import Any
 
-from core.constants import SVG_BG as _SVG_BG, LAYER_PALETTE, layer_fg
+from core.constants import SVG_BG as _SVG_BG, LAYER_PALETTE, layer_fg, copper_order_index
+
+
+@dataclass(frozen=True)
+class LayerStyle:
+    """Declarative render style for one design layer (replaces a flag-soup arg list).
+
+    - layer_color: hex to recolour the foreground to (None = natural copper/drill).
+    - outline:     render as a coloured wireframe contour instead of solid fills.
+    - filled:      (outline only) dark wireframe on an opaque coloured field vs a
+                   coloured wireframe on a transparent bg.
+    - invert:      polarity swap for non-outline layers (soldermask/drill).
+    """
+    layer_color: str = None
+    outline: bool = False
+    filled: bool = False
+    invert: bool = False
+
+    def cache_key(self):
+        return (self.layer_color, self.outline, self.filled, self.invert)
+
+
+def build_layer_url(lyr_obj: Any, rot_deg: float = 0.0, is_multi: bool = False,
+                    style: 'LayerStyle' = None) -> str:
+    """Declarative wrapper over build_rotated_svg_url — pass a LayerStyle instead of flags."""
+    style = style or LayerStyle()
+    return build_rotated_svg_url(
+        lyr_obj, rot_deg, is_multi,
+        invert=style.invert, layer_color=style.layer_color,
+        outline=style.outline, filled=style.filled,
+    )
 
 
 def stable_layer_colors(layer_names) -> dict:
-    """Map each layer name to a fixed palette colour by sorted identity.
+    """Map each layer name to a fixed, distinct palette colour.
 
-    Keying off the sorted layer name (rather than its position in the *checked*
-    list) means a layer keeps the same hue no matter which other layers are
-    selected — so the sidebar swatch always matches what's on screen.
+    Copper layers are coloured by their stackup index (4F=0 … 4B=7) so the 8 copper
+    layers map 1:1 onto the 8-colour palette and NEVER collide — that's what lets you
+    tell two overlaid copper wireframes apart. Non-copper layers (soldermask/drill)
+    are coloured separately by sorted name. Keying off identity (not selection order)
+    keeps each layer's hue stable, so the sidebar swatch always matches the overlay.
     """
-    ordered = sorted(layer_names)
-    return {n: LAYER_PALETTE[i % len(LAYER_PALETTE)] for i, n in enumerate(ordered)}
+    out: dict = {}
+    non_copper = []
+    for n in layer_names:
+        idx = copper_order_index(n)
+        if idx is not None:
+            out[n] = LAYER_PALETTE[idx % len(LAYER_PALETTE)]
+        else:
+            non_copper.append(n)
+    for i, n in enumerate(sorted(non_copper)):
+        out[n] = LAYER_PALETTE[i % len(LAYER_PALETTE)]
+    return out
 
 # Regex to match the SVG tag and the viewBox attribute
 _re_svg = re.compile(r'<svg[^>]+>', re.IGNORECASE)

@@ -39,6 +39,12 @@ def render_cluster_triage(parsed, aoi, align_args):
             _ct_df['ALIGNED_X'] = _ct_df['X_MM'].values - _ct_ox
             _ct_df['ALIGNED_Y'] = _ct_df['Y_MM'].values - _ct_oy
             _ct_aligned = True
+
+            # Defects are aligned in the panel frame (translation only); at a 90/270 unit
+            # rotation they span the swapped footprint, so swap the boundary dims to match.
+            from views.cm_render import _display_dims
+            _ct_angle = getattr(_rodb_ct.panel_layout, 'dominant_angle', 0.0)
+            _ct_cell_w, _ct_cell_h = _display_dims(_ct_cell_w, _ct_cell_h, _ct_angle)
         else:
             # No TGZ — fall back to raw coordinates (still useful for finding repeats)
             _ct_df['ALIGNED_X'] = _ct_df['X_MM']

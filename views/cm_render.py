@@ -11,7 +11,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from typing import Any, Tuple
 
-from core.svg_utils import build_rotated_svg_url, stable_layer_colors
+from core.svg_utils import build_layer_url, stable_layer_colors, LayerStyle
 from core.constants import (
     LAYER_Z as _LAYER_Z,
     COPPER_TYPES as _COPPER_TYPES,
@@ -69,21 +69,19 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
     return base
 
 
-def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
-             layer_color: str = None, outline: bool = False, invert: bool = False,
-             filled: bool = False) -> str:
-    """Reference-layer SVG url honouring the invert-polarity toggle.
+def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool, style: LayerStyle) -> str:
+    """Reference-layer SVG url for one design layer in the given render `style`.
 
     Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
-    rerun for every shown layer on a rotated panel. The un-rotated path is already O(1)
-    (precomputed data URL). For the rotating/recolouring paths we memoise the result per
-    session, keyed by the full style tuple. The cache is tied to the current rendered_odb
-    object identity so it auto-resets when a new TGZ is uploaded.
+    rerun for every shown layer on a rotated panel. The un-rotated/plain path is O(1)
+    (precomputed data URL). For the rotating/recolouring/outline paths we memoise the
+    result per session, keyed by (name, rotation, multi, style). The cache is tied to the
+    current rendered_odb object identity so it auto-resets when a new TGZ is uploaded.
     """
     name = getattr(lyr_obj, 'name', None)
-    if (abs(rot_deg) < 0.01 and not invert and not layer_color and not outline) or name is None:
-        return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                     layer_color=layer_color, outline=outline, filled=filled)
+    _plain = not style.invert and not style.layer_color and not style.outline
+    if (abs(rot_deg) < 0.01 and _plain) or name is None:
+        return build_layer_url(lyr_obj, rot_deg, is_multi, style)
 
     gen = id(st.session_state.get('rendered_odb'))
     store = st.session_state.get('_cm_svg_cache')
@@ -92,12 +90,10 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
         st.session_state['_cm_svg_cache'] = store
     cache = store['data']
 
-    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color,
-           bool(outline), bool(filled))
+    key = (name, round(rot_deg, 1), bool(is_multi)) + style.cache_key()
     url = cache.get(key)
     if url is None:
-        url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                    layer_color=layer_color, outline=outline, filled=filled)
+        url = build_layer_url(lyr_obj, rot_deg, is_multi, style)
         cache[key] = url
     return url
 
@@ -140,11 +136,15 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
     # Copper contour fill style: a SINGLE copper layer gets the opaque coloured field
     # (looks like real copper); 2+ stacked copper layers use the transparent wireframe so
     # every layer stays visible. Invert flips a single layer to the wireframe too.
-    filled = outline and dense_n <= 1 and not _inv
+    style = LayerStyle(
+        layer_color=layer_color,
+        outline=outline,
+        filled=(outline and dense_n <= 1 and not _inv),
+        invert=_inv,
+    )
 
     fig.add_layout_image(dict(
-        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color,
-                        outline=outline, invert=_inv, filled=filled),
+        source=_svg_url(lyr, svg_rot, is_multi, style),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
         sizing="stretch", layer="below",
         opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi,
