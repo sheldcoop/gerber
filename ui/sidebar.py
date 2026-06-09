@@ -458,15 +458,6 @@ def render_sidebar():
                     help="Swap copper and background colours — useful for checking negative-polarity layers",
                 )
 
-                st.toggle(
-                    "✏️ Copper outline mode",
-                    key="copper_outline_mode",
-                    value=True,
-                    help="Draw copper as a coloured wireframe (traces, pads, clearances and "
-                         "pour edges) instead of a solid pour, so you can always see the "
-                         "design. Turn off for solid copper fill.",
-                )
-
                 st.divider()
 
             # ---- Section 3: Defect Filters ----

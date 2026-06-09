@@ -43,21 +43,18 @@ def _place_pairs(fig, pairs, ref_shift, rot, swap, is_multi, color_map):
     colour then stays visible. The sidebar toggle forces outlines on even for a single
     layer.
     """
-    outline_on = _copper_outline_on()  # defaults True — copper never renders solid
+    # Invert polarity shows the inverted *solid* (colored field, dark holes), so it
+    # overrides the wireframe for copper.
+    invert = st.session_state.get('invert_polarity', False)
     dense_n = sum(1 for _, l in pairs if l.layer_type in _COPPER_TYPES)
     for _n, _l in pairs:
         is_copper = _l.layer_type in _COPPER_TYPES
         _lc = None if _l.layer_type == 'drill' else color_map.get(_n)
-        # Copper as a wireframe so plane/pour layers show their design, not a solid block.
-        # (dense_n>1 keeps outlines on even if a user turns the toggle off mid-stack.)
-        _ol = is_copper and (outline_on or dense_n > 1)
+        # Copper always renders as a colored wireframe so plane/pour layers show their
+        # design instead of a solid block — unless invert is on (then inverted solid).
+        _ol = is_copper and not invert
         _place_layer_image(fig, _n, _l, ref_shift, rot, swap, is_multi,
                            layer_color=_lc, outline=_ol, dense_n=dense_n)
-
-
-def _copper_outline_on() -> bool:
-    """Whether the user enabled copper outline mode (sidebar toggle)."""
-    return bool(st.session_state.get('copper_outline_mode', False))
 
 
 def _layer_color_map(rodb) -> dict:
