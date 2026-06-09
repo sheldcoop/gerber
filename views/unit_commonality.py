@@ -43,16 +43,14 @@ def _place_pairs(fig, pairs, ref_shift, rot, swap, is_multi, color_map):
     colour then stays visible. The sidebar toggle forces outlines on even for a single
     layer.
     """
-    # Invert polarity shows the inverted *solid* (colored field, dark holes), so it
-    # overrides the wireframe for copper.
-    invert = st.session_state.get('invert_polarity', False)
     dense_n = sum(1 for _, l in pairs if l.layer_type in _COPPER_TYPES)
     for _n, _l in pairs:
         is_copper = _l.layer_type in _COPPER_TYPES
         _lc = None if _l.layer_type == 'drill' else color_map.get(_n)
-        # Copper always renders as a colored wireframe so plane/pour layers show their
-        # design instead of a solid block — unless invert is on (then inverted solid).
-        _ol = is_copper and not invert
+        # Copper always renders as a colored wireframe (contour) so pour layers show their
+        # design, not a solid block. Invert keeps the contour but flips the colours — that
+        # is handled inside build_rotated_svg_url, so outline stays on regardless.
+        _ol = is_copper
         _place_layer_image(fig, _n, _l, ref_shift, rot, swap, is_multi,
                            layer_color=_lc, outline=_ol, dense_n=dense_n)
 

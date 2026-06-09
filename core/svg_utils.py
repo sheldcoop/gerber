@@ -140,12 +140,24 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     svg = getattr(lyr_obj, 'svg_string', "")
     _natural = '#FFD700' if getattr(lyr_obj, 'layer_type', '') == 'drill' else '#b87333'
 
-    # These three modes are mutually exclusive — applying more than one corrupts the
-    # colours (e.g. invert then recolour used to leave a solid field with invisible
-    # features). Invert wins, then colour(+outline), then plain outline.
-    if invert:
-        # Proper negative: the field takes the (layer) colour, the features go dark.
-        # Background stays opaque so it reads as a real inverted fill.
+    # These render modes are mutually exclusive — applying more than one corrupts the
+    # colours. Outline (contour) wins for copper and stays a contour even when inverted,
+    # so a copper pour never mashes into a solid blob.
+    if outline:
+        color = layer_color or _natural
+        if invert:
+            # Inverted contour: dark wireframe on a colored field (opaque) — never mashes.
+            # The bg replace runs first; the dark stroke colour injected afterwards is a
+            # fresh literal, so it isn't retro-replaced by the field colour.
+            svg = svg.replace(_SVG_BG, color)
+            svg = _inject_outline(svg, _SVG_BG)
+        else:
+            # Normal contour: coloured wireframe, transparent bg so layers stack.
+            svg = svg.replace(_SVG_BG, 'none')
+            svg = _inject_outline(svg, color)
+    elif invert:
+        # Solid negative for non-outline layers (soldermask/drill): the field takes the
+        # (layer) colour and the features go dark. These layers are sparse, so no mash.
         field = layer_color or _natural
         _t = '__PS__'
         svg = (svg.replace(_natural, _t)
@@ -154,11 +166,6 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     elif layer_color:
         # Normal colour with transparent bg so layers stack and opacity reveals beneath.
         svg = svg.replace(_natural, layer_color).replace(_SVG_BG, 'none')
-        if outline:
-            svg = _inject_outline(svg, layer_color)
-    elif outline:
-        svg = svg.replace(_SVG_BG, 'none')
-        svg = _inject_outline(svg, _natural)
 
     if abs(rot_deg) < 0.01:
         return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()
