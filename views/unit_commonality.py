@@ -19,6 +19,21 @@ _LAYER_Z = {
 _LAYER_OPACITY_SINGLE = {'copper': 0.95, 'drill': 0.55, 'other': 0.60}
 _LAYER_OPACITY_MULTI  = {'copper': 0.90, 'drill': 0.45, 'other': 0.50}
 
+# Distinct colors for each layer when multiple are shown simultaneously.
+# Every layer gets a unique hue so 2F / 3F / 1B are immediately distinguishable.
+# None of these is the raw copper '#b87333' — that keeps the single-layer look and
+# would make multi-layer look the same as single-layer for the first entry.
+_MULTI_LAYER_COLORS = [
+    '#FF9800',  # amber   — layer 0 (e.g. 1F / top copper)
+    '#2196F3',  # blue    — layer 1 (e.g. 2F / inner 1)
+    '#4CAF50',  # green   — layer 2 (e.g. 3F / inner 2)
+    '#9C27B0',  # purple  — layer 3
+    '#00BCD4',  # cyan    — layer 4
+    '#E91E63',  # pink    — layer 5
+    '#CDDC39',  # lime    — layer 6
+    '#F44336',  # red     — layer 7
+]
+
 
 def _layer_sort_key(name_lyr_pair: Tuple[str, Any]) -> int:
     return _LAYER_Z.get(name_lyr_pair[1].layer_type, 1)
@@ -32,20 +47,21 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool) -> float:
     return d.get(lyr_type, 0.70 if multi else 0.85)
 
 
-def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool) -> str:
+def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
+             layer_color: str = None) -> str:
     """Reference-layer SVG url honouring the invert-polarity toggle.
 
     Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
     rerun for every shown layer on a rotated panel. The un-rotated path is already O(1)
     (precomputed data URL). For the rotating path we memoise the result per session,
-    keyed by (layer name, rotation, invert, multi). The cache is tied to the current
-    rendered_odb object identity so it auto-resets when a new TGZ is uploaded.
+    keyed by (layer name, rotation, invert, multi, color). The cache is tied to the
+    current rendered_odb object identity so it auto-resets when a new TGZ is uploaded.
     """
     invert = st.session_state.get('invert_polarity', False)
-    # Cheap path: no rotation, no inversion → precomputed URL, nothing to cache.
     name = getattr(lyr_obj, 'name', None)
-    if (abs(rot_deg) < 0.01 and not invert) or name is None:
-        return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert)
+    if (abs(rot_deg) < 0.01 and not invert and not layer_color) or name is None:
+        return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
+                                     layer_color=layer_color)
 
     gen = id(st.session_state.get('rendered_odb'))
     store = st.session_state.get('_cm_svg_cache')
@@ -54,33 +70,37 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool) -> str:
         st.session_state['_cm_svg_cache'] = store
     cache = store['data']
 
-    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi))
+    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color)
     url = cache.get(key)
     if url is None:
-        url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert)
+        url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
+                                    layer_color=layer_color)
         cache[key] = url
     return url
 
 
-def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi):
+def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
+                       layer_color: str = None):
     """Add one reference-design layer as a Plotly background image.
 
     Single source of the layer-placement + 90/270 dimension-swap convention shared by
     the empty-state, empty-layers, and defect-state overlays.
 
     Args:
-        ref_shift: (sx, sy) translation so the reference layer sits at the cell origin.
-        svg_rot:   degrees to rotate the SVG *content* (auto angle + manual nudge).
-        swap:      True for orthogonal 90/270 placement (image fills the swapped cell).
+        ref_shift:    (sx, sy) translation so the reference layer sits at the cell origin.
+        svg_rot:      degrees to rotate the SVG *content* (auto angle + manual nudge).
+        swap:         True for orthogonal 90/270 placement (image fills the swapped cell).
+        layer_color:  Optional hex color to substitute into the SVG (used to give each
+                      layer a distinct hue when multiple layers are shown together).
     """
     b = lyr.bounds
     im_w, im_h = b[2] - b[0], b[3] - b[1]
     sx, sy = ref_shift
-    
+
     # Center of the layer in the standard (unswapped) coordinate system
     layer_cx = b[0] + sx + im_w / 2.0
     layer_cy = b[3] + sy - im_h / 2.0
-    
+
     # If the canvas itself is swapped (e.g. panel is rotated 90 deg), the center moves
     if swap:
         final_cx, final_cy = im_h / 2.0, im_w / 2.0
@@ -99,7 +119,7 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi)
     y = final_cy + szy / 2.0
 
     fig.add_layout_image(dict(
-        source=_svg_url(lyr, svg_rot, is_multi),
+        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
         sizing="stretch", layer="below",
         opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi),
@@ -178,8 +198,9 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
         cw, ch = ch, cw
 
     fig = go.Figure()
-    for _n, _l in _sorted:
-        _place_layer_image(fig, _n, _l, _ref_shift, _rot_deg, _swap, _is_multi)
+    for _idx, (_n, _l) in enumerate(_sorted):
+        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if _is_multi else None
+        _place_layer_image(fig, _n, _l, _ref_shift, _rot_deg, _swap, _is_multi, layer_color=_lc)
 
     _lbl = " + ".join(n for n, _ in na_checked)
     _add_dim_annotations(fig, cw, ch, _lbl)
@@ -197,27 +218,36 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
 
 
 # ---------------------------------------------------------------------------
-# Shared annotation helper (W/H labels + optional layer label)
+# Info card — bottom-right corner (replaces W/H top/left labels)
 # ---------------------------------------------------------------------------
 
-def _add_dim_annotations(fig: go.Figure, cw: float, ch: float, layer_label: str = None) -> None:
-    fig.add_annotation(
-        x=cw / 2, y=-ch * 0.045, text=f"W: {cw:.2f} mm", showarrow=False,
-        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
-        xref="x", yref="y",
-    )
-    fig.add_annotation(
-        x=-cw * 0.045, y=ch / 2, text=f"H: {ch:.2f} mm", showarrow=False, textangle=-90,
-        font=dict(color="rgba(0,220,130,0.8)", size=11, family="monospace"),
-        xref="x", yref="y",
-    )
+def _add_dim_annotations(fig: go.Figure, cw: float, ch: float,
+                          layer_label: str = None, panel_label: str = None) -> None:
+    """Render a compact info card in the lower-right corner of the plot.
+
+    Shows: W × H dimensions, active layer name, and active panel(s).
+    Uses paper coordinates so it never overlaps the defect data.
+    """
+    lines = [f"📐 {cw:.2f} × {ch:.2f} mm"]
     if layer_label:
-        fig.add_annotation(
-            x=cw / 2, y=ch + ch * 0.04, text=f"Layer: {layer_label}",
-            showarrow=False, xanchor="center", yanchor="bottom",
-            font=dict(color="rgba(0,220,130,0.95)", size=12, family="monospace"),
-            xref="x", yref="y",
-        )
+        lines.append(f"🗂 {layer_label}")
+    if panel_label:
+        lines.append(f"🖥 {panel_label}")
+    text = "<br>".join(lines)
+
+    fig.add_annotation(
+        x=1.02, y=0.0,
+        xref="paper", yref="paper",
+        xanchor="left", yanchor="bottom",
+        text=text,
+        showarrow=False,
+        bgcolor="rgba(6,18,6,0.82)",
+        bordercolor="rgba(0,200,100,0.45)",
+        borderwidth=1,
+        borderpad=6,
+        font=dict(color="rgba(0,220,130,0.95)", size=11, family="monospace"),
+        align="left",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -354,8 +384,9 @@ def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
     _ref_b = first_lyr.bounds
     ref_shift = (-_ref_b[0], -_ref_b[1])
     swap = round(swap_angle) % 360 in (90, 270)
-    for _ln, _lyr in pairs:
-        _place_layer_image(fig, _ln, _lyr, ref_shift, svg_rot, swap, is_multi)
+    for _idx, (_ln, _lyr) in enumerate(pairs):
+        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if is_multi else None
+        _place_layer_image(fig, _ln, _lyr, ref_shift, svg_rot, swap, is_multi, layer_color=_lc)
     _apply_layout(fig, cfg)
     return active
 
@@ -472,14 +503,26 @@ def _render_defect_state(rodb, aoi, align_args):
 
     origins, cell_w, cell_h, first_lyr = _compute_origins(rodb, q_rows, q_cols, gap_x, gap_y)
 
+    # ── Scope — read from global Analysis Scope (sidebar) ───────────────────
+    # Buildup: use whatever is active in the global scope bar (BU-01, BU-02 …)
+    bu = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
+
+    # Panel filter — read from the global Analysis Scope (scope_panel_sel).
+    # When >1 panel is selected the color mode is auto-set to by_panel below.
+    panel_filter = st.session_state.get('panel_filter_select', None)
+    has_multi_panel = bool(panel_filter and len(panel_filter) > 1)
+
     # Scope filter (buildup/side) then restrict to the selected units.
-    bu   = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
     side = st.session_state.get('scope_side_sel', ['Front', 'Back'])
     src = filter_aoi_cm(
         aoi.all_defects,
         tuple(sorted(bu)) if bu else (),
         tuple(sorted(side)),
     ).copy()
+
+    # Apply panel filter from global scope.
+    if panel_filter is not None and 'PANEL_ID' in src.columns:
+        src = src[src['PANEL_ID'].isin(panel_filter)].copy()
 
     if 'UNIT_INDEX_Y' not in src.columns or 'UNIT_INDEX_X' not in src.columns:
         st.error("Cannot align defects: AOI data is missing UNIT_INDEX_X / UNIT_INDEX_Y columns.")
@@ -535,7 +578,16 @@ def _render_defect_state(rodb, aoi, align_args):
     cm_plot['ALIGNED_Y'] = list(ay)
 
     cfg = OverlayConfig()
-    cfg.color_mode     = st.session_state.get('color_mode_select', 'by_type')
+    # Auto color-by-panel when comparing multiple panels, but only when the user
+    # has not made an explicit choice.  If the sidebar colour mode is anything
+    # other than the generic 'by_type' default we treat it as intentional and
+    # honour it even across panels (e.g. the user explicitly picked by_verification
+    # to see CU22/CU18 colours).
+    user_color_mode = st.session_state.get('color_mode_select', 'by_type')
+    if has_multi_panel and panel_filter and len(panel_filter) > 1:
+        cfg.color_mode = user_color_mode if user_color_mode != 'by_type' else 'by_panel'
+    else:
+        cfg.color_mode = user_color_mode
     cfg.marker_style   = st.session_state.get('marker_style_select', 'dot')
     cfg.buildup_filter = bu
     cfg.defect_types   = st.session_state.get('defect_type_select', aoi.defect_types)
@@ -582,7 +634,8 @@ def _render_defect_state(rodb, aoi, align_args):
         _apply_layout(fig, cfg)
 
     _add_grid(fig, disp_w, disp_h)
-    _add_dim_annotations(fig, disp_w, disp_h, active_layer)
+    _panel_lbl = ", ".join(panel_filter) if panel_filter else None
+    _add_dim_annotations(fig, disp_w, disp_h, active_layer, panel_label=_panel_lbl)
 
     _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
                               help="Overlay a 2D defect density heatmap instead of individual dots",
@@ -659,8 +712,9 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
     if _swap:
         cell_w, cell_h = cell_h, cell_w
     fig = go.Figure()
-    for _n, _l in sorted(checked, key=_layer_sort_key):
-        _place_layer_image(fig, _n, _l, _ref_shift, _rot, _swap, is_multi)
+    for _idx, (_n, _l) in enumerate(sorted(checked, key=_layer_sort_key)):
+        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if is_multi else None
+        _place_layer_image(fig, _n, _l, _ref_shift, _rot, _swap, is_multi, layer_color=_lc)
     _add_dim_annotations(fig, cell_w, cell_h, " + ".join(n for n, _ in checked))
     fig.update_layout(
         xaxis=dict(range=[-1, cell_w + 1], scaleanchor='y', scaleratio=1,

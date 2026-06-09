@@ -6,9 +6,11 @@ extracts buildup layer, side (Front/Back), panel number and section from filenam
 and converts coordinates from microns to mm.
 
 Filename convention (new format):
-  BU_01F_Panel1_S1.xlsx  → Buildup 1, Front, Panel 1, Section 1
-  BU_02B_Panel2_S3.xlsx  → Buildup 2, Back,  Panel 2, Section 3
-  BU_01F_Panel1.xlsx     → Buildup 1, Front, Panel 1, Section 1 (section optional)
+  BU_01F_Panel1_S1.xlsx      → Buildup 1, Front, Panel 1,  Section 1
+  BU_02B_Panel2_S3.xlsx      → Buildup 2, Back,  Panel 2,  Section 3
+  BU_01F_Panel1.xlsx         → Buildup 1, Front, Panel 1,  Section 1 (section optional)
+  BU-01B-Panel-30-1.xlsx     → Buildup 1, Back,  Panel 30, Section 1
+  BU-01B-Panel-30.xlsx       → Buildup 1, Back,  Panel 30, Section 1 (section optional)
 
   Multiple section files for the same Panel+BU+Side are merged automatically:
     BU_01F_Panel1_S1.xlsx  ┐
@@ -42,11 +44,18 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Regex to extract buildup number and side from filename
-# New format:  BU_01F_Panel1_S2  or  BU_01F_Panel1  (section optional)
-# Legacy format: BU-02F, BU-02B, BU-02 F, bu-1f, BU02F, etc.
+# Regex to extract buildup number and side from filename.
+# Supported formats:
+#   BU_01F_Panel1_S2.xlsx     → buildup=1, side=F, panel=1,  section=2
+#   BU_01F_Panel1.xlsx        → buildup=1, side=F, panel=1,  section=1
+#   BU-01B-Panel-30-1.xlsx    → buildup=1, side=B, panel=30, section=1
+#   BU-01B-Panel-30.xlsx      → buildup=1, side=B, panel=30, section=1
+# Key differences handled:
+#   - separator between BU and digits can be _ - or nothing
+#   - separator between Panel and number can be _ - or nothing
+#   - section suffix can be  _S2  or  -2  (S prefix optional)
 FILENAME_PATTERN_NEW = re.compile(
-    r'BU[_\-]?(\d{1,2})\s*([FfBb])[_\-]Panel(\d+)(?:[_\-]S(\d+))?',
+    r'BU[_\-]?(\d{1,2})\s*([FfBb])[_\-]Panel[_\-]?(\d+)(?:[_\-]S?(\d+))?',
     re.IGNORECASE
 )
 FILENAME_PATTERN_LEGACY = re.compile(r'BU[-_]?(\d{1,2})\s*([FfBb])', re.IGNORECASE)
@@ -249,9 +258,11 @@ def _parse_filename(filename: str) -> tuple[int, str, str, int, list[str]]:
     Extract buildup number, side, panel ID and section from the filename.
 
     Supported formats:
-      New:    BU_01F_Panel1_S2.xlsx  → buildup=1, side='F', panel='Panel_01', section=2
-              BU_01F_Panel1.xlsx     → buildup=1, side='F', panel='Panel_01', section=1
-      Legacy: BU-02F.xlsx            → buildup=2, side='F', panel='Panel_01', section=1
+      New:    BU_01F_Panel1_S2.xlsx      → buildup=1, side='F', panel='Panel_01', section=2
+              BU_01F_Panel1.xlsx         → buildup=1, side='F', panel='Panel_01', section=1
+              BU-01B-Panel-30-1.xlsx     → buildup=1, side='B', panel='Panel_30', section=1
+              BU-01B-Panel-30.xlsx       → buildup=1, side='B', panel='Panel_30', section=1
+      Legacy: BU-02F.xlsx                → buildup=2, side='F', panel='Panel_01', section=1
 
     Returns:
         (buildup_number, side_letter, panel_id, section_number, warnings)
@@ -402,8 +413,16 @@ def _load_single_aoi(
         df['DEFECT_ID'] = pd.to_numeric(df['DEFECT_ID'], errors='coerce').fillna(-1).astype(int)
 
     if 'VERIFICATION' in df.columns:
-        df['VERIFICATION'] = df['VERIFICATION'].astype(str).str.strip().str.upper()
-        df['VERIFICATION'] = df['VERIFICATION'].fillna('N')
+        # Convert to string, strip, uppercase — but first replace actual NaN / None
+        # with a placeholder BEFORE .astype(str), otherwise NaN becomes the string
+        # 'nan' → 'NAN' which pollutes the legend with a spurious 'NAN' group.
+        df['VERIFICATION'] = (
+            df['VERIFICATION']
+            .where(df['VERIFICATION'].notna() & (df['VERIFICATION'].astype(str).str.strip() != ''), other='—')
+            .astype(str).str.strip().str.upper()
+        )
+        # Normalise the sentinel that slipped through .astype(str) for real NaN rows.
+        df['VERIFICATION'] = df['VERIFICATION'].replace({'NAN': '—', 'NONE': '—', '': '—'})
 
     if 'UNIT_INDEX_X' in df.columns:
         df['UNIT_INDEX_X'] = pd.to_numeric(df['UNIT_INDEX_X'], errors='coerce').fillna(0).astype(int)

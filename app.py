@@ -127,8 +127,39 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             st.session_state['scope_bu_sel'] = list(aoi.buildup_numbers)
         if 'scope_side_sel' not in st.session_state:
             st.session_state['scope_side_sel'] = ['Front', 'Back']
+        if 'scope_panel_sel' not in st.session_state:
+            # Default to first panel only — panel selector is single-select (radio).
+            _default_panel = sorted(aoi.panel_ids)[:1] if aoi.panel_ids else []
+            st.session_state['scope_panel_sel'] = _default_panel
 
         with st.expander("🔬 Analysis Scope", expanded=True):
+
+            # ── Panel toggles (only when multiple panels are loaded) ──────────
+            _panel_ids = getattr(aoi, 'panel_ids', [])
+            if len(_panel_ids) > 1:
+                def _toggle_panel(pid):
+                    def cb():
+                        # Radio-style: selecting a panel makes it the ONLY active one.
+                        # Never show two panels' defects overlaid — user checks one at a time.
+                        st.session_state['scope_panel_sel'] = [pid]
+                    return cb
+
+                p_cols = st.columns(min(len(_panel_ids), 8), gap="small")
+                for _pi, _pid in enumerate(sorted(_panel_ids)):
+                    # Show the actual panel number from the ID (Panel_30 → P30, Panel_01 → P01)
+                    _num = _pid.split('_')[-1].split('-')[-1]
+                    _plbl = f"P{int(_num):02d}" if _num.isdigit() else _pid
+                    _psel = _pid in st.session_state.get('scope_panel_sel', _panel_ids)
+                    p_cols[_pi % 8].button(
+                        _plbl,
+                        key=f"scope_panel_{_pi}",
+                        help=_pid,
+                        type="primary" if _psel else "secondary",
+                        width="stretch",
+                        on_click=_toggle_panel(_pid),
+                    )
+                st.divider()
+
             bu_labels = [f"BU-{int(b):02d}" for b in aoi.buildup_numbers]
             if bu_labels:
                 bu_cols = st.columns(len(bu_labels), gap="small")
@@ -175,6 +206,7 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                              width="stretch", on_click=_toggle_side("Back"))
 
         st.session_state['buildup_filter_select'] = st.session_state.get('scope_bu_sel', aoi.buildup_numbers)
+        st.session_state['panel_filter_select'] = st.session_state.get('scope_panel_sel', aoi.panel_ids)
         active_sides = st.session_state.get('scope_side_sel', ['Front', 'Back'])
         if set(active_sides) == {'Front', 'Back'}:
             st.session_state['side_cap_select'] = 'All'

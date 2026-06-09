@@ -37,7 +37,7 @@ class OverlayConfig:
     buildup_filter: list[int] = field(default_factory=list)
     side_filter: str = 'Both'        # 'Front', 'Back', 'Both'
     marker_style: str = 'dot'        # 'dot', 'crosshair', 'x_mark'
-    color_mode: str = 'by_type'      # 'by_type', 'by_buildup', 'by_severity'
+    color_mode: str = 'by_type'      # 'by_type', 'by_buildup', 'by_severity', 'by_panel'
     board_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
     offset_x: float = 0.0            # Visual X translation for the ODB++ render
     offset_y: float = 0.0            # Visual Y translation for the ODB++ render
@@ -64,6 +64,13 @@ DEFECT_TYPE_COLORS = [
     '#44FFFF', '#FF8844', '#88FF44', '#4488FF', '#FF4488',
     '#AAFF44', '#44AAFF', '#FF44AA', '#44FFAA', '#AA44FF',
     '#FFFF44', '#FF6644', '#66FF44', '#4466FF', '#FF4466',
+]
+
+# Panel comparison colors — visually distinct, one per panel
+PANEL_COLORS = [
+    '#2196F3', '#FF5722', '#4CAF50', '#9C27B0',
+    '#FF9800', '#00BCD4', '#E91E63', '#607D8B',
+    '#CDDC39', '#795548', '#03A9F4', '#FF4081',
 ]
 
 # Buildup layer colors (sequential blue-to-red)
@@ -522,7 +529,10 @@ def _add_defect_traces(
         ))
 
     # Determine grouping column and color palette
-    if config.color_mode == 'by_source' and 'SOURCE_FILE' in filtered.columns:
+    if config.color_mode == 'by_panel' and 'PANEL_ID' in filtered.columns:
+        group_col = 'PANEL_ID'
+        palette = PANEL_COLORS
+    elif config.color_mode == 'by_source' and 'SOURCE_FILE' in filtered.columns:
         group_col = 'SOURCE_FILE'
         palette = DEFECT_TYPE_COLORS
     elif config.color_mode == 'by_buildup' and 'BUILDUP' in filtered.columns:
@@ -548,13 +558,28 @@ def _add_defect_traces(
     hover_template = _build_hover_template(filtered)
     customdata = _build_customdata(filtered)
 
-    # Add one trace per group
-    groups = filtered.groupby(group_col, observed=True)
-    for i, (group_name, group_df) in enumerate(groups):
-        color = palette[i % len(palette)]
+    # Add one trace per group — color is stable (hash of name), not position-dependent.
+    # This ensures CU22 is always the same color regardless of which groups happen to
+    # be present in the current filter selection.
+    #
+    # Sort groups so named codes appear before the '—' (unknown) catch-all, giving a
+    # cleaner legend order regardless of pandas sort order.
+    groups = sorted(
+        filtered.groupby(group_col, observed=True),
+        key=lambda kv: ('zzz' if str(kv[0]) in ('—', '') else str(kv[0]).lower()),
+    )
+    for group_name, group_df in groups:
+        color = palette[abs(hash(str(group_name))) % len(palette)]
 
         # Build customdata for this group
         group_customdata = _build_customdata(group_df)
+
+        # Label: omit generic "Defect:" prefix for verification / panel modes where
+        # the code itself is already descriptive (CU22, Panel_30 …).
+        if config.color_mode in ('by_verification', 'by_panel', 'by_buildup'):
+            legend_name = f"{group_name}  ({len(group_df)})"
+        else:
+            legend_name = f"Defect: {group_name}  ({len(group_df)})"
 
         fig.add_trace(go.Scattergl(
             x=group_df['ALIGNED_X'],
@@ -566,7 +591,7 @@ def _add_defect_traces(
                 size=marker_config['size'],
                 line=marker_config['line'],
             ),
-            name=f"Defect: {group_name} ({len(group_df)})",
+            name=legend_name,
             legendgroup=f"defect_{group_name}",
             showlegend=True,
             customdata=group_customdata,
@@ -643,11 +668,16 @@ def _apply_layout(fig: go.Figure, config: OverlayConfig) -> None:
             font=dict(size=11, color='#cccccc'),
             itemclick='toggle',
             itemdoubleclick='toggleothers',
+            x=1.02,
+            y=1.0,
+            xanchor='left',
+            yanchor='top',
         ),
+        showlegend=True,
 
         dragmode='pan',
         hovermode='closest',
-        margin=dict(l=0, r=0, t=36, b=0),
+        margin=dict(l=0, r=160, t=36, b=0),
         height=800,
     )
 
