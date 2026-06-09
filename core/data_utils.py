@@ -1,20 +1,5 @@
-import streamlit as st
 import pandas as pd
-from clustering import compute_clusters, get_cluster_summary, get_cluster_hull_coords
 from alignment import calculate_geometry, INTER_UNIT_GAP
-
-def compute_clusters_cached(_df_hash: str, _df: pd.DataFrame, eps: float, min_samples: int):
-    """Run DBSCAN + summary + all hull coords."""
-    clustered = compute_clusters(_df, eps=eps, min_samples=min_samples)
-    summary = get_cluster_summary(clustered)
-    hulls = {}
-    if not summary.empty:
-        for _, crow in summary.iterrows():
-            h = get_cluster_hull_coords(clustered, crow['cluster_id'])
-            if h:
-                hulls[crow['cluster_id']] = (h, crow['defect_count'])
-    return clustered, summary, hulls
-
 
 def compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> list:
     """Pre-compute all unit cell shape dicts."""

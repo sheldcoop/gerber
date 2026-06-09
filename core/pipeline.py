@@ -4,6 +4,7 @@ core/pipeline.py — Main ODB++ rendering pipeline (_render_pipeline).
 Called by render_odb_to_cam in gerber_renderer.py after cache miss.
 """
 
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -403,7 +404,10 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                         _first_copper.svg_string, panel_layout
                     )
                 except Exception:
-                    pass
+                    # Non-fatal: panel-composite SVG is optional; log so a blank panel
+                    # view is diagnosable instead of silently empty.
+                    logger.warning("Panel SVG build failed for layer %s",
+                                   getattr(_first_copper, 'name', '?'), exc_info=True)
 
         # ── Phase 8: assemble result ───────────────────────────────────────
         return RenderedODB(

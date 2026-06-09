@@ -306,7 +306,7 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
 # ---------------------------------------------------------------------------
 
 @st.fragment
-def render_unit_commonality(parsed, aoi, align_args, get_svg_url):
+def render_unit_commonality(parsed, aoi, align_args) -> None:
     st.markdown("### 🗺️ Commonality — Defect Superposition")
     st.caption("Normalise each selected unit's defects into local coordinates and overlay on a single reference unit.")
 

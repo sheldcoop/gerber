@@ -10,11 +10,14 @@ what misc/info says. This fixes issues where misc/info is missing or
 incomplete but feature files have correct #UNITS= declarations.
 """
 
+import logging
 from typing import Optional, Tuple
 
 from shapely.ops import unary_union
 
 from odb.constants import MAX_FEATURE_ERRORS, INCHES_TO_MM
+
+logger = logging.getLogger(__name__)
 from odb.symbols import parse_symbol_table
 from odb.geometry import parse_pad_record, parse_line_record, parse_arc_record, parse_surface_block
 
@@ -298,6 +301,9 @@ def compute_bounds(geoms: list) -> tuple:
         b = unary_union(geoms).bounds
         return (b[0], b[1], b[2], b[3])
     except Exception:
+        # Degenerate/invalid geometry — return zero bounds but make the failure visible
+        # (silently swallowing it previously masked off-panel-defect bugs downstream).
+        logger.warning("compute_bounds failed on %d geometries", len(geoms), exc_info=True)
         return (0.0, 0.0, 0.0, 0.0)
 
 

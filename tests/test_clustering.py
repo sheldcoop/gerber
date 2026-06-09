@@ -94,3 +94,16 @@ class TestGetClusterSummary:
         assert 'dominant_type' in summary.columns
         # Sorted by defect_count desc
         assert summary.iloc[0]['defect_count'] >= summary.iloc[1]['defect_count']
+
+    def test_all_nan_defect_type_no_crash(self):
+        """Regression: a cluster whose DEFECT_TYPE is entirely NaN must not raise
+        IndexError on value_counts().index[0] — it falls back to 'Unknown'."""
+        df = pd.DataFrame({
+            'ALIGNED_X': [10, 10.1, 10.2],
+            'ALIGNED_Y': [10, 10.1, 10.2],
+            'CLUSTER_ID': [0, 0, 0],
+            'DEFECT_TYPE': [np.nan, np.nan, np.nan],
+        })
+        summary = get_cluster_summary(df)
+        assert len(summary) == 1
+        assert summary.iloc[0]['dominant_type'] == 'Unknown'

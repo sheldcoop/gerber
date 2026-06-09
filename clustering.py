@@ -96,9 +96,11 @@ def get_cluster_summary(df: pd.DataFrame) -> pd.DataFrame:
         cx = group['ALIGNED_X'].mean()
         cy = group['ALIGNED_Y'].mean()
 
-        # Dominant defect type
-        if 'DEFECT_TYPE' in group.columns:
-            type_counts = group['DEFECT_TYPE'].value_counts()
+        # Dominant defect type. value_counts() can be empty when the whole cluster's
+        # DEFECT_TYPE is NaN — guard against IndexError on .index[0]/.iloc[0].
+        type_counts = (group['DEFECT_TYPE'].value_counts()
+                       if 'DEFECT_TYPE' in group.columns else None)
+        if type_counts is not None and not type_counts.empty:
             dominant_type = type_counts.index[0]
             dominant_pct = type_counts.iloc[0] / n * 100
         else:

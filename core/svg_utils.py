@@ -1,9 +1,12 @@
 import re
 import base64
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from core.constants import SVG_BG as _SVG_BG, LAYER_PALETTE, layer_fg, copper_order_index
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -138,7 +141,8 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                 try:
                     setattr(lyr_obj, '_transparent_data_url', url)
                 except Exception:
-                    pass
+                    # Caching is best-effort (e.g. frozen layer); correctness unaffected.
+                    logger.debug("Could not cache transparent url on layer", exc_info=True)
                 return url
             if getattr(lyr_obj, 'svg_data_url', None):
                 return lyr_obj.svg_data_url
@@ -162,7 +166,8 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
                 return ('data:image/svg+xml;base64,'
                         + base64.b64encode(stack_svg.encode()).decode())
             except Exception:
-                pass  # fall through to the svg_string path below
+                # Malformed precomputed url — fall through to the svg_string path below.
+                logger.debug("stack_url fast path failed; using svg_string", exc_info=True)
 
     svg = getattr(lyr_obj, 'svg_string', "")
     _natural = layer_fg(getattr(lyr_obj, 'layer_type', ''))

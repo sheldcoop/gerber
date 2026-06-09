@@ -244,29 +244,12 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
     view_mode = st.session_state['_view_mode']
 
 
-    # ── Polarity helper — swap fg/bg colours in a pre-rendered SVG string ───
-    from core.constants import SVG_BG as _SVG_BG, layer_fg
-    _invert_pol = st.session_state.get('invert_polarity', False)
-
-    def _get_svg_url(layer_obj):
-        """Return SVG data URL, applying polarity inversion if toggled."""
-        import base64 as _b64
-        svg = layer_obj.svg_string
-        if _invert_pol:
-            fg = layer_fg(layer_obj.layer_type)
-            _t = '__PS__'
-            svg = (svg
-                   .replace(fg, _t)
-                   .replace(_SVG_BG, fg)
-                   .replace(_t, _SVG_BG))
-        return 'data:image/svg+xml;base64,' + _b64.b64encode(svg.encode()).decode()
-
     # Panel Overview tab disabled.
     # if view_mode == "🔭 Panel Overview":
     #     render_panel_overview(parsed, aoi, align_args)
 
     if view_mode == "🗺️ Unit Commonality":
-        render_unit_commonality(parsed, aoi, align_args, _get_svg_url)
+        render_unit_commonality(parsed, aoi, align_args)
 
     elif view_mode == "🔥 Panel Heatmap":
         render_panel_heatmap(parsed, aoi, align_args)

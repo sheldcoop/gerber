@@ -6,11 +6,14 @@ import base64
 import dataclasses
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
 from core.svg_utils import build_stack_svg
 from core.constants import CAM_CACHE_DIR as _CAM_CACHE_DIR, COPPER_FG, DRILL_FG, layer_fg
+
+logger = logging.getLogger(__name__)
 
 
 def _svg_to_data_url_fast(svg_str: str) -> str:
@@ -129,7 +132,8 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
             json.dumps(manifest, separators=(',', ':')), encoding='utf-8'
         )
     except Exception:
-        pass  # cache write failure is non-fatal
+        # Non-fatal: the render still works this session, it just won't persist.
+        logger.warning("Render cache write failed for digest %s", digest, exc_info=True)
 
 
 def get_cache_size() -> tuple:
