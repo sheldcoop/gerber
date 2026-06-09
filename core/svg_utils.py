@@ -2,12 +2,29 @@ import re
 import base64
 from typing import Any
 
+# Opaque panel-background colour baked into every layer SVG by the renderer.
+_SVG_BG = '#060A06'
+
 # Regex to match the SVG tag and the viewBox attribute
 _re_svg = re.compile(r'<svg[^>]+>', re.IGNORECASE)
 _re_viewbox = re.compile(r'viewBox=[\"\'][^\"\']+[\"\']')
 _re_viewbox_capture = re.compile(r'viewBox=[\"\']([^\'\"]+)[\"\']')
 _re_width = re.compile(r'\s+width=[\"\'][^\"\']+[\"\']', re.IGNORECASE)
 _re_height = re.compile(r'\s+height=[\"\'][^\"\']+[\"\']', re.IGNORECASE)
+
+
+def build_stack_svg(svg_string: str, fg_color: str, stack_color: str) -> str:
+    """Build the layer SVG variant used when stacking multiple layers.
+
+    Recolours the foreground to ``stack_color`` and makes the background
+    transparent (``fill="none"``) so layers beneath show through. The background
+    must be stripped even when ``fg_color == stack_color`` (the first copper
+    layer, whose stack colour already equals the copper foreground).
+    """
+    svg = svg_string
+    if fg_color != stack_color:
+        svg = svg.replace(fg_color, stack_color)
+    return svg.replace(_SVG_BG, 'none')
 
 
 def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,

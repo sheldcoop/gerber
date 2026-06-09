@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from core.svg_utils import build_stack_svg
+
 
 def _svg_to_data_url_fast(svg_str: str) -> str:
     """Convert SVG string to base64 data URL (cached-friendly)."""
@@ -186,10 +188,10 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
             svg_string = svg_path.read_text(encoding='utf-8')
             svg_data_url = _svg_to_data_url_fast(svg_string)
 
-            # Reconstruct stack color variant via string replace (no to_svg() call)
+            # Reconstruct stack color variant (recolour fg + transparent bg, no to_svg() call)
             fg_color = meta.get('fg_color', '#b87333')
             stack_color = meta.get('stack_color') or fg_color
-            stack_svg = svg_string.replace(fg_color, stack_color) if fg_color != stack_color else svg_string
+            stack_svg = build_stack_svg(svg_string, fg_color, stack_color)
             color_svg_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
 
             panel_svg_data_url = ''

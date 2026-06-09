@@ -29,6 +29,7 @@ from core.cache import _svg_to_data_url_fast
 from core.layer_renderer import _parse_layer_to_gerbonara
 from core.step_layout import compute_unit_positions
 from core.panel_builder import build_panel_svg
+from core.svg_utils import build_stack_svg
 
 _DRILL_SPAN_RE = re.compile(r'^\d+[FB](CO)?[-_]\d+[FB](CO)?', re.IGNORECASE)
 _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
@@ -173,13 +174,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             svg_data_url = _svg_to_data_url_fast(svg_str)
 
             stack_color = layer_color_map[name]
-            # Color-swap via bytecode replace (faster for large SVGs)
-            if fg_color != stack_color:
-                svg_bytes = svg_str.encode('utf-8')
-                stack_bytes = svg_bytes.replace(fg_color.encode('utf-8'), stack_color.encode('utf-8'))
-                stack_svg = stack_bytes.decode('utf-8')
-            else:
-                stack_svg = svg_str
+            # Stacking variant: recolour fg + transparent bg so layers below show through.
+            stack_svg = build_stack_svg(svg_str, fg_color, stack_color)
             color_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
 
             bb = gf.bounding_box(MM)
@@ -260,7 +256,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             _dlyr.bounds = _bounds2
             _sc = next(iter(_dlyr.color_svg_urls), _fg)
             _dlyr.color_svg_urls = {
-                _sc: _svg_to_data_url_fast(_svg2.replace(_fg, _sc) if _fg != _sc else _svg2)
+                _sc: _svg_to_data_url_fast(build_stack_svg(_svg2, _fg, _sc))
             }
 
         # ── Phase 6: compute panel layout from step-repeat + profile ──────
