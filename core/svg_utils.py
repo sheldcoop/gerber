@@ -145,14 +145,15 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     # so a copper pour never mashes into a solid blob.
     if outline:
         color = layer_color or _natural
-        if invert:
-            # Inverted contour: dark wireframe on a colored field (opaque) — never mashes.
+        # Default copper view is the filled-field contour: dark wireframe on a coloured
+        # field (reads like real copper) — never mashes because fills stay 'none'. The
+        # Invert-polarity toggle flips to a coloured wireframe on a transparent bg.
+        if not invert:
             # The bg replace runs first; the dark stroke colour injected afterwards is a
             # fresh literal, so it isn't retro-replaced by the field colour.
             svg = svg.replace(_SVG_BG, color)
             svg = _inject_outline(svg, _SVG_BG)
         else:
-            # Normal contour: coloured wireframe, transparent bg so layers stack.
             svg = svg.replace(_SVG_BG, 'none')
             svg = _inject_outline(svg, color)
     elif invert:

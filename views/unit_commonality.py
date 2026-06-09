@@ -92,7 +92,7 @@ def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
 
 
 def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
-             layer_color: str = None, outline: bool = False) -> str:
+             layer_color: str = None, outline: bool = False, invert: bool = False) -> str:
     """Reference-layer SVG url honouring the invert-polarity toggle.
 
     Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
@@ -101,7 +101,6 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
     keyed by (layer name, rotation, invert, multi, color). The cache is tied to the
     current rendered_odb object identity so it auto-resets when a new TGZ is uploaded.
     """
-    invert = st.session_state.get('invert_polarity', False)
     name = getattr(lyr_obj, 'name', None)
     if (abs(rot_deg) < 0.01 and not invert and not layer_color and not outline) or name is None:
         return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
@@ -162,8 +161,12 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
     x = final_cx - szx / 2.0
     y = final_cy + szy / 2.0
 
+    # Invert polarity applies to copper and soldermask only — never to drill/via layers.
+    _inv = st.session_state.get('invert_polarity', False) and lyr.layer_type != 'drill'
+
     fig.add_layout_image(dict(
-        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color, outline=outline),
+        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color,
+                        outline=outline, invert=_inv),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
         sizing="stretch", layer="below",
         opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi,
