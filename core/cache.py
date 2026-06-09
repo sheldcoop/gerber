@@ -55,6 +55,7 @@ def _panel_layout_to_dict(pl) -> Optional[dict]:
         'panel_width': pl.panel_width,
         'panel_height': pl.panel_height,
         'unit_positions_raw': [list(p) for p in pl.unit_positions_raw],
+        'dominant_angle': getattr(pl, 'dominant_angle', 0.0),
     }
 
 
@@ -77,6 +78,7 @@ def _panel_layout_from_dict(d: Optional[dict]):
         panel_width=d['panel_width'],
         panel_height=d['panel_height'],
         unit_positions_raw=[tuple(p) for p in d['unit_positions_raw']],
+        dominant_angle=d.get('dominant_angle', 0.0),
     )
 
 
