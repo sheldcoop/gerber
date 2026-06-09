@@ -12,6 +12,7 @@ from odb_parser import parse_odb_archive
 from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache, clear_render_cache
 from gerber_renderer import compute_tgz_digest
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
+from core.svg_utils import stable_layer_colors
 
 def handle_bg_render_polling():
     """Check background render status and update state accordingly."""
@@ -357,21 +358,45 @@ def render_sidebar():
                 visible_layers = []
                 layer_opacities = {}
 
+                # Stable name→hue map shared with the overlay so the swatch next to a
+                # layer always matches the colour drawn on screen.
+                _layer_colors = stable_layer_colors(_rendered_for_ctrl.layers.keys())
+                _all_layer_names = list(_rendered_for_ctrl.layers.keys())
+
+                def _solo_cb(target):
+                    # Show only this layer (turn everything else off).
+                    def cb():
+                        for _ln in _all_layer_names:
+                            st.session_state[f"vis_{_ln}"] = (_ln == target)
+                    return cb
+
                 def _layer_row(layer_name, layer, default_visible):
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
+                    swatch_col, chk_col, sld_col, solo_col = st.columns([0.4, 1.2, 1.8, 0.5])
+                    with swatch_col:
+                        _hue = _layer_colors.get(layer_name, '#888888')
+                        st.markdown(
+                            f"<div style='width:14px;height:14px;border-radius:3px;"
+                            f"margin-top:6px;background:{_hue};"
+                            f"border:1px solid #333;'></div>",
+                            unsafe_allow_html=True,
+                        )
+                    with chk_col:
                         visible = st.checkbox(
                             layer_name,
                             value=default_visible,
                             key=f"vis_{layer_name}",
                             help=f"{layer.layer_type} — {layer.feature_count} features",
                         )
-                    with col2:
+                    with sld_col:
                         st.slider(
-                            "Opacity", 0.0, 1.0, 0.40, step=0.05,
+                            "Opacity", 0.0, 1.0, 0.85, step=0.05,
                             key=f"opacity_{layer_name}",
                             label_visibility="collapsed",
                         )
+                    with solo_col:
+                        st.button("◉", key=f"solo_{layer_name}",
+                                  on_click=_solo_cb(layer_name),
+                                  help="Show only this layer")
                     return visible
 
                 def _copper_sort_key(name: str) -> int:
@@ -412,25 +437,33 @@ def render_sidebar():
                         # Only the first (outermost) copper layer on by default
                         if _layer_row(layer_name, layer, i == 0):
                             visible_layers.append(layer_name)
-                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
+                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.85)
 
                 with st.expander(f"Soldermask ({len(soldermask_layers)})", expanded=False):
                     for layer_name, layer in soldermask_layers.items():
                         if _layer_row(layer_name, layer, False):
                             visible_layers.append(layer_name)
-                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
+                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.85)
 
                 with st.expander(f"Drill / Via ({len(drill_layers)})", expanded=False):
                     for layer_name, layer in drill_layers.items():
                         if _layer_row(layer_name, layer, False):
                             visible_layers.append(layer_name)
-                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.40)
+                        layer_opacities[layer_name] = st.session_state.get(f"opacity_{layer_name}", 0.85)
 
                 st.toggle(
                     "⬛ Invert polarity",
                     key="invert_polarity",
                     value=False,
                     help="Swap copper and background colours — useful for checking negative-polarity layers",
+                )
+
+                st.toggle(
+                    "✏️ Copper outline mode",
+                    key="copper_outline_mode",
+                    value=False,
+                    help="Draw copper as thin outlines instead of solid pours so stacked "
+                         "copper layers stay distinguishable.",
                 )
 
                 st.divider()

@@ -5,6 +5,31 @@ from typing import Any
 # Opaque panel-background colour baked into every layer SVG by the renderer.
 _SVG_BG = '#060A06'
 
+# Shared palette for distinguishing layers when several are shown together.
+# Lives here (a leaf module) so both the views and the sidebar import the same
+# colours without risking a circular import.
+LAYER_PALETTE = [
+    '#FF9800',  # amber
+    '#2196F3',  # blue
+    '#4CAF50',  # green
+    '#9C27B0',  # purple
+    '#00BCD4',  # cyan
+    '#E91E63',  # pink
+    '#CDDC39',  # lime
+    '#F44336',  # red
+]
+
+
+def stable_layer_colors(layer_names) -> dict:
+    """Map each layer name to a fixed palette colour by sorted identity.
+
+    Keying off the sorted layer name (rather than its position in the *checked*
+    list) means a layer keeps the same hue no matter which other layers are
+    selected — so the sidebar swatch always matches what's on screen.
+    """
+    ordered = sorted(layer_names)
+    return {n: LAYER_PALETTE[i % len(LAYER_PALETTE)] for i, n in enumerate(ordered)}
+
 # Regex to match the SVG tag and the viewBox attribute
 _re_svg = re.compile(r'<svg[^>]+>', re.IGNORECASE)
 _re_viewbox = re.compile(r'viewBox=[\"\'][^\"\']+[\"\']')
@@ -27,8 +52,25 @@ def build_stack_svg(svg_string: str, fg_color: str, stack_color: str) -> str:
     return svg.replace(_SVG_BG, 'none')
 
 
+def _inject_outline(svg: str, color: str) -> str:
+    """Turn every filled shape in an isolated layer SVG into a thin stroked outline.
+
+    Used by the 'outline' render mode so that several dense copper pours can be
+    stacked and each remains visible (the solid fills would otherwise occlude
+    one another). Scoped to this single SVG document, so the aggressive ``*``
+    selector is safe.
+    """
+    tag = _re_svg.search(svg)
+    if not tag:
+        return svg
+    style = (f'<style>*{{fill:none !important;stroke:{color} !important;'
+             f'stroke-width:0.06px !important;}}</style>')
+    return svg[:tag.end()] + style + svg[tag.end():]
+
+
 def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
-                          invert: bool = False, layer_color: str = None) -> str:
+                          invert: bool = False, layer_color: str = None,
+                          outline: bool = False) -> str:
     """
     Builds a data URL for an SVG layer, optionally rotating the SVG contents
     and injecting colours based on layer type.
@@ -41,17 +83,37 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
         layer_color: Optional hex color (e.g. '#2196F3') to substitute the copper
                      foreground with — used to give each layer a distinct hue when
                      multiple layers are shown together.
+        outline:     Render shapes as thin outlines instead of solid fills, so
+                     stacked dense layers don't occlude one another.
 
     Returns:
         A base64 encoded data URI string for the SVG.
     """
+    # Outline mode always needs the full svg_string path so it can restyle fills.
     # Precomputed URLs only apply when neither rotating, inverting, nor recolouring.
-    if not invert and not layer_color:
+    if not invert and not layer_color and not outline:
         if is_multi and getattr(lyr_obj, 'color_svg_urls', None):
             if rot_deg == 0:
                 return next(iter(lyr_obj.color_svg_urls.values()))
-        else:
-            if rot_deg == 0 and getattr(lyr_obj, 'svg_data_url', None):
+        elif rot_deg == 0:
+            # Single-layer view: use a TRANSPARENT-background variant (natural colour,
+            # bg stripped to 'none') so Plotly's image opacity reveals the defects/grid
+            # and any layers beneath instead of merely dimming an opaque black tile.
+            # Cached lazily on the layer instance so we pay the recolour cost once.
+            cached = getattr(lyr_obj, '_transparent_data_url', None)
+            if cached:
+                return cached
+            svg_src = getattr(lyr_obj, 'svg_string', '')
+            if svg_src:
+                t_svg = svg_src.replace(_SVG_BG, 'none')
+                url = ('data:image/svg+xml;base64,'
+                       + base64.b64encode(t_svg.encode()).decode())
+                try:
+                    setattr(lyr_obj, '_transparent_data_url', url)
+                except Exception:
+                    pass
+                return url
+            if getattr(lyr_obj, 'svg_data_url', None):
                 return lyr_obj.svg_data_url
 
     # ── Fast path for per-layer colour override (no rotation, no invert) ──────
@@ -60,7 +122,7 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     # svg_string path where the background colour string may differ from _SVG_BG
     # (e.g. if the renderer used CSS rather than an attribute value).  We just
     # swap the precomputed stack colour with the requested layer_color.
-    if layer_color and not invert and abs(rot_deg) < 0.01:
+    if layer_color and not invert and not outline and abs(rot_deg) < 0.01:
         stack_urls = getattr(lyr_obj, 'color_svg_urls', {})
         if stack_urls:
             stack_color = next(iter(stack_urls.keys()))
@@ -88,6 +150,13 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
     if layer_color:
         _fg2 = '#FFD700' if getattr(lyr_obj, 'layer_type', '') == 'drill' else '#b87333'
         svg = svg.replace(_fg2, layer_color).replace(_SVG_BG, 'none')
+
+    # Outline mode: strip the opaque bg and restyle fills as thin strokes so stacked
+    # dense layers stay distinguishable. Works with or without a per-layer colour.
+    if outline:
+        _oc = layer_color or ('#FFD700' if getattr(lyr_obj, 'layer_type', '') == 'drill' else '#b87333')
+        svg = svg.replace(_SVG_BG, 'none')
+        svg = _inject_outline(svg, _oc)
 
     if abs(rot_deg) < 0.01:
         return 'data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode()

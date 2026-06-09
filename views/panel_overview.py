@@ -304,12 +304,25 @@ def render_panel_overview(parsed, aoi, align_args):
         
         # Step 3: Display SVG directly (like main branch)
         if lyr.panel_svg_data_url:
+            # Honour the per-layer opacity slider. When dimmed, strip the opaque
+            # background so the panel frame/hierarchy shapes show through instead of
+            # the whole tile just fading to black.
+            _op = float(st.session_state.get(f"opacity_{want_layer}", 1.0))
+            _src = lyr.panel_svg_data_url
+            if _op < 0.999:
+                try:
+                    import base64 as _b64
+                    _svg = _b64.b64decode(_src.split(',', 1)[1]).decode('utf-8')
+                    _svg = _svg.replace('#060A06', 'none')
+                    _src = 'data:image/svg+xml;base64,' + _b64.b64encode(_svg.encode()).decode()
+                except Exception:
+                    _src = lyr.panel_svg_data_url
             fig.update_layout(images=[dict(
-                source=lyr.panel_svg_data_url,
+                source=_src,
                 xref="x", yref="y",
                 x=0, y=ph,
                 sizex=pw, sizey=ph,
-                sizing="stretch", layer="below", opacity=1.0,
+                sizing="stretch", layer="below", opacity=_op,
             )])
             extra = len(all_checked) - 1
             if extra > 0:

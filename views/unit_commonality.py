@@ -7,7 +7,7 @@ from core.data_utils import (
     compute_cm_geometry, filter_aoi_cm, _align_defects, _compute_pad_fingerprint,
     _SEV_DOT_SCALE, _SEV_LABEL, _SEV_COLOR,
 )
-from core.svg_utils import build_rotated_svg_url
+from core.svg_utils import build_rotated_svg_url, LAYER_PALETTE, stable_layer_colors
 from alignment import calculate_geometry, INTER_UNIT_GAP
 from visualizer import OverlayConfig, build_defect_only_figure, _apply_layout
 from export import export_current_view
@@ -21,34 +21,82 @@ _LAYER_OPACITY_MULTI  = {'copper': 0.90, 'drill': 0.45, 'other': 0.50}
 
 # Distinct colors for each layer when multiple are shown simultaneously.
 # Every layer gets a unique hue so 2F / 3F / 1B are immediately distinguishable.
-# None of these is the raw copper '#b87333' — that keeps the single-layer look and
-# would make multi-layer look the same as single-layer for the first entry.
-_MULTI_LAYER_COLORS = [
-    '#FF9800',  # amber   — layer 0 (e.g. 1F / top copper)
-    '#2196F3',  # blue    — layer 1 (e.g. 2F / inner 1)
-    '#4CAF50',  # green   — layer 2 (e.g. 3F / inner 2)
-    '#9C27B0',  # purple  — layer 3
-    '#00BCD4',  # cyan    — layer 4
-    '#E91E63',  # pink    — layer 5
-    '#CDDC39',  # lime    — layer 6
-    '#F44336',  # red     — layer 7
-]
+# The palette is shared with the sidebar (swatches) via core.svg_utils so the
+# chip next to a layer always matches what's drawn. None of these is the raw
+# copper '#b87333' — that keeps the single-layer look.
+_MULTI_LAYER_COLORS = LAYER_PALETTE
+_COPPER_TYPES = ('copper', 'signal', 'power', 'mixed')
+
+
+def _place_pairs(fig, pairs, ref_shift, rot, swap, is_multi, color_map):
+    """Draw an ordered list of (name, layer) pairs as background images.
+
+    Centralises the per-layer colour / outline / dense-opacity decisions shared by
+    the empty-state, empty-layers and defect overlays so they stay consistent.
+
+    Colour: copper and soldermask layers always render in their assigned distinct
+    hue (single OR multi), so the picture matches the sidebar swatch. Drill keeps its
+    natural gold so vias stay recognisable.
+
+    Outline: copper pours are solid fills that would occlude one another when stacked,
+    so when 2+ copper layers are shown we auto-draw copper as outlines — each layer's
+    colour then stays visible. The sidebar toggle forces outlines on even for a single
+    layer.
+    """
+    manual_outline = _copper_outline_on()
+    dense_n = sum(1 for _, l in pairs if l.layer_type in _COPPER_TYPES)
+    auto_outline = dense_n > 1  # stacked solid copper pours occlude → outline them
+    for _n, _l in pairs:
+        is_copper = _l.layer_type in _COPPER_TYPES
+        _lc = None if _l.layer_type == 'drill' else color_map.get(_n)
+        _ol = is_copper and (manual_outline or auto_outline)
+        _place_layer_image(fig, _n, _l, ref_shift, rot, swap, is_multi,
+                           layer_color=_lc, outline=_ol, dense_n=dense_n)
+
+
+def _copper_outline_on() -> bool:
+    """Whether the user enabled copper outline mode (sidebar toggle)."""
+    return bool(st.session_state.get('copper_outline_mode', False))
+
+
+def _layer_color_map(rodb) -> dict:
+    """Stable name→hue map so each layer keeps its colour regardless of selection."""
+    if not rodb or not getattr(rodb, 'layers', None):
+        return {}
+    return stable_layer_colors(rodb.layers.keys())
 
 
 def _layer_sort_key(name_lyr_pair: Tuple[str, Any]) -> int:
     return _LAYER_Z.get(name_lyr_pair[1].layer_type, 1)
 
 
-def _layer_opacity(layer_name: str, lyr_type: str, multi: bool) -> float:
+def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
+                   dense_n: int = 1, outline: bool = False) -> float:
+    """Effective Plotly image opacity for one layer.
+
+    Honours the per-layer sidebar slider, but when several dense copper pours are
+    stacked it caps the opacity so the topmost layer can't fully occlude the ones
+    beneath — that's what made stacked copper "all look the same colour". Outline
+    mode doesn't occlude, so it renders at full strength.
+    """
+    if outline:
+        slider_val = st.session_state.get(f"opacity_{layer_name}")
+        return float(slider_val) if slider_val is not None else 1.0
+
     slider_val = st.session_state.get(f"opacity_{layer_name}")
-    if slider_val is not None:
-        return float(slider_val)
-    d = _LAYER_OPACITY_MULTI if multi else _LAYER_OPACITY_SINGLE
-    return d.get(lyr_type, 0.70 if multi else 0.85)
+    base = (float(slider_val) if slider_val is not None
+            else (_LAYER_OPACITY_MULTI if multi else _LAYER_OPACITY_SINGLE)
+            .get(lyr_type, 0.70 if multi else 0.85))
+
+    # Dense copper occludes: cap opacity as the stack grows so lower layers show.
+    if lyr_type in ('copper', 'signal', 'power', 'mixed') and dense_n > 1:
+        cap = max(0.35, 1.1 / dense_n)
+        return min(base, cap)
+    return base
 
 
 def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
-             layer_color: str = None) -> str:
+             layer_color: str = None, outline: bool = False) -> str:
     """Reference-layer SVG url honouring the invert-polarity toggle.
 
     Rotating a multi-megabyte copper SVG costs ~15-20 ms and runs on every Streamlit
@@ -59,9 +107,9 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
     """
     invert = st.session_state.get('invert_polarity', False)
     name = getattr(lyr_obj, 'name', None)
-    if (abs(rot_deg) < 0.01 and not invert and not layer_color) or name is None:
+    if (abs(rot_deg) < 0.01 and not invert and not layer_color and not outline) or name is None:
         return build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                     layer_color=layer_color)
+                                     layer_color=layer_color, outline=outline)
 
     gen = id(st.session_state.get('rendered_odb'))
     store = st.session_state.get('_cm_svg_cache')
@@ -70,17 +118,17 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool,
         st.session_state['_cm_svg_cache'] = store
     cache = store['data']
 
-    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color)
+    key = (name, round(rot_deg, 1), bool(invert), bool(is_multi), layer_color, bool(outline))
     url = cache.get(key)
     if url is None:
         url = build_rotated_svg_url(lyr_obj, rot_deg, is_multi, invert=invert,
-                                    layer_color=layer_color)
+                                    layer_color=layer_color, outline=outline)
         cache[key] = url
     return url
 
 
 def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
-                       layer_color: str = None):
+                       layer_color: str = None, outline: bool = False, dense_n: int = 1):
     """Add one reference-design layer as a Plotly background image.
 
     Single source of the layer-placement + 90/270 dimension-swap convention shared by
@@ -119,10 +167,11 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
     y = final_cy + szy / 2.0
 
     fig.add_layout_image(dict(
-        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color),
+        source=_svg_url(lyr, svg_rot, is_multi, layer_color=layer_color, outline=outline),
         xref="x", yref="y", x=x, y=y, sizex=szx, sizey=szy,
         sizing="stretch", layer="below",
-        opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi),
+        opacity=_layer_opacity(layer_name, lyr.layer_type, is_multi,
+                               dense_n=dense_n, outline=outline),
     ))
 
 
@@ -198,9 +247,8 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
         cw, ch = ch, cw
 
     fig = go.Figure()
-    for _idx, (_n, _l) in enumerate(_sorted):
-        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if _is_multi else None
-        _place_layer_image(fig, _n, _l, _ref_shift, _rot_deg, _swap, _is_multi, layer_color=_lc)
+    _place_pairs(fig, _sorted, _ref_shift, _rot_deg, _swap, _is_multi,
+                 _layer_color_map(rodb_cm_check))
 
     _lbl = " + ".join(n for n, _ in na_checked)
     _add_dim_annotations(fig, cw, ch, _lbl)
@@ -384,9 +432,7 @@ def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
     _ref_b = first_lyr.bounds
     ref_shift = (-_ref_b[0], -_ref_b[1])
     swap = round(swap_angle) % 360 in (90, 270)
-    for _idx, (_ln, _lyr) in enumerate(pairs):
-        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if is_multi else None
-        _place_layer_image(fig, _ln, _lyr, ref_shift, svg_rot, swap, is_multi, layer_color=_lc)
+    _place_pairs(fig, pairs, ref_shift, svg_rot, swap, is_multi, _layer_color_map(rodb))
     _apply_layout(fig, cfg)
     return active
 
@@ -712,9 +758,8 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
     if _swap:
         cell_w, cell_h = cell_h, cell_w
     fig = go.Figure()
-    for _idx, (_n, _l) in enumerate(sorted(checked, key=_layer_sort_key)):
-        _lc = _MULTI_LAYER_COLORS[_idx % len(_MULTI_LAYER_COLORS)] if is_multi else None
-        _place_layer_image(fig, _n, _l, _ref_shift, _rot, _swap, is_multi, layer_color=_lc)
+    _place_pairs(fig, sorted(checked, key=_layer_sort_key), _ref_shift, _rot, _swap,
+                 is_multi, _layer_color_map(rodb))
     _add_dim_annotations(fig, cell_w, cell_h, " + ".join(n for n, _ in checked))
     fig.update_layout(
         xaxis=dict(range=[-1, cell_w + 1], scaleanchor='y', scaleratio=1,
