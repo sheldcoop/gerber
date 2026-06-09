@@ -98,37 +98,49 @@ def _svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool, style: LayerStyle) ->
     return url
 
 
-def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
-                       layer_color: str = None, outline: bool = False, dense_n: int = 1):
-    """Add one reference-design layer as a Plotly background image.
+def _layer_placement(b, ref_shift, ref_w, ref_h, swap_angle, svg_rot):
+    """Pure geometry: where to anchor a layer's image (Plotly top-left x,y + size).
 
-    Single source of the layer-placement + 90/270 dimension-swap convention shared by
-    the empty-state, empty-layers, and defect-state overlays.
+    Returns (x, y, szx, szy). The layer's TRUE centre in the (unrotated) reference cell is
+    rotated about the cell centre into the swapped canvas, so sub-region layers (drill/via)
+    keep their real offset under a 90/270 panel rotation. At 0/180 this is the identity
+    placement (board + shift), unchanged from before. The reference (full-board) layer maps
+    to exactly the previous output at every angle — copper is provably unaffected.
+
+    ref_w/ref_h are the UNROTATED reference footprint (W, H); the swapped canvas is [0,H]×[0,W].
     """
-    b = lyr.bounds
     im_w, im_h = b[2] - b[0], b[3] - b[1]
     sx, sy = ref_shift
 
-    # Center of the layer in the standard (unswapped) coordinate system
-    layer_cx = b[0] + sx + im_w / 2.0
-    layer_cy = b[3] + sy - im_h / 2.0
+    # Layer centre in the unrotated, shifted cell frame.
+    cx = b[0] + sx + im_w / 2.0
+    cy = b[1] + sy + im_h / 2.0
 
-    # If the canvas itself is swapped (e.g. panel is rotated 90 deg), the center moves
-    if swap:
-        final_cx, final_cy = im_h / 2.0, im_w / 2.0
-    else:
-        final_cx, final_cy = layer_cx, layer_cy
+    ang = round(swap_angle) % 360
+    if ang == 90:
+        fcx, fcy = ref_h - cy, cx
+    elif ang == 270:
+        fcx, fcy = cy, ref_w - cx
+    else:  # 0 / 180 — identity centre (matches the pre-existing non-swap path)
+        fcx, fcy = cx, cy
 
-    # If the SVG content is rotated 90/270, its viewBox dimensions are swapped
+    # If the SVG *content* is rotated 90/270, its viewBox dimensions are swapped.
     svg_is_swapped = round(svg_rot) % 360 in (90, 270)
-    if svg_is_swapped:
-        szx, szy = im_h, im_w
-    else:
-        szx, szy = im_w, im_h
+    szx, szy = (im_h, im_w) if svg_is_swapped else (im_w, im_h)
 
-    # Plotly anchors images at top-left by default
-    x = final_cx - szx / 2.0
-    y = final_cy + szy / 2.0
+    # Plotly anchors images at top-left.
+    return fcx - szx / 2.0, fcy + szy / 2.0, szx, szy
+
+
+def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap_angle, is_multi,
+                       ref_w, ref_h,
+                       layer_color: str = None, outline: bool = False, dense_n: int = 1):
+    """Add one reference-design layer as a Plotly background image.
+
+    Single source of the layer-placement + 90/270 rotation convention shared by the
+    empty-state, empty-layers, and defect-state overlays.
+    """
+    x, y, szx, szy = _layer_placement(lyr.bounds, ref_shift, ref_w, ref_h, swap_angle, svg_rot)
 
     # Invert polarity applies to copper and soldermask only — never to drill/via layers.
     _inv = st.session_state.get('invert_polarity', False) and lyr.layer_type != 'drill'
@@ -152,21 +164,24 @@ def _place_layer_image(fig, layer_name, lyr, ref_shift, svg_rot, swap, is_multi,
     ))
 
 
-def _place_pairs(fig, pairs, ref_shift, rot, swap, is_multi, color_map):
+def _place_pairs(fig, pairs, ref_shift, rot, swap_angle, is_multi, color_map, ref_w, ref_h):
     """Draw an ordered list of (name, layer) pairs as background images.
 
     Colour: copper and soldermask layers render in their assigned distinct hue (single OR
     multi) so the picture matches the sidebar swatch; drill keeps its natural gold.
     Copper always renders as a coloured wireframe (contour) so pour layers show their
     design, not a solid block.
+
+    ref_w/ref_h are the unrotated reference footprint, used to place sub-region layers
+    (drill/via) correctly when the unit is rotated 90/270.
     """
     dense_n = sum(1 for _, l in pairs if l.layer_type in _COPPER_TYPES)
     for _n, _l in pairs:
         is_copper = _l.layer_type in _COPPER_TYPES
         _lc = None if _l.layer_type == 'drill' else color_map.get(_n)
         _ol = is_copper
-        _place_layer_image(fig, _n, _l, ref_shift, rot, swap, is_multi,
-                           layer_color=_lc, outline=_ol, dense_n=dense_n)
+        _place_layer_image(fig, _n, _l, ref_shift, rot, swap_angle, is_multi,
+                           ref_w, ref_h, layer_color=_lc, outline=_ol, dense_n=dense_n)
 
 
 def _display_dims(cell_w, cell_h, angle):

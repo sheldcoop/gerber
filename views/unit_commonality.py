@@ -71,9 +71,10 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
     if _swap:
         cw, ch = ch, cw
 
+    _ref_w, _ref_h = _ref_b[2] - _ref_b[0], _ref_b[3] - _ref_b[1]
     fig = go.Figure()
-    _place_pairs(fig, _sorted, _ref_shift, _rot_deg, _swap, _is_multi,
-                 _layer_color_map(rodb_cm_check))
+    _place_pairs(fig, _sorted, _ref_shift, _rot_deg, _rot_deg, _is_multi,
+                 _layer_color_map(rodb_cm_check), _ref_w, _ref_h)
 
     _lbl = " + ".join(n for n, _ in na_checked)
     _add_dim_annotations(fig, cw, ch, _lbl)
@@ -114,8 +115,9 @@ def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
 
     _ref_b = first_lyr.bounds
     ref_shift = (-_ref_b[0], -_ref_b[1])
-    swap = round(swap_angle) % 360 in (90, 270)
-    _place_pairs(fig, pairs, ref_shift, svg_rot, swap, is_multi, _layer_color_map(rodb))
+    _ref_w, _ref_h = _ref_b[2] - _ref_b[0], _ref_b[3] - _ref_b[1]
+    _place_pairs(fig, pairs, ref_shift, svg_rot, swap_angle, is_multi,
+                 _layer_color_map(rodb), _ref_w, _ref_h)
     _apply_layout(fig, cfg)
     return active
 
@@ -280,15 +282,17 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
     if not checked:
         st.caption("☝️ Select a layer in the sidebar to view the design.")
         return
-    _ref_shift = (-first_lyr.bounds[0], -first_lyr.bounds[1])
+    _rb = first_lyr.bounds
+    _ref_shift = (-_rb[0], -_rb[1])
+    _ref_w, _ref_h = _rb[2] - _rb[0], _rb[3] - _rb[1]
     is_multi = len(checked) > 1
     _rot = float(round(getattr(rodb.panel_layout, 'dominant_angle', 0.0)) % 360) if rodb.panel_layout else 0.0
     _swap = _rot in (90.0, 270.0)
     if _swap:
         cell_w, cell_h = cell_h, cell_w
     fig = go.Figure()
-    _place_pairs(fig, sorted(checked, key=_layer_sort_key), _ref_shift, _rot, _swap,
-                 is_multi, _layer_color_map(rodb))
+    _place_pairs(fig, sorted(checked, key=_layer_sort_key), _ref_shift, _rot, _rot,
+                 is_multi, _layer_color_map(rodb), _ref_w, _ref_h)
     _add_dim_annotations(fig, cell_w, cell_h, " + ".join(n for n, _ in checked))
     fig.update_layout(
         xaxis=dict(range=[-1, cell_w + 1], scaleanchor='y', scaleratio=1,
