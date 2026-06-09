@@ -4,8 +4,7 @@ import plotly.graph_objects as go
 from typing import Any, Tuple, List
 
 from core.data_utils import (
-    compute_cm_geometry, filter_aoi_cm, _align_defects, _compute_pad_fingerprint,
-    _SEV_DOT_SCALE, _SEV_LABEL, _SEV_COLOR,
+    compute_cm_geometry, filter_aoi_cm, _align_defects,
 )
 from core.svg_utils import build_rotated_svg_url, LAYER_PALETTE, stable_layer_colors
 from alignment import calculate_geometry, INTER_UNIT_GAP
@@ -62,8 +61,25 @@ def _layer_color_map(rodb) -> dict:
     return stable_layer_colors(rodb.layers.keys())
 
 
-def _layer_sort_key(name_lyr_pair: Tuple[str, Any]) -> int:
-    return _LAYER_Z.get(name_lyr_pair[1].layer_type, 1)
+# Physical copper stackup, BOTTOM-of-stack first → TOP last. Larger rank = drawn later =
+# on top. Matches the user's top→bottom order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (reversed here).
+_COPPER_STACK_ORDER = ['4B', '3B', '2B', '1BCO', '1FCO', '2F', '3F', '4F']
+
+
+def _copper_draw_rank(name: str) -> int:
+    """Within-copper draw rank: higher = nearer the top of the displayed stack."""
+    n = name.upper()
+    for i, key in enumerate(_COPPER_STACK_ORDER):
+        if n == key or n.startswith(key):
+            return i + 1
+    return 0  # unknown copper → below the recognised stack
+
+
+def _layer_sort_key(name_lyr_pair: Tuple[str, Any]) -> Tuple[int, int]:
+    name, lyr = name_lyr_pair
+    z = _LAYER_Z.get(lyr.layer_type, 1)
+    sub = _copper_draw_rank(name) if lyr.layer_type in _COPPER_TYPES else 0
+    return (z, sub)
 
 
 def _layer_opacity(layer_name: str, lyr_type: str, multi: bool,
@@ -444,103 +460,14 @@ def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint figure
+# Metrics
 # ---------------------------------------------------------------------------
 
-def _build_fingerprint_figure(fp_df, n_sel_units):
-    fig = go.Figure()
-    for _sev in (3, 2, 1, 0):
-        rows = fp_df[fp_df['severity'] == _sev]
-        if rows.empty:
-            continue
-        sizes = (rows['unit_count'].clip(upper=n_sel_units)
-                 .apply(lambda n: _SEV_DOT_SCALE[_sev] + n * 1.2))
-        fig.add_trace(go.Scatter(
-            x=rows['cx'], y=rows['cy'], mode='markers', name=_SEV_LABEL[_sev],
-            marker=dict(color=_SEV_COLOR[_sev], size=sizes, opacity=0.82,
-                        line=dict(color='rgba(0,0,0,0.4)', width=0.8)),
-            customdata=rows[['unit_count', 'unit_pct', 'top_verif', 'all_verif',
-                             'top_type', 'buildup', 'defect_count']].values,
-            hovertemplate=(
-                "<b>Verification: %{customdata[2]}</b><br>"
-                "All codes at this site: %{customdata[3]}<br>"
-                "Defect type: %{customdata[4]}<br>"
-                "Units hit: <b>%{customdata[0]}</b> (%{customdata[1]}%)<br>"
-                "Total defects at site: %{customdata[6]}<br>"
-                "Buildup: %{customdata[5]}<br>"
-                "X: %{x:.2f} mm  Y: %{y:.2f} mm"
-                "<extra></extra>"
-            ),
-        ))
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# Metrics + fault-site table
-# ---------------------------------------------------------------------------
-
-def _render_metrics(fp_df, sel_units, cm_plot):
+def _render_metrics(sel_units, cm_plot):
     c1, c2, c3 = st.columns(3)
-    if not fp_df.empty:
-        systemic = int((fp_df['unit_pct'] >= 50.0).sum())
-        worst = fp_df.iloc[0]
-        crit_sys = int(((fp_df['severity'] == 3) & (fp_df['unit_pct'] >= 50.0)).sum())
-        c1.metric("Systemic Fault Sites (≥ 50 % units)", systemic,
-                  help="Fault sites where ≥ 50 % of selected units had a defect. These are process faults, not random.")
-        c2.metric("Worst Site Hit Rate", f"{worst['unit_pct']:.0f}% — {worst['top_verif']}",
-                  help="The fault site with the highest unit hit % and the top verification code driving it.")
-        c3.metric("Critical + Systemic", crit_sys,
-                  delta=f"of {len(fp_df)} total fault sites", delta_color="inverse",
-                  help="Critical-severity fault sites also failing on ≥ 50 % of units — the highest-priority items to fix.")
-    else:
-        c1.metric("Units Selected", len(sel_units))
-        c2.metric("Defects Shown", len(cm_plot))
-        c3.metric("Avg / Unit", f"{len(cm_plot)/max(len(sel_units),1):.1f}")
-
-
-def _fault_site_table(fp_df):
-    if fp_df.empty:
-        return
-    st.divider()
-    st.markdown("#### 🔬 Fault Site Recurrence Fingerprint")
-    st.caption(
-        "Each row is a distinct fault site (defects snapped to 0.5 mm grid). "
-        "**Unit hit %** = how many of the selected units had a defect here. "
-        "A site at 100 % is a **systemic process fault** — it fails on every unit, every time."
-    )
-
-    systemic = fp_df[fp_df['unit_pct'] >= 80.0]
-    if not systemic.empty:
-        crit_sys = systemic[systemic['severity'] == 3]
-        if not crit_sys.empty:
-            st.error(
-                f"🚨 **{len(crit_sys)} Critical fault site(s) are failing on ≥ 80 % of units.** "
-                "This is a systemic process fault — not random defects."
-            )
-        else:
-            st.warning(f"⚠️ **{len(systemic)} fault site(s) are failing on ≥ 80 % of units.**")
-
-    disp = fp_df.copy()
-    disp.insert(0, 'Rank', range(1, len(disp) + 1))
-    disp = disp.rename(columns={
-        'cx': 'X (mm)', 'cy': 'Y (mm)', 'unit_count': 'Units Hit', 'unit_pct': 'Hit %',
-        'severity_label': 'Severity', 'top_verif': 'Top Verification',
-        'all_verif': 'All Verif. Codes', 'top_type': 'Top Defect Type',
-        'buildup': 'Buildup(s)', 'defect_count': 'Total Defects',
-    }).drop(columns=['severity'])
-
-    def _colour_sev(val):
-        c = {'Critical': '#FF3B3B', 'High': '#FF9900',
-             'Medium': '#FFD700', 'Low': '#66BB6A'}.get(val, '')
-        return f'color: {c}; font-weight: bold' if c else ''
-
-    styled = (
-        disp.style
-        .applymap(_colour_sev, subset=['Severity'])
-        .background_gradient(subset=['Hit %'], cmap='Reds', vmin=0, vmax=100)
-        .format({'X (mm)': '{:.2f}', 'Y (mm)': '{:.2f}', 'Hit %': '{:.1f}'})
-    )
-    st.dataframe(styled, use_container_width=True, height=320)
+    c1.metric("Units Selected", len(sel_units))
+    c2.metric("Defects Shown", len(cm_plot))
+    c3.metric("Avg / Unit", f"{len(cm_plot)/max(len(sel_units),1):.1f}")
 
 
 # ---------------------------------------------------------------------------
@@ -560,9 +487,7 @@ def _render_defect_state(rodb, aoi, align_args):
     bu = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
 
     # Panel filter — read from the global Analysis Scope (scope_panel_sel).
-    # When >1 panel is selected the color mode is auto-set to by_panel below.
     panel_filter = st.session_state.get('panel_filter_select', None)
-    has_multi_panel = bool(panel_filter and len(panel_filter) > 1)
 
     # Scope filter (buildup/side) then restrict to the selected units.
     side = st.session_state.get('scope_side_sel', ['Front', 'Back'])
@@ -630,40 +555,11 @@ def _render_defect_state(rodb, aoi, align_args):
     cm_plot['ALIGNED_Y'] = list(ay)
 
     cfg = OverlayConfig()
-    # Auto color-by-panel when comparing multiple panels, but only when the user
-    # has not made an explicit choice.  If the sidebar colour mode is anything
-    # other than the generic 'by_type' default we treat it as intentional and
-    # honour it even across panels (e.g. the user explicitly picked by_verification
-    # to see CU22/CU18 colours).
-    user_color_mode = st.session_state.get('color_mode_select', 'by_type')
-    if has_multi_panel and panel_filter and len(panel_filter) > 1:
-        cfg.color_mode = user_color_mode if user_color_mode != 'by_type' else 'by_panel'
-    else:
-        cfg.color_mode = user_color_mode
-    cfg.marker_style   = st.session_state.get('marker_style_select', 'dot')
+    cfg.color_mode     = st.session_state.get('color_mode_select', 'by_type')
+    cfg.marker_style   = st.session_state.get('marker_style_select', 'crosshair')
     cfg.buildup_filter = bu
     cfg.defect_types   = st.session_state.get('defect_type_select', aoi.defect_types)
     cfg.side_filter    = 'Both'
-
-    fp_mode = st.toggle(
-        "🔬 Fault Site Fingerprint Mode", value=False, key="cm_fingerprint_toggle",
-        help=("Replace raw dots with one marker per recurring fault site. "
-              "Size = how many units were hit. "
-              "Colour = worst defect severity (red=Critical, orange=High, yellow=Medium, green=Low). "
-              "Hover to see the top verification code (e.g. CU22, SH, OP)."),
-    )
-
-    fp_df = _compute_pad_fingerprint(
-        ax_tuple=tuple(cm_plot['ALIGNED_X'].tolist()),
-        ay_tuple=tuple(cm_plot['ALIGNED_Y'].tolist()),
-        defect_types=tuple(cm_plot['DEFECT_TYPE'].tolist() if 'DEFECT_TYPE' in cm_plot.columns
-                           else ['unknown'] * len(cm_plot)),
-        unit_keys=tuple(zip(cm_plot['UNIT_INDEX_Y'].astype(int).tolist(),
-                            cm_plot['UNIT_INDEX_X'].astype(int).tolist())),
-        buildup_vals=tuple(cm_plot['BUILDUP'].tolist() if 'BUILDUP' in cm_plot.columns else []),
-        verification_vals=tuple(cm_plot['VERIFICATION'].tolist() if 'VERIFICATION' in cm_plot.columns else []),
-        verif_severity_map=tuple(st.session_state.get('verif_severity_map', {}).items()),
-    )
 
     # ── Display orientation: defects are already in the panel frame (translation), so we
     #    only swap the displayed cell dims and rotate the reference DESIGN to match. ──
@@ -672,10 +568,7 @@ def _render_defect_state(rodb, aoi, align_args):
     disp_w, disp_h = _display_dims(cell_w, cell_h, theta)
     cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
 
-    if fp_mode and not fp_df.empty:
-        fig = _build_fingerprint_figure(fp_df, len(sel_units))
-    else:
-        fig = build_defect_only_figure(cm_plot, cfg)
+    fig = build_defect_only_figure(cm_plot, cfg)
 
     active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
     if active_layer is None:
@@ -714,8 +607,7 @@ def _render_defect_state(rodb, aoi, align_args):
     st.plotly_chart(fig, width='stretch',
                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
 
-    _render_metrics(fp_df, sel_units, cm_plot)
-    _fault_site_table(fp_df)
+    _render_metrics(sel_units, cm_plot)
 
 
 def _add_grid(fig, cell_w, cell_h, step=5.0):

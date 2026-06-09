@@ -467,88 +467,31 @@ def render_sidebar():
                 st.header("3. Display Options")
                 marker_style = st.selectbox(
                     "Marker Style",
-                    ['dot', 'crosshair', 'x_mark'],
+                    ['crosshair', 'dot', 'x_mark'],
                     format_func=lambda x: x.replace('_', ' ').title(),
                     key='marker_style_select',
                 )
 
+                # Color mode: only By Verification and By Defect Type. Default to verification
+                # when the AOI data actually carries verification codes, else defect type.
+                _has_verif = bool(
+                    aoi and aoi.has_data
+                    and 'VERIFICATION' in aoi.all_defects.columns
+                    and aoi.all_defects['VERIFICATION'].notna().any()
+                )
+                _cm_options = ['by_verification', 'by_type']
                 color_mode = st.selectbox(
                     "Color Mode",
-                    ['by_type', 'by_verification', 'by_buildup', 'by_severity', 'by_source'],
+                    _cm_options,
+                    index=0 if _has_verif else 1,
                     format_func=lambda x: {
                         'by_type': 'By Defect Type',
                         'by_verification': 'By Verification',
-                        'by_buildup': 'By Buildup',
-                        'by_severity': 'By Severity',
-                        'by_source': '📁 By Panel Source',
                     }.get(x, x),
                     key='color_mode_select',
                 )
 
                 st.divider()
-
-                # ---- Verification Severity Map ----
-                st.markdown("**⚠️ Verification Severity Map**")
-                st.caption(
-                    "Drop each verification code into the correct severity bucket. "
-                    "Unassigned codes fall back to defect-type keyword matching. "
-                    "Used by Fault Site Fingerprint and Defect Risk Breakdown."
-                )
-
-                _SEV_INT_MAP  = {'Critical': 3, 'High': 2, 'Medium': 1, 'Low': 0}
-                _SEV_ICONS    = {'Critical': '🔴', 'High': '🟠', 'Medium': '🟡', 'Low': '🟢'}
-                # Built-in pre-fill defaults for common Orbotech codes
-                _SEV_DEFAULTS = {
-                    'SH': 'Critical', 'SHORT': 'Critical',
-                    'OP': 'Critical', 'OPEN':  'Critical',
-                    'MS': 'Critical', 'MISSING': 'Critical',
-                    'BR': 'Critical', 'BRIDGE': 'Critical',
-                    'EX': 'High',     'EXCESS': 'High',
-                    'PH': 'High',     'PINHOLE': 'High',
-                    'NK': 'Medium',   'NICK':   'Medium',
-                    'SC': 'Low',      'SCRATCH': 'Low',
-                }
-
-                _aoi_ds = st.session_state.get('aoi_dataset')
-                if _aoi_ds and _aoi_ds.has_data and 'VERIFICATION' in _aoi_ds.all_defects.columns:
-                    _all_vcodes = sorted(
-                        str(v).strip().upper()
-                        for v in _aoi_ds.all_defects['VERIFICATION'].dropna().unique()
-                        if str(v).strip().upper() not in ('', 'NAN', 'NONE', 'N')
-                    )
-                else:
-                    _all_vcodes = []
-
-                if not _all_vcodes:
-                    st.caption("_(No verification codes found — load AOI data first)_")
-                else:
-                    # Seed each multiselect default from: previous session → built-in default
-                    _prev_map = st.session_state.get('verif_severity_map', {})
-                    # _prev_map is {code: int} — invert to {sev_label: [codes]}
-                    _INT_TO_LABEL = {3: 'Critical', 2: 'High', 1: 'Medium', 0: 'Low'}
-                    _prev_buckets: dict[str, list] = {'Critical': [], 'High': [], 'Medium': [], 'Low': []}
-                    for _vc in _all_vcodes:
-                        if _vc in _prev_map:
-                            _prev_buckets[_INT_TO_LABEL[_prev_map[_vc]]].append(_vc)
-                        elif _vc in _SEV_DEFAULTS:
-                            _prev_buckets[_SEV_DEFAULTS[_vc]].append(_vc)
-                        # else: unassigned — not placed in any bucket → keyword fallback
-
-                    _new_map: dict[str, int] = {}
-                    for _sev_label in ['Critical', 'High', 'Medium', 'Low']:
-                        _chosen = st.multiselect(
-                            f"{_SEV_ICONS[_sev_label]} {_sev_label}",
-                            options=_all_vcodes,
-                            default=_prev_buckets[_sev_label],
-                            key=f"vsev_bucket_{_sev_label}",
-                            help=f"Verification codes to treat as {_sev_label}. "
-                                 "Codes not in any bucket fall back to defect-type keyword matching.",
-                        )
-                        for _vc in _chosen:
-                            _new_map[_vc] = _SEV_INT_MAP[_sev_label]
-
-                    # Persist as {code: int}
-                    st.session_state['verif_severity_map'] = _new_map
 
             # ---- Background Source ----
             st.session_state['bg_source'] = 'CAM (Gerbonara)'

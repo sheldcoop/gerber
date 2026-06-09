@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from visualizer import (
     _polygon_to_coords,
     _geometry_to_coords,
-    _build_severity_map,
     _build_hover_template,
     _build_customdata,
     build_defect_only_figure,
@@ -75,36 +74,6 @@ class TestGeometryToCoords:
         xs, ys = _geometry_to_coords(poly)
         assert xs == []
         assert ys == []
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Severity map
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestBuildSeverityMap:
-    def test_critical_keywords(self):
-        smap = _build_severity_map(['Short', 'Open', 'Missing', 'Bridge'])
-        assert all(v == 'Critical' for v in smap.values())
-
-    def test_high_keywords(self):
-        smap = _build_severity_map(['Space', 'Island', 'Pinhole'])
-        assert all(v == 'High' for v in smap.values())
-
-    def test_medium_keywords(self):
-        smap = _build_severity_map(['Nick', 'Scratch', 'Dent'])
-        assert all(v == 'Medium' for v in smap.values())
-
-    def test_low_keywords(self):
-        smap = _build_severity_map(['Protrusion', 'Roughness', 'Residue'])
-        assert all(v == 'Low' for v in smap.values())
-
-    def test_unknown_defaults_to_medium(self):
-        smap = _build_severity_map(['UnknownDefect123'])
-        assert smap['UnknownDefect123'] == 'Medium'
-
-    def test_case_insensitive(self):
-        smap = _build_severity_map(['SHORT', 'short', 'Short'])
-        assert all(v == 'Critical' for v in smap.values())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,17 +150,9 @@ class TestBuildOverlayFigure:
         fig = build_defect_only_figure(pd.DataFrame(), config)
         assert isinstance(fig, go.Figure)
 
-    def test_color_mode_by_severity(self):
+    def test_color_mode_by_verification(self):
         config = OverlayConfig(
-            color_mode='by_severity',
-            board_bounds=(0, 0, 50, 50),
-        )
-        fig = build_defect_only_figure(self._make_defect_df(), config)
-        assert isinstance(fig, go.Figure)
-
-    def test_color_mode_by_buildup(self):
-        config = OverlayConfig(
-            color_mode='by_buildup',
+            color_mode='by_verification',
             board_bounds=(0, 0, 50, 50),
         )
         fig = build_defect_only_figure(self._make_defect_df(), config)

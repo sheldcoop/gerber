@@ -36,8 +36,8 @@ class OverlayConfig:
     defect_types: list[str] = field(default_factory=list)
     buildup_filter: list[int] = field(default_factory=list)
     side_filter: str = 'Both'        # 'Front', 'Back', 'Both'
-    marker_style: str = 'dot'        # 'dot', 'crosshair', 'x_mark'
-    color_mode: str = 'by_type'      # 'by_type', 'by_buildup', 'by_severity', 'by_panel'
+    marker_style: str = 'crosshair'  # 'crosshair', 'dot', 'x_mark'
+    color_mode: str = 'by_type'      # 'by_type', 'by_verification'
     board_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
     offset_x: float = 0.0            # Visual X translation for the ODB++ render
     offset_y: float = 0.0            # Visual Y translation for the ODB++ render
@@ -64,19 +64,6 @@ DEFECT_TYPE_COLORS = [
     '#44FFFF', '#FF8844', '#88FF44', '#4488FF', '#FF4488',
     '#AAFF44', '#44AAFF', '#FF44AA', '#44FFAA', '#AA44FF',
     '#FFFF44', '#FF6644', '#66FF44', '#4466FF', '#FF4466',
-]
-
-# Panel comparison colors — visually distinct, one per panel
-PANEL_COLORS = [
-    '#2196F3', '#FF5722', '#4CAF50', '#9C27B0',
-    '#FF9800', '#00BCD4', '#E91E63', '#607D8B',
-    '#CDDC39', '#795548', '#03A9F4', '#FF4081',
-]
-
-# Buildup layer colors (sequential blue-to-red)
-BUILDUP_COLORS = [
-    '#2196F3', '#4CAF50', '#FF9800', '#F44336', '#9C27B0',
-    '#00BCD4', '#FFEB3B', '#795548', '#607D8B', '#E91E63',
 ]
 
 # Marker style configurations
@@ -528,23 +515,9 @@ def _add_defect_traces(
             showlegend=False
         ))
 
-    # Determine grouping column and color palette
-    if config.color_mode == 'by_panel' and 'PANEL_ID' in filtered.columns:
-        group_col = 'PANEL_ID'
-        palette = PANEL_COLORS
-    elif config.color_mode == 'by_source' and 'SOURCE_FILE' in filtered.columns:
-        group_col = 'SOURCE_FILE'
-        palette = DEFECT_TYPE_COLORS
-    elif config.color_mode == 'by_buildup' and 'BUILDUP' in filtered.columns:
-        group_col = 'BUILDUP'
-        palette = BUILDUP_COLORS
-    elif config.color_mode == 'by_severity' and 'DEFECT_TYPE' in filtered.columns:
-        # Map defect types to severity levels (heuristic based on common AOI types)
-        severity_map = _build_severity_map(filtered['DEFECT_TYPE'].unique())
-        filtered['_SEVERITY'] = filtered['DEFECT_TYPE'].map(severity_map)
-        group_col = '_SEVERITY'
-        palette = ['#4CAF50', '#FFEB3B', '#FF9800', '#F44336']  # green→yellow→orange→red
-    elif config.color_mode == 'by_verification' and 'VERIFICATION' in filtered.columns:
+    # Determine grouping column and color palette. Only two modes are supported:
+    # by_verification (when the column exists) and the default by_type.
+    if config.color_mode == 'by_verification' and 'VERIFICATION' in filtered.columns:
         group_col = 'VERIFICATION'
         palette = DEFECT_TYPE_COLORS
     else:
@@ -576,7 +549,7 @@ def _add_defect_traces(
 
         # Label: omit generic "Defect:" prefix for verification / panel modes where
         # the code itself is already descriptive (CU22, Panel_30 …).
-        if config.color_mode in ('by_verification', 'by_panel', 'by_buildup'):
+        if config.color_mode == 'by_verification':
             legend_name = f"{group_name}  ({len(group_df)})"
         else:
             legend_name = f"Defect: {group_name}  ({len(group_df)})"
@@ -597,37 +570,6 @@ def _add_defect_traces(
             customdata=group_customdata,
             hovertemplate=hover_template,
         ))
-
-
-def _build_severity_map(defect_types) -> dict:
-    """
-    Map defect types to severity levels (0-3) based on common AOI heuristics.
-
-    Severity levels:
-      0 = Low (cosmetic): Minimum Line, Protrusion
-      1 = Medium (minor): Nick, Deformation
-      2 = High (functional): Space, Island, Cut
-      3 = Critical (fatal): Short, Open, Missing
-    """
-    severity_keywords = {
-        3: ['short', 'open', 'missing', 'bridge', 'break'],
-        2: ['space', 'island', 'cut', 'excess', 'pinhole', 'void'],
-        1: ['nick', 'deformation', 'scratch', 'dent', 'mark'],
-        0: ['minimum', 'protrusion', 'roughness', 'residue', 'discolor'],
-    }
-
-    result = {}
-    for dtype in defect_types:
-        dtype_lower = str(dtype).lower()
-        assigned = 1  # default: medium
-        for severity, keywords in severity_keywords.items():
-            if any(kw in dtype_lower for kw in keywords):
-                assigned = severity
-                break
-        severity_labels = ['Low', 'Medium', 'High', 'Critical']
-        result[dtype] = severity_labels[assigned]
-
-    return result
 
 
 # ---------------------------------------------------------------------------

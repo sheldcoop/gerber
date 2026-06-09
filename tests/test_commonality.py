@@ -5,9 +5,7 @@ Covers the pure helpers behind views/unit_commonality.py:
   1. compute_cm_geometry   — origin map + reference cell dimensions
   2. filter_aoi_cm         — buildup / side scope filtering
   3. _align_defects        — rotation-aware mapping + input validation
-  4. _compute_pad_fingerprint — fault-site recurrence (incl. the verif/type
-                               index-alignment regression)
-  5. compute_unit_positions — dominant_angle provenance (cluster vs unit vs none)
+  4. compute_unit_positions — dominant_angle provenance (cluster vs unit vs none)
 """
 
 import os
@@ -23,7 +21,6 @@ from core.data_utils import (
     compute_cm_geometry,
     filter_aoi_cm,
     _align_defects,
-    _compute_pad_fingerprint,
 )
 
 
@@ -187,72 +184,6 @@ def test_real_data_translation_aligns(tgz, xlsx, angle):
     ax, ay = np.array(ax), np.array(ay)
     in_cell = np.mean((ax >= -1) & (ax <= disp_w + 1) & (ay >= -1) & (ay <= disp_h + 1))
     assert in_cell >= 0.95, f"{tgz}: only {in_cell:.0%} of defects in display cell with translation"
-
-
-# ---------------------------------------------------------------------------
-# 4. _compute_pad_fingerprint
-# ---------------------------------------------------------------------------
-
-class TestPadFingerprint:
-    def test_empty_input_returns_empty(self):
-        df = _compute_pad_fingerprint((), (), (), (), ())
-        assert df.empty
-
-    def test_unit_count_and_pct(self):
-        # Two defects at the same snapped site from two distinct units → 100%
-        df = _compute_pad_fingerprint(
-            ax_tuple=(1.0, 1.05), ay_tuple=(1.0, 1.0),
-            defect_types=('Open', 'Open'),
-            unit_keys=((0, 0), (1, 1)),
-            buildup_vals=(1, 1),
-            verification_vals=('CU22', 'CU22'),
-            verif_severity_map=(('CU22', 3),),
-        )
-        assert len(df) == 1
-        assert int(df.iloc[0]['unit_count']) == 2
-        assert df.iloc[0]['unit_pct'] == pytest.approx(100.0)
-        assert int(df.iloc[0]['defect_count']) == 2
-
-    def test_severity_is_worst_at_site(self):
-        # One critical-coded defect + one benign None-coded defect → severity = worst
-        df = _compute_pad_fingerprint(
-            ax_tuple=(2.0, 2.0), ay_tuple=(2.0, 2.0),
-            defect_types=('Open', 'Open'),
-            unit_keys=((0, 0), (1, 1)),
-            buildup_vals=(1, 1),
-            verification_vals=('CU22', None),
-            verif_severity_map=(('CU22', 3),),
-        )
-        assert int(df.iloc[0]['severity']) == 3
-        assert df.iloc[0]['top_verif'] == 'CU22'
-
-    def test_verif_type_index_alignment_regression(self):
-        """Regression: severity must pair each defect's OWN verification with its
-        OWN type. A None code in the middle must not shift later codes onto the
-        wrong defect. Here only the 2nd defect carries the critical code."""
-        df = _compute_pad_fingerprint(
-            ax_tuple=(3.0, 3.0, 3.0), ay_tuple=(3.0, 3.0, 3.0),
-            defect_types=('Nick', 'Open', 'Nick'),
-            unit_keys=((0, 0), (1, 1), (2, 2)),
-            buildup_vals=(1, 1, 1),
-            verification_vals=(None, 'CU22', None),
-            verif_severity_map=(('CU22', 3),),
-        )
-        assert len(df) == 1
-        assert int(df.iloc[0]['severity']) == 3
-        assert df.iloc[0]['top_verif'] == 'CU22'
-        assert df.iloc[0]['all_verif'] == 'CU22'
-
-    def test_grid_snapping_groups_nearby(self):
-        # Two points within 0.5mm snap to the same site; a far one is separate
-        df = _compute_pad_fingerprint(
-            ax_tuple=(1.0, 1.2, 9.0), ay_tuple=(1.0, 1.1, 9.0),
-            defect_types=('Open', 'Open', 'Open'),
-            unit_keys=((0, 0), (1, 1), (2, 2)),
-            buildup_vals=(1, 1, 1),
-            verification_vals=('A', 'A', 'A'),
-        )
-        assert len(df) == 2
 
 
 # ---------------------------------------------------------------------------
