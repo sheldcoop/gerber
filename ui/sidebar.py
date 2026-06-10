@@ -30,6 +30,17 @@ def _scan_layers_cached(digest: str, _data: bytes):
     return scan_available_layers(_data)
 
 
+@st.cache_data(show_spinner=False, max_entries=3)
+def _parse_odb_cached(digest: str, _data: bytes, filename: str):
+    """Full ODB++ parse, cached by tgz digest (same pattern as _scan_layers_cached).
+
+    Re-clicking Load & Process — e.g. after adding AOI files — skips the
+    multi-second re-parse of an unchanged archive. ``max_entries`` bounds memory
+    to a few boards; the copy-on-return cost only occurs on Load clicks.
+    """
+    return parse_odb_archive(_data, filename)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _cache_size_cached():
     """Disk-cache size for the sidebar caption — rglob'ing the cache dir on every
@@ -298,12 +309,14 @@ def render_sidebar():
 
             # Parse ODB++ archive
             if gerber_file:
+                # Bytes + digest computed ONCE — the parse cache and the render
+                # cache below both key off this digest.
+                _tgz_bytes = gerber_file.getvalue()
+                _raw_digest = compute_tgz_digest(_tgz_bytes)
+
                 with st.spinner("Parsing ODB++ archive..."):
                     try:
-                        parsed_odb = parse_odb_archive(
-                            gerber_file.read(), gerber_file.name
-                        )
-                        gerber_file.seek(0)
+                        parsed_odb = _parse_odb_cached(_raw_digest, _tgz_bytes, gerber_file.name)
                         st.session_state['parsed_odb'] = parsed_odb
                     except Exception as e:
                         st.error(f"ODB++ parsing failed: {e}")
@@ -311,14 +324,6 @@ def render_sidebar():
                 # Render CAM-quality SVGs via Gerbonara (with disk cache + background worker)
                 if gerber_file:
                     try:
-                        gerber_file.seek(0)
-                        _tgz_bytes = gerber_file.read()
-                        gerber_file.seek(0)
-
-                        # Compute digest once — stored in session state so subsequent
-                        # re-runs never re-hash the full archive.
-                        _raw_digest = compute_tgz_digest(_tgz_bytes)
-
                         # Render only the layers ticked in the picker. The cache key
                         # folds in the selection so each layer-combination caches
                         # independently; selecting "all" keeps the plain digest, so
