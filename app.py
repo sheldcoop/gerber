@@ -12,8 +12,6 @@ Run with: streamlit run app.py
 """
 
 import streamlit as st
-import pandas as pd
-from alignment import _dict_to_alignment_result, compute_alignment_cached, apply_alignment_cached, compute_dataframe_hash
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -76,49 +74,9 @@ aoi = st.session_state.get('aoi_dataset')
 
 if st.session_state.get('data_loaded') and (parsed or aoi):
     align_args = st.session_state.get('align_args', {})
-    
-    if parsed and aoi and parsed.layers and aoi.has_data:
-        # Compute file hash for caching key
-        _aoi_hash = compute_dataframe_hash(aoi.all_defects)
-        _fids_g = tuple(tuple(f) for f in parsed.fiducials) if parsed.fiducials else None
 
-        alignment_dict = compute_alignment_cached(
-            gerber_bounds=parsed.board_bounds,
-            aoi_bounds=aoi.coord_bounds,
-            aoi_data_hash=_aoi_hash,
-            fiducials_gerber=_fids_g,
-            origin_x=parsed.origin_x,
-            origin_y=parsed.origin_y,
-            flip_y=align_args.get('flip_y', False),
-            manual_offset_x=align_args.get('manual_offset_x', 0.0),
-            manual_offset_y=align_args.get('manual_offset_y', 0.0),
-            _aoi_df=aoi.all_defects,
-        )
-        alignment = _dict_to_alignment_result(alignment_dict)
-
-        defect_df = apply_alignment_cached(
-            _df_hash=_aoi_hash,
-            alignment_dict=alignment_dict,
-            unit_row=align_args.get('unit_row'),
-            unit_col=align_args.get('unit_col'),
-            _df=aoi.all_defects,
-        )
-        st.session_state['alignment_result'] = alignment
-        st.session_state['last_alignment_result'] = alignment
-    elif aoi and aoi.has_data:
-        defect_df = aoi.all_defects.copy()
-        _d_off_x = align_args.get('manual_offset_x', 0.0)
-        _d_off_y = align_args.get('manual_offset_y', 0.0)
-        if 'X_MM' not in defect_df.columns and 'X' in defect_df.columns:
-            defect_df['X_MM'] = defect_df['X'] / 1000.0
-            defect_df['Y_MM'] = defect_df['Y'] / 1000.0
-        defect_df['ALIGNED_X'] = (defect_df['X_MM'] if 'X_MM' in defect_df.columns else 0.0) + _d_off_x
-        defect_df['ALIGNED_Y'] = (defect_df['Y_MM'] if 'Y_MM' in defect_df.columns else 0.0) + _d_off_y
-        alignment = None
-    else:
-        # Default empty DataFrame if no AOI uploaded but SVGs are present
-        defect_df = pd.DataFrame(columns=['ALIGNED_X', 'ALIGNED_Y'])
-        alignment = None
+    # NOTE: each view computes its own defect alignment from `align_args`
+    # (core/data_utils._align_defects) — no global alignment pass is needed here.
 
     if parsed and parsed.unknown_symbols:
         st.warning(f"⚠️ Unknown symbol types skipped: {', '.join(parsed.unknown_symbols)} — geometry may be incomplete")

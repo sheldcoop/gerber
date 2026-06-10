@@ -5,7 +5,6 @@ def init_state():
     defaults = {
         'parsed_odb': None,          # ParsedODB
         'aoi_dataset': None,         # AOIDataset
-        'alignment_result': None,    # AlignmentResult
         'data_loaded': False,
         'align_args': {},            # Reset on each load to prevent stale offsets
         'needs_manual_side': {},     # filename → True if BU/side not detected
