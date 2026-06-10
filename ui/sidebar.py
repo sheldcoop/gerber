@@ -30,6 +30,15 @@ def _scan_layers_cached(digest: str, _data: bytes):
     return scan_available_layers(_data)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cache_size_cached():
+    """Disk-cache size for the sidebar caption — rglob'ing the cache dir on every
+    rerun is wasteful. The Clear All Cache button calls st.cache_data.clear(),
+    which flushes this too, so the caption refreshes right after a wipe."""
+    from core.cache import get_cache_size
+    return get_cache_size()
+
+
 def _default_render_selected(layer_type: str) -> bool:
     """Default picker state: copper + soldermask on, drill/via off (the slow ones)."""
     return layer_type in _COPPER_RENDER_TYPES or layer_type == 'soldermask'
@@ -101,8 +110,8 @@ def render_sidebar():
 
         # ---- Cache Management ----
         from core.cache import get_cache_size
-        _cache_bytes, _cache_size = get_cache_size()
-        
+        _cache_bytes, _cache_size = _cache_size_cached()
+
         _cache_col1, _cache_col2 = st.columns([3, 2])
         with _cache_col1:
             if st.button("🗑️ Clear All Cache", use_container_width=True, help="Clear all cached data including renders, computations, and AOI data"):
