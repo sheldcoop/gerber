@@ -181,19 +181,20 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
                 # former O(cells × defects) per-cell boolean-mask loop.
                 _Z_pan = panels_per_cell_grid(hm_df, _panel_col, _n_rows, _n_cols)
 
+                # Raw counts per cell — one vectorized scatter instead of iterrows.
+                _yi = _cnt_raw['UNIT_INDEX_Y'].to_numpy(dtype=int)
+                _xi = _cnt_raw['UNIT_INDEX_X'].to_numpy(dtype=int)
+                _Z_raw[_yi, _xi] = _cnt_raw['N'].to_numpy(dtype=float)
+
                 if _grid_metric == "Repeatability %" and _panel_col in hm_df.columns:
                     if _n_panels_total:
                         _Z = _Z_pan / _n_panels_total * 100.0
                     _cb_title = "Repeatability %"
                     _label_suffix = "%"
                 else:
-                    for _, _r in _cnt_raw.iterrows():
-                        _Z[int(_r.UNIT_INDEX_Y), int(_r.UNIT_INDEX_X)] = _r.N
+                    _Z = _Z_raw.copy()
                     _cb_title = "Defect Count"
                     _label_suffix = ""
-
-                for _, _r in _cnt_raw.iterrows():
-                    _Z_raw[int(_r.UNIT_INDEX_Y), int(_r.UNIT_INDEX_X)] = _r.N
 
                 # ── Map unit indices → true mm panel positions ─────────────
                 _x_vals  = list(range(_n_cols))

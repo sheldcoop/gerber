@@ -85,11 +85,13 @@ def score_defect_priority(df: pd.DataFrame) -> pd.Series:
     n = len(df)
     scores = np.zeros(n, dtype=np.float64)
 
-    # 1. Base score from defect type severity
+    # 1. Base score from defect type severity — classify each UNIQUE type once and
+    # broadcast via map. Identical to a per-row apply (NaN → str 'nan' → default
+    # Medium → 20.0), without thousands of Python-level keyword scans.
     if 'DEFECT_TYPE' in df.columns:
-        severity_levels = df['DEFECT_TYPE'].apply(classify_severity).values
-        for i, sev in enumerate(severity_levels):
-            scores[i] += SEVERITY_BASE_SCORES.get(sev, 20.0)
+        _uniq = df['DEFECT_TYPE'].dropna().unique()
+        _score_map = {dt: SEVERITY_BASE_SCORES[classify_severity(dt)] for dt in _uniq}
+        scores += df['DEFECT_TYPE'].map(_score_map).fillna(20.0).to_numpy(dtype=np.float64)
 
     # 2. Cluster density bonus (neighbors within 2mm radius)
     if 'ALIGNED_X' in df.columns and 'ALIGNED_Y' in df.columns and n > 1:
