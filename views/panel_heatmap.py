@@ -5,6 +5,7 @@ from alignment import get_panel_quadrant_bounds, FRAME_WIDTH, FRAME_HEIGHT
 from visualizer import OverlayConfig
 from core.data_utils import compute_cm_geometry
 
+@st.fragment
 def render_panel_heatmap(parsed, aoi, align_args) -> None:
     st.markdown("### 🔥 Panel Defect Heatmap")
     st.caption("Overlay a 2D density contour map of defects across the entire panel to spot systemic factory flaws.")

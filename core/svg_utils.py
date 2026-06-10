@@ -157,10 +157,21 @@ def build_rotated_svg_url(lyr_obj: Any, rot_deg: float, is_multi: bool = False,
         stack_urls = getattr(lyr_obj, 'color_svg_urls', {})
         if stack_urls:
             stack_color = next(iter(stack_urls.keys()))
-            stack_url   = stack_urls[stack_color]
             try:
-                _b64_data = stack_url.split(',', 1)[1]
-                stack_svg = base64.b64decode(_b64_data).decode('utf-8')
+                # Decode the precomputed stack SVG to text once and cache it on the
+                # layer. Recolouring is a multi-MB string op; without the cache every
+                # palette change re-paid a base64 *decode* of the whole document on top
+                # of the replace+encode. str.replace() returns a fresh string, so the
+                # cached text keeps its original stack_color and stays reusable.
+                stack_svg = getattr(lyr_obj, '_stack_svg_text', None)
+                if stack_svg is None:
+                    _b64_data = stack_urls[stack_color].split(',', 1)[1]
+                    stack_svg = base64.b64decode(_b64_data).decode('utf-8')
+                    try:
+                        setattr(lyr_obj, '_stack_svg_text', stack_svg)
+                    except Exception:
+                        # Best-effort cache (e.g. frozen layer); correctness unaffected.
+                        logger.debug("Could not cache stack svg text on layer", exc_info=True)
                 if layer_color != stack_color:
                     stack_svg = stack_svg.replace(stack_color, layer_color)
                 return ('data:image/svg+xml;base64,'

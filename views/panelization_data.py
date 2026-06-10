@@ -3,6 +3,7 @@ import pandas as pd
 from collections import defaultdict
 
 
+@st.fragment
 def render_panelization_data(parsed, aoi, align_args) -> None:
     st.markdown("### 📊 Panelization Data")
     st.caption("Structural layout derived from ODB++ step-repeat hierarchy — useful for root-cause analysis.")

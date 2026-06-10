@@ -248,6 +248,12 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 del rendered_layers[_dname]
                 warnings.append(f"Layer '{_dname}': no drill features within unit bounds")
                 continue
+            # Every Flash/Line was inside the unit bounds → nothing was clipped, so a
+            # re-render would reproduce the identical SVG. Skip the costly to_svg() pass.
+            # (_kept holds only Flash/Line; if any other object existed it'd be dropped,
+            #  so an equal count guarantees the object set is unchanged.)
+            if len(_kept) == len(_gf.objects):
+                continue
             _gf.objects = _kept
             _fg = DRILL_FG
             _svg2 = str(_gf.to_svg(fg=_fg, bg=SVG_BG))

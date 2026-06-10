@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from core.data_utils import compute_cm_geometry
 
+@st.fragment
 def render_cluster_triage(parsed, aoi, align_args) -> None:
     st.markdown("### 🔬 Cluster Triage")
     st.caption("Automatically finds groups of defects that keep happening at the same location — ranked by severity.")
