@@ -111,7 +111,11 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         RenderedODB with SVG strings and GerberFile objects per layer.
     """
     if digest is None:
-        digest = compute_tgz_digest(data)
+        # Compose the versioned key exactly like the app does (CACHE_VERSION +
+        # layer selection), so direct callers share the same cache namespace and
+        # two different layer_filters never collide on the raw archive digest.
+        from core.cache import compose_render_key
+        digest = compose_render_key(compute_tgz_digest(data), layer_filter)
 
     # 1. In-process LRU (zero I/O, zero hashing)
     if digest in _RENDER_MEM_CACHE:

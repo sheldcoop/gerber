@@ -1,17 +1,26 @@
 """Tests for compose_render_key — the per-selection render cache key.
 
-Guarantees: rendering "everything" reuses the plain digest (backward compatible),
-the key is order-independent, and different selections produce different keys.
+Guarantees: None and [] (render everything) map to the same key, the key is
+order-independent, different selections produce different keys, and bumping
+CACHE_VERSION invalidates every previously written key.
 """
 from core.cache import compose_render_key
 
 _DIGEST = "abc123def456"
 
 
-def test_none_or_empty_returns_plain_digest():
-    # All-layers render must keep the existing digest so old caches still hit.
-    assert compose_render_key(_DIGEST, None) == _DIGEST
-    assert compose_render_key(_DIGEST, []) == _DIGEST
+def test_none_and_empty_equivalent():
+    # All-layers render: None and [] must agree; the raw digest is never the key
+    # (CACHE_VERSION is always folded in so version bumps invalidate everything).
+    assert compose_render_key(_DIGEST, None) == compose_render_key(_DIGEST, [])
+    assert compose_render_key(_DIGEST, None) != _DIGEST
+
+
+def test_version_invalidates():
+    assert compose_render_key(_DIGEST, None, cache_version=1) != \
+           compose_render_key(_DIGEST, None, cache_version=2)
+    assert compose_render_key(_DIGEST, ["4F"], cache_version=1) != \
+           compose_render_key(_DIGEST, ["4F"], cache_version=2)
 
 
 def test_order_independent():

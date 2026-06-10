@@ -33,26 +33,23 @@ init_state()
 
 
 @st.cache_resource
-def _purge_caches_on_startup():
-    """Start every server process with a clean slate.
+def _startup_cache_maintenance():
+    """Prune the on-disk render cache once per server process.
 
-    Runs once per process (cache_resource), so a fresh `streamlit run` never serves a
-    stale on-disk render. AOI Excel data lives in session_state only, so it is naturally
-    gone on reload too. The "Clear All Cache" button performs the same wipe on demand.
+    Renders persist across restarts: entries are keyed by archive digest +
+    CACHE_VERSION (core/cache.py), so a render-code change makes old entries
+    unreachable rather than wrongly served — pruning ages them out and caps
+    total size. The sidebar's "Clear All Cache" button remains the manual wipe.
     """
     try:
-        from gerber_renderer import clear_render_cache
-        clear_render_cache()
-    except Exception:
-        pass
-    try:
-        st.cache_data.clear()
+        from core.cache import prune_render_cache
+        prune_render_cache()
     except Exception:
         pass
     return True
 
 
-_purge_caches_on_startup()
+_startup_cache_maintenance()
 
 from ui.sidebar import handle_bg_render_polling, render_sidebar
 # Panel Overview tab disabled — kept on disk (views/panel_overview.py) but not wired up.

@@ -32,18 +32,23 @@ def compute_tgz_digest(tgz_bytes: bytes) -> str:
     return hashlib.md5(tgz_bytes).hexdigest()
 
 
-def compose_render_key(digest: str, layer_filter) -> str:
-    """Cache key for a render, folding in the selected layer set.
+# Bump whenever render OUTPUT changes (SVG generation, RenderedLayer fields,
+# manifest schema, build_stack_svg recolouring). The version is folded into every
+# render key, so old on-disk entries become unreachable — never wrongly served —
+# and age out via prune_render_cache().
+CACHE_VERSION = 1
+
+
+def compose_render_key(digest: str, layer_filter, cache_version: int = CACHE_VERSION) -> str:
+    """Cache key for a render, folding in the selected layer set and cache version.
 
     The render cache is keyed by this string, so two different layer selections of
-    the same archive cache independently. When ``layer_filter`` is None/empty (render
-    everything) the key is just the plain ``digest`` — keeping existing full-render
-    caches valid and the default path unchanged. Order-independent.
+    the same archive cache independently, and a CACHE_VERSION bump invalidates all
+    entries written by older render code. Order-independent and case-insensitive
+    in the layer names; None and [] (render everything) produce the same key.
     """
-    if not layer_filter:
-        return digest
-    sig = ",".join(sorted(n.lower() for n in layer_filter))
-    return hashlib.md5(f"{digest}|{sig}".encode()).hexdigest()
+    sig = ",".join(sorted(n.lower() for n in layer_filter)) if layer_filter else ""
+    return hashlib.md5(f"{digest}|v{cache_version}|{sig}".encode()).hexdigest()
 
 
 def _cache_dir(digest: str) -> Path:
@@ -148,6 +153,49 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
     except Exception:
         # Non-fatal: the render still works this session, it just won't persist.
         logger.warning("Render cache write failed for digest %s", digest, exc_info=True)
+
+
+def prune_render_cache(max_total_bytes: int = 2 * 1024**3, max_age_days: int = 30) -> None:
+    """Bound the persistent CAM cache: drop entries untouched for ``max_age_days``,
+    then evict oldest-first until total size is under ``max_total_bytes``.
+
+    Runs once per server start (app.py). Eviction is whole-digest-directory, so a
+    pruned entry simply re-renders on next load; the sidebar's "Clear All Cache"
+    button remains the manual full wipe.
+    """
+    import shutil
+    import time
+    try:
+        if not _CAM_CACHE_DIR.exists():
+            return
+        now = time.time()
+        entries = []  # (newest_mtime, total_size, dir_path)
+        for d in _CAM_CACHE_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                files = [f for f in d.rglob('*') if f.is_file()]
+                size = sum(f.stat().st_size for f in files)
+                mtime = max((f.stat().st_mtime for f in files), default=d.stat().st_mtime)
+            except (OSError, PermissionError):
+                continue
+            entries.append((mtime, size, d))
+
+        kept = []
+        for mtime, size, d in entries:
+            if now - mtime > max_age_days * 86400:
+                shutil.rmtree(d, ignore_errors=True)
+            else:
+                kept.append((mtime, size, d))
+
+        total = sum(size for _, size, _ in kept)
+        for mtime, size, d in sorted(kept, key=lambda e: e[0]):  # oldest first
+            if total <= max_total_bytes:
+                break
+            shutil.rmtree(d, ignore_errors=True)
+            total -= size
+    except Exception:
+        logger.warning("Render cache prune failed", exc_info=True)
 
 
 def get_cache_size() -> tuple:
