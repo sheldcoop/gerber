@@ -32,6 +32,20 @@ def compute_tgz_digest(tgz_bytes: bytes) -> str:
     return hashlib.md5(tgz_bytes).hexdigest()
 
 
+def compose_render_key(digest: str, layer_filter) -> str:
+    """Cache key for a render, folding in the selected layer set.
+
+    The render cache is keyed by this string, so two different layer selections of
+    the same archive cache independently. When ``layer_filter`` is None/empty (render
+    everything) the key is just the plain ``digest`` — keeping existing full-render
+    caches valid and the default path unchanged. Order-independent.
+    """
+    if not layer_filter:
+        return digest
+    sig = ",".join(sorted(n.lower() for n in layer_filter))
+    return hashlib.md5(f"{digest}|{sig}".encode()).hexdigest()
+
+
 def _cache_dir(digest: str) -> Path:
     return _CAM_CACHE_DIR / digest
 

@@ -10,10 +10,47 @@ import pandas as pd
 
 from odb_parser import parse_odb_archive
 from gerber_renderer import render_odb_to_cam, load_render_cache, save_render_cache, clear_render_cache
-from gerber_renderer import compute_tgz_digest
+from gerber_renderer import compute_tgz_digest, scan_available_layers
 from aoi_loader import load_aoi_files, load_aoi_with_manual_side, FILENAME_PATTERN
 from core.svg_utils import stable_layer_colors
 from core.constants import copper_order_index
+from core.cache import compose_render_key
+
+# Copper-family layer types (rendered + selected by default).
+_COPPER_RENDER_TYPES = ('copper', 'signal', 'power', 'mixed')
+
+
+@st.cache_data(show_spinner=False)
+def _scan_layers_cached(digest: str, _data: bytes):
+    """Cheap layer enumeration (reads matrix only, ~0.1s), cached by tgz digest.
+
+    ``_data`` is underscore-prefixed so Streamlit skips hashing the full archive
+    every rerun — ``digest`` is the cache key.
+    """
+    return scan_available_layers(_data)
+
+
+def _default_render_selected(layer_type: str) -> bool:
+    """Default picker state: copper + soldermask on, drill/via off (the slow ones)."""
+    return layer_type in _COPPER_RENDER_TYPES or layer_type == 'soldermask'
+
+
+def _copper_sort_key(name: str) -> int:
+    # Front soldermask first, back soldermask last; copper in physical stackup
+    # order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (single source: constants).
+    n = name.upper()
+    if 'FSR' in n or ('MASK' in n and 'F' in n and 'B' not in n):
+        return -1
+    if 'BSR' in n or ('MASK' in n and 'B' in n):
+        return 999
+    idx = copper_order_index(n)
+    return idx if idx is not None else 99
+
+
+def _drill_sort_key(name: str) -> tuple:
+    nums = re.findall(r'\d+', name)
+    return (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (99, 99)
+
 
 def handle_bg_render_polling():
     """Check background render status and update state accordingly."""
@@ -105,6 +142,73 @@ def render_sidebar():
             type=['tgz', 'gz'],
             help="Compressed ODB++ archive exported from InCam Pro",
         )
+
+        # ── Layer render selection — populated cheaply from the matrix (pre-render) ──
+        # Lets the user skip the heavy drill/via layers so only what they need is
+        # parsed + rendered. Feeds `layer_filter` into the render at load time.
+        if gerber_file:
+            # Scan once per uploaded file (keyed by Streamlit's stable file_id) so a
+            # checkbox click in the picker doesn't re-hash/re-extract the whole archive.
+            _fid = getattr(gerber_file, 'file_id', None) or f"{gerber_file.name}:{gerber_file.size}"
+            if st.session_state.get('_scan_fid') == _fid:
+                _scanned = st.session_state.get('_scanned_layers', [])
+            else:
+                try:
+                    _scan_bytes = gerber_file.getvalue()
+                    _scanned = _scan_layers_cached(compute_tgz_digest(_scan_bytes), _scan_bytes)
+                except Exception as _scan_err:
+                    _scanned = []
+                    st.caption(f"⚠️ Could not scan layers: {_scan_err}")
+                st.session_state['_scan_fid'] = _fid
+                st.session_state['_scanned_layers'] = _scanned
+
+            if _scanned:
+                _cu = sorted((nt for nt in _scanned if nt[1] in _COPPER_RENDER_TYPES),
+                             key=lambda nt: _copper_sort_key(nt[0]))
+                _sm = sorted((nt for nt in _scanned if nt[1] == 'soldermask'),
+                             key=lambda nt: _copper_sort_key(nt[0]))
+                _dr = sorted((nt for nt in _scanned if nt[1] == 'drill'),
+                             key=lambda nt: _drill_sort_key(nt[0]))
+                _seen = set(_cu) | set(_sm) | set(_dr)
+                _other = [nt for nt in _scanned if nt not in _seen]
+
+                with st.expander("🗂️ Layers to render", expanded=True):
+                    st.caption(
+                        "Pick which layers to render. Drill / via layers are the "
+                        "slowest — leave them off for a faster load, turn them on only "
+                        "when you need them."
+                    )
+
+                    def _sel_group(title, items):
+                        if not items:
+                            return
+                        st.markdown(f"**{title}**")
+                        for _n, _t in items:
+                            st.checkbox(
+                                _n,
+                                value=st.session_state.get(
+                                    f"render_sel_{_n}", _default_render_selected(_t)),
+                                key=f"render_sel_{_n}",
+                                help=f"type: {_t}",
+                            )
+
+                    _sel_group(f"Copper ({len(_cu)})", _cu)
+                    _sel_group(f"Soldermask ({len(_sm)})", _sm)
+                    _sel_group(f"Drill / Via ({len(_dr)})", _dr)
+                    _sel_group(f"Other ({len(_other)})", _other)
+
+                    _sel_now = [
+                        n for n, t in _scanned
+                        if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
+                    ]
+                    _has_copper = any(
+                        t in _COPPER_RENDER_TYPES for n, t in _scanned if n in set(_sel_now)
+                    )
+                    if not _has_copper:
+                        st.warning(
+                            "No copper layer selected — board centering may be off.")
+                    st.caption(
+                        f"{len(_sel_now)} of {len(_scanned)} layers selected to render.")
 
         _aoi_key = st.session_state.get('_aoi_upload_key', 0)
         _aoi_col, _aoi_clear_col = st.columns([5, 1])
@@ -204,17 +308,30 @@ def render_sidebar():
 
                         # Compute digest once — stored in session state so subsequent
                         # re-runs never re-hash the full archive.
-                        _tgz_digest = compute_tgz_digest(_tgz_bytes)
-                        st.session_state['_tgz_digest'] = _tgz_digest
+                        _raw_digest = compute_tgz_digest(_tgz_bytes)
 
-                        rendered = load_render_cache(digest=_tgz_digest)
+                        # Render only the layers ticked in the picker. The cache key
+                        # folds in the selection so each layer-combination caches
+                        # independently; selecting "all" keeps the plain digest, so
+                        # existing full-render caches still hit.
+                        _scanned = st.session_state.get('_scanned_layers', [])
+                        _selected_layers = [
+                            n for n, t in _scanned
+                            if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
+                        ] or None
+                        _render_key = compose_render_key(_raw_digest, _selected_layers)
+                        st.session_state['_render_key'] = _render_key
+                        # The active render's on-disk identity (used by cache save/load).
+                        st.session_state['_tgz_digest'] = _render_key
+
+                        rendered = load_render_cache(digest=_render_key)
                         _from_cache = rendered is not None
 
                         if rendered:
                             # Cache hit — load instantly
                             st.session_state['rendered_odb'] = rendered
                             st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
-                            st.session_state['_tgz_digest'] = _tgz_digest
+                            st.session_state['_tgz_digest'] = _render_key
                             _copper_lyrs = [l for l in rendered.layers.values() if l.layer_type != 'drill']
                             _svgs_ready = _from_cache and bool(_copper_lyrs) and all(
                                 l.panel_svg_data_url for l in _copper_lyrs
@@ -255,9 +372,9 @@ def render_sidebar():
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
                             _prog_file.write_text('{"status":"running"}')
 
-                            def _bg_render(_bytes=_tgz_bytes, _digest=_tgz_digest, _name=gerber_file.name, _pf=_prog_file):
+                            def _bg_render(_bytes=_tgz_bytes, _digest=_render_key, _name=gerber_file.name, _pf=_prog_file, _lf=_selected_layers):
                                 try:
-                                    r = render_odb_to_cam(_bytes, _name, digest=_digest)
+                                    r = render_odb_to_cam(_bytes, _name, layer_filter=_lf, digest=_digest)
                                     save_render_cache(r, digest=_digest)
                                     _pf.write_text('{"status":"done"}')
                                 except Exception as e:
@@ -266,7 +383,7 @@ def render_sidebar():
                             threading.Thread(target=_bg_render, daemon=True).start()
                             st.session_state['_render_progress_file'] = str(_prog_file)
                             st.session_state['_render_tgz_bytes'] = _tgz_bytes
-                            st.session_state['_render_digest'] = _tgz_digest
+                            st.session_state['_render_digest'] = _render_key
                             st.session_state['_render_filename'] = gerber_file.name
                             st.info("Rendering CAM layers in background — the page will update automatically when ready.")
 
@@ -399,21 +516,6 @@ def render_sidebar():
                                   on_click=_solo_cb(layer_name),
                                   help="Show only this layer")
                     return visible
-
-                def _copper_sort_key(name: str) -> int:
-                    # Front soldermask first, back soldermask last; copper in physical
-                    # stackup order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (single source: constants).
-                    n = name.upper()
-                    if 'FSR' in n or ('MASK' in n and 'F' in n and 'B' not in n):
-                        return -1
-                    if 'BSR' in n or ('MASK' in n and 'B' in n):
-                        return 999
-                    idx = copper_order_index(n)
-                    return idx if idx is not None else 99
-
-                def _drill_sort_key(name: str) -> tuple:
-                    nums = re.findall(r'\d+', name)
-                    return (int(nums[0]), int(nums[1])) if len(nums) >= 2 else (99, 99)
 
                 copper_layers = dict(sorted(
                     ((n, l) for n, l in _rendered_for_ctrl.layers.items()
