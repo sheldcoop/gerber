@@ -13,4 +13,5 @@ hypothesis>=6.0.0
 kaleido>=0.2.1
 scikit-learn>=1.3.0
 Pillow>=10.0.0
-# polars>=0.20.0  # Optional: 3-10× faster Excel reads (pip install polars)
+polars>=1.0.0      # 3-10× faster Excel reads (aoi_loader prefers it, pandas fallback)
+fastexcel>=0.10.0  # calamine engine backend required by polars.read_excel
