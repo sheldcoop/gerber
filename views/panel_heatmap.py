@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from alignment import get_panel_quadrant_bounds, FRAME_WIDTH, FRAME_HEIGHT
 from visualizer import OverlayConfig
-from core.data_utils import compute_cm_geometry
+from core.data_utils import compute_cm_geometry, panels_per_cell_grid
 
 @st.fragment
 def render_panel_heatmap(parsed, aoi, align_args) -> None:
@@ -176,13 +176,14 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
                 _Z = _np_hm.zeros((_n_rows, _n_cols), dtype=float)
                 _Z_raw = _np_hm.zeros((_n_rows, _n_cols), dtype=float)
 
+                # Distinct panels per cell — computed once (a single groupby) and reused
+                # by both the repeatability metric and the hover text below. Replaces the
+                # former O(cells × defects) per-cell boolean-mask loop.
+                _Z_pan = panels_per_cell_grid(hm_df, _panel_col, _n_rows, _n_cols)
+
                 if _grid_metric == "Repeatability %" and _panel_col in hm_df.columns:
-                    _rep = (hm_df.groupby(['UNIT_INDEX_X', 'UNIT_INDEX_Y'])[_panel_col]
-                            .nunique().reset_index(name='N_P'))
-                    for _, _r in _rep.iterrows():
-                        _Z[int(_r.UNIT_INDEX_Y), int(_r.UNIT_INDEX_X)] = (
-                            _r.N_P / _n_panels_total * 100.0
-                        )
+                    if _n_panels_total:
+                        _Z = _Z_pan / _n_panels_total * 100.0
                     _cb_title = "Repeatability %"
                     _label_suffix = "%"
                 else:
@@ -223,10 +224,7 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
                 for _ri in range(_n_rows):
                     for _ci in range(_n_cols):
                         _raw  = int(_Z_raw[_ri, _ci])
-                        _mask = ((hm_df['UNIT_INDEX_X'] == _ci) &
-                                 (hm_df['UNIT_INDEX_Y'] == _ri)) if _has_idx else None
-                        _n_p  = (hm_df.loc[_mask, _panel_col].nunique()
-                                 if (_mask is not None and _panel_col in hm_df.columns) else 0)
+                        _n_p  = int(_Z_pan[_ri, _ci])
                         _pct  = f"{_n_p / _n_panels_total * 100:.0f}%" if _n_panels_total else "—"
                         _hover[_ri, _ci] = (
                             f"<b>Col {_ci} · Row {_ri}</b><br>"

@@ -1,5 +1,30 @@
+import numpy as np
 import pandas as pd
 from alignment import calculate_geometry, INTER_UNIT_GAP
+
+
+def panels_per_cell_grid(df, panel_col: str, n_rows: int, n_cols: int):
+    """Grid of distinct-panel counts per unit cell.
+
+    ``grid[row, col]`` = number of distinct ``panel_col`` values among defects whose
+    ``(UNIT_INDEX_Y, UNIT_INDEX_X) == (row, col)``. Cells with no defects are 0.
+
+    This is the vectorized replacement for the panel-heatmap's former per-cell
+    boolean-mask loop, which allocated a full-DataFrame mask and called ``.nunique()``
+    once per cell — O(cells × defects). A single groupby is O(defects). Returns an
+    all-zero grid when the required columns are absent (matching the old fallback).
+    """
+    grid = np.zeros((n_rows, n_cols), dtype=float)
+    if (panel_col not in df.columns
+            or 'UNIT_INDEX_X' not in df.columns
+            or 'UNIT_INDEX_Y' not in df.columns):
+        return grid
+    nunq = df.groupby(['UNIT_INDEX_Y', 'UNIT_INDEX_X'])[panel_col].nunique()
+    for (ri, ci), val in nunq.items():
+        ri, ci = int(ri), int(ci)
+        if 0 <= ri < n_rows and 0 <= ci < n_cols:
+            grid[ri, ci] = val
+    return grid
 
 def compute_panel_shapes(rows: int, cols: int, gap_x: float, gap_y: float) -> list:
     """Pre-compute all unit cell shape dicts."""
