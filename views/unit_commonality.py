@@ -258,14 +258,47 @@ def _render_defect_state(rodb, aoi, align_args):
         x=0.5, xanchor="center",
     ))
 
+    # ── PNG export — two-step so kaleido never runs on a regular rerun ──────
+    # Rasterizing this figure (multi-MB SVG layer images, scale=3) costs seconds;
+    # generate only when the user asks, and keep the bytes until any figure-shaping
+    # input changes (the signature below covers them all).
+    _png_sig = (
+        tuple(sorted(sel_units)),
+        tuple(sorted(bu)) if bu else (),
+        tuple(sorted(side)),
+        tuple(sorted(panel_filter)) if panel_filter else (),
+        float(manual_rot), float(off_x), float(off_y),
+        cfg.color_mode, cfg.marker_style,
+        bool(_show_heatmap),
+        bool(st.session_state.get('invert_polarity', False)),
+        tuple(
+            (n, bool(st.session_state.get(f"vis_{n}", False)),
+             st.session_state.get(f"opacity_{n}"))
+            for n in sorted(rodb.layers)
+        ) if (rodb and rodb.layers) else (),
+        len(cm_plot),
+    )
+
     _export_col, _ = st.columns([1, 4])
     with _export_col:
-        try:
-            _png = export_current_view(fig, fmt='png', scale=3)
-            st.download_button("📷 Export PNG", data=_png, file_name="commonality_unit.png",
-                               mime="image/png", width="stretch")
-        except Exception:
-            st.button("📷 Export PNG (kaleido required)", disabled=True, width="stretch")
+        _png_ready = (st.session_state.get('_cm_png_sig') == _png_sig
+                      and st.session_state.get('_cm_png_bytes') is not None)
+        if not _png_ready:
+            if st.button("📷 Prepare PNG", width="stretch", key="cm_prepare_png",
+                         help="Render the current view to a PNG (a few seconds), then download."):
+                try:
+                    with st.spinner("Rendering PNG..."):
+                        st.session_state['_cm_png_bytes'] = export_current_view(fig, fmt='png', scale=3)
+                    st.session_state['_cm_png_sig'] = _png_sig
+                    _png_ready = True
+                except Exception:
+                    st.session_state.pop('_cm_png_bytes', None)
+                    st.session_state.pop('_cm_png_sig', None)
+                    st.warning("PNG export failed — is kaleido installed?")
+        if _png_ready:
+            st.download_button("⬇️ Download PNG", data=st.session_state['_cm_png_bytes'],
+                               file_name="commonality_unit.png", mime="image/png",
+                               width="stretch", key="cm_download_png")
 
     st.plotly_chart(fig, width='stretch',
                     config={'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False})
