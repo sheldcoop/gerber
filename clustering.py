@@ -72,6 +72,53 @@ def _grid_cluster_fallback(
     return df
 
 
+VERIF_UNVERIFIED = 'Unverified'
+
+
+def normalize_verification(series: pd.Series) -> pd.Series:
+    """Verification codes with blanks/placeholders mapped to 'Unverified'."""
+    s = series.astype(str).str.strip()
+    return s.where(~s.isin(['', '—', '-', 'nan', 'None', 'NaN', '<NA>']),
+                   VERIF_UNVERIFIED)
+
+
+def compute_clusters_by_verification(
+    df: pd.DataFrame,
+    eps: float = 2.0,
+    min_samples: int = 3,
+) -> pd.DataFrame:
+    """Spatial clustering run independently WITHIN each verification code.
+
+    Every resulting cluster contains exactly one verification code — "the same
+    verified defect keeps happening at the same location". Defects without a
+    code cluster together under 'Unverified'.
+
+    Returns a copy of df with:
+        VERIF_GROUP — normalized verification code per row
+        CLUSTER_ID  — globally unique across groups (-1 = noise/unclustered)
+    """
+    df = df.copy()
+    if 'VERIFICATION' in df.columns:
+        df['VERIF_GROUP'] = normalize_verification(df['VERIFICATION'])
+    else:
+        df['VERIF_GROUP'] = VERIF_UNVERIFIED
+
+    parts = []
+    next_id = 0
+    for _, group in df.groupby('VERIF_GROUP', sort=True):
+        group = compute_clusters(group, eps=eps, min_samples=min_samples)
+        mask = group['CLUSTER_ID'] >= 0
+        if mask.any():
+            group.loc[mask, 'CLUSTER_ID'] += next_id
+            next_id = int(group['CLUSTER_ID'].max()) + 1
+        parts.append(group)
+
+    if not parts:  # empty input
+        df['CLUSTER_ID'] = -1
+        return df
+    return pd.concat(parts)
+
+
 def get_cluster_summary(df: pd.DataFrame) -> pd.DataFrame:
     """Generate ranked cluster summary for triage.
 

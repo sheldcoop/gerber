@@ -89,12 +89,15 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                 2, 10, 3, step=1, key="ct_min_samples"
             )
 
-            # Tested clustering module: DBSCAN when sklearn is available, grid
-            # fallback otherwise (the view carries no hard sklearn dependency).
-            from clustering import compute_clusters
-            _ct_df = compute_clusters(_ct_df.loc[_ct_xy.index].copy(),
-                                      eps=_ct_eps, min_samples=_ct_min_s)
+            # Spatial clustering runs WITHIN each verification code, so every
+            # cluster is one verified defect class at one location. Defects
+            # without a code form their own 'Unverified' group.
+            from clustering import compute_clusters_by_verification
+            _ct_df = compute_clusters_by_verification(
+                _ct_df.loc[_ct_xy.index].copy(),
+                eps=_ct_eps, min_samples=_ct_min_s)
             _labels = _ct_df['CLUSTER_ID'].values
+            st.caption("Clusters are per verification code — each cluster contains exactly one code.")
 
             # ── Build summary ─────────────────────────────────────────
             _rows = []
@@ -115,25 +118,20 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                         _top_pct = (_type_counts.iloc[0] / _cnt) * 100
                         _top_type_str = f"{_top_type} ({_top_pct:.0f}%)"
 
-                _top_verif_str = '—'
-                if 'VERIFICATION' in _cl.columns and not _cl.empty:
-                    _verif_counts = _cl['VERIFICATION'].value_counts()
-                    if not _verif_counts.empty:
-                        _top_verif = _verif_counts.idxmax()
-                        _top_verif_pct = (_verif_counts.iloc[0] / _cnt) * 100
-                        _top_verif_str = f"{_top_verif} ({_top_verif_pct:.0f}%)"
+                # Homogeneous by construction (clustering ran within the code).
+                _verif_str = _cl['VERIF_GROUP'].iloc[0] if 'VERIF_GROUP' in _cl.columns else '—'
 
                 _n_units   = _cl[['UNIT_INDEX_Y', 'UNIT_INDEX_X']].drop_duplicates().__len__() if 'UNIT_INDEX_Y' in _cl.columns else '—'
                 # Severity: count × buildup spread penalty
                 _severity  = round(_cnt * (1 + 0.5 * (_bu_spread - 1)), 1)
                 _rows.append({
                     'Cluster': _cid,
+                    'Verification': _verif_str,
                     'Defects': _cnt,
                     'Units Affected': _n_units,
                     'Buildup Layers': _bu_spread,
                     'Severity ▼': _severity,
                     'Top Type': _top_type_str,
-                    'Top Verification': _top_verif_str,
                     'X (mm)': _cx,
                     'Y (mm)': _cy,
                 })
@@ -160,6 +158,7 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                 if _top_ct['Buildup Layers'] > 1:
                     st.error(
                         f"⚠️ **Critical — multi-layer cluster**: Cluster {int(_top_ct['Cluster'])} "
+                        f"(**{_top_ct['Verification']}**) "
                         f"spans **{int(_top_ct['Buildup Layers'])} buildup layers** at "
                         f"({_top_ct['X (mm)']}, {_top_ct['Y (mm)']}) mm. "
                         f"Same location failing on multiple layers = process or registration issue. "
@@ -167,7 +166,8 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                     )
                 else:
                     st.warning(
-                        f"Highest severity: **{int(_top_ct['Defects'])} defects** at "
+                        f"Highest severity: **{int(_top_ct['Defects'])} defects** "
+                        f"(**{_top_ct['Verification']}**) at "
                         f"({_top_ct['X (mm)']}, {_top_ct['Y (mm)']}) mm — "
                         f"{_top_ct['Top Type']}. Severity: **{_top_ct['Severity ▼']}**"
                     )
@@ -215,7 +215,7 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                         size='Defects', color='Severity ▼',
                         color_continuous_scale='OrRd',
                         title='Cluster Positions on Unit',
-                        hover_data=['Cluster', 'Top Type', 'Buildup Layers', 'Units Affected'],
+                        hover_data=['Cluster', 'Verification', 'Top Type', 'Buildup Layers', 'Units Affected'],
                         text='Cluster',
                     )
                     _sc_fig.update_traces(textposition='top center')
