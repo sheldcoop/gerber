@@ -36,8 +36,10 @@ from core.constants import (
     COPPER_FG, DRILL_FG, SVG_BG, layer_fg,
     RENDERABLE_TYPES as _RENDERABLE_TYPES, STACK_LAYER_COLORS as LAYER_COLORS,
 )
+from core.render_plan import effective_layer_type
 
-_DRILL_SPAN_RE = re.compile(r'^\d+[FB](CO)?[-_]\d+[FB](CO)?', re.IGNORECASE)
+logger = logging.getLogger(__name__)
+
 _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
 
 
@@ -88,10 +90,8 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
         # ── Phase 2: parse layers in parallel ─────────────────────────────
         def _process_layer(args):
             name, ltype = args
-            # Name-based drill reclassification: ODB++ sometimes exports drill span
-            # layers (e.g. "2B-3B", "2F-3F") with matrix TYPE=MIXED or SIGNAL.
-            if ltype != 'drill' and _DRILL_SPAN_RE.match(name):
-                ltype = 'drill'
+            # Name-based drill reclassification (single source: core/render_plan).
+            ltype = effective_layer_type(name, ltype)
             result = _parse_layer_to_gerbonara(job_root, step_name, name, uf, user_sym_map)
             if result is None:
                 return name, ltype, None, None, f"Layer '{name}': no features found"
