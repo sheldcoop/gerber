@@ -55,6 +55,12 @@ def _default_render_selected(layer_type: str) -> bool:
     return layer_type in _COPPER_RENDER_TYPES or layer_type == 'soldermask'
 
 
+def _design_unchanged(prev_key, new_key, has_rendered: bool) -> bool:
+    """True when a Load & Process click needs no design work: same archive + same
+    layer selection (the render key folds in both) as the render already in session."""
+    return prev_key is not None and prev_key == new_key and has_rendered
+
+
 def _copper_sort_key(name: str) -> int:
     # Front soldermask first, back soldermask last; copper in physical stackup
     # order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (single source: constants).
@@ -309,31 +315,44 @@ def render_sidebar():
 
             # Parse ODB++ archive
             if gerber_file:
-                # Bytes + digest computed ONCE — the parse cache and the render
-                # cache below both key off this digest.
+                # Bytes, digest, layer selection and render key computed up front —
+                # they decide whether any design work is needed at all.
                 _tgz_bytes = gerber_file.getvalue()
                 _raw_digest = compute_tgz_digest(_tgz_bytes)
+                _scanned = st.session_state.get('_scanned_layers', [])
+                _selected_layers = [
+                    n for n, t in _scanned
+                    if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
+                ] or None
+                _render_key = compose_render_key(_raw_digest, _selected_layers)
 
-                with st.spinner("Parsing ODB++ archive..."):
-                    try:
-                        parsed_odb = _parse_odb_cached(_raw_digest, _tgz_bytes, gerber_file.name)
-                        st.session_state['parsed_odb'] = parsed_odb
-                    except Exception as e:
-                        st.error(f"ODB++ parsing failed: {e}")
+                if _design_unchanged(st.session_state.get('_render_key'), _render_key,
+                                     st.session_state.get('rendered_odb') is not None):
+                    # Same archive + same layer selection already loaded this session —
+                    # skip the design phase entirely; only the AOI section below runs.
+                    # Never touch quad_*/cam_layer_select/_panel_svgs_built here: the
+                    # user may have changed them since the original load.
+                    if st.session_state.get('parsed_odb') is None:
+                        try:
+                            st.session_state['parsed_odb'] = _parse_odb_cached(
+                                _raw_digest, _tgz_bytes, gerber_file.name)
+                        except Exception as e:
+                            st.error(f"ODB++ parsing failed: {e}")
+                    st.session_state['_tgz_digest'] = _render_key
+                    st.session_state['_tgz_bytes_for_cache'] = _tgz_bytes
+                    st.info("Design unchanged — reusing loaded render.")
+                else:
+                    with st.spinner("Parsing ODB++ archive..."):
+                        try:
+                            parsed_odb = _parse_odb_cached(_raw_digest, _tgz_bytes, gerber_file.name)
+                            st.session_state['parsed_odb'] = parsed_odb
+                        except Exception as e:
+                            st.error(f"ODB++ parsing failed: {e}")
 
-                # Render CAM-quality SVGs via Gerbonara (with disk cache + background worker)
-                if gerber_file:
+                    # Render CAM-quality SVGs via Gerbonara (disk cache + background worker).
+                    # The render key folds in the selection so each layer-combination
+                    # caches independently.
                     try:
-                        # Render only the layers ticked in the picker. The cache key
-                        # folds in the selection so each layer-combination caches
-                        # independently; selecting "all" keeps the plain digest, so
-                        # existing full-render caches still hit.
-                        _scanned = st.session_state.get('_scanned_layers', [])
-                        _selected_layers = [
-                            n for n, t in _scanned
-                            if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
-                        ] or None
-                        _render_key = compose_render_key(_raw_digest, _selected_layers)
                         st.session_state['_render_key'] = _render_key
                         # The active render's on-disk identity (used by cache save/load).
                         st.session_state['_tgz_digest'] = _render_key
@@ -381,6 +400,11 @@ def render_sidebar():
                             for w in rendered.warnings:
                                 st.warning(w, icon="⚠️")
 
+                        elif (st.session_state.get('_render_progress_file')
+                              and st.session_state.get('_render_digest') == _render_key):
+                            # A background render for this exact design is already
+                            # running — never spawn a second thread for it.
+                            st.info("Render already in progress for this design — it will appear when ready.")
                         else:
                             # Not cached — start background render thread
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
