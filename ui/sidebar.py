@@ -61,6 +61,49 @@ def _design_unchanged(prev_key, new_key, has_rendered: bool) -> bool:
     return prev_key is not None and prev_key == new_key and has_rendered
 
 
+def _assemble_prerendered(raw_digest, new_selection, scanned,
+                          prev_key, prev_sel, exclude_key):
+    """Reusable {name: RenderedLayer} for an incremental render, or None.
+
+    Sources, in order: the render already in session (validated as belonging to
+    THIS archive by recomposing its key from the current raw digest + its stored
+    selection), then the best same-archive disk entry (covers restarts). Any
+    failure or ambiguity returns None → plain full render, always safe.
+    """
+    try:
+        from core.render_plan import plan_layer_reuse
+        if not new_selection or not scanned:
+            return None
+        layer_types = {n: t for n, t in scanned}
+
+        # Source 1: live session render of the same archive.
+        rodb = st.session_state.get('rendered_odb')
+        if (rodb is not None and prev_sel is not None
+                and compose_render_key(raw_digest, prev_sel) == prev_key):
+            plan = plan_layer_reuse(prev_sel, rodb.layers.keys(),
+                                    new_selection, layer_types)
+            if plan.reusable:
+                import dataclasses as _dc
+                # replace-copies with gerber_file=None: the background render
+                # thread must never mutate (or re-clip) the live UI objects.
+                return {n: _dc.replace(rodb.layers[n], gerber_file=None)
+                        for n in plan.reusable}
+
+        # Source 2: best same-archive disk entry.
+        from core.cache import find_reuse_source, load_cached_layers
+        src = find_reuse_source(raw_digest, exclude_key=exclude_key)
+        if src:
+            src_key, manifest = src
+            plan = plan_layer_reuse(manifest.get('selection'),
+                                    manifest.get('layers', {}).keys(),
+                                    new_selection, layer_types)
+            if plan.reusable:
+                return load_cached_layers(src_key, plan.reusable)
+    except Exception:
+        return None
+    return None
+
+
 def _copper_sort_key(name: str) -> int:
     # Front soldermask first, back soldermask last; copper in physical stackup
     # order 4F,3F,2F,1FCO,1BCO,2B,3B,4B (single source: constants).
@@ -353,7 +396,12 @@ def render_sidebar():
                     # The render key folds in the selection so each layer-combination
                     # caches independently.
                     try:
+                        # Previous render's identity — the reuse planner compares
+                        # against it; capture BEFORE overwriting.
+                        _prev_key = st.session_state.get('_render_key')
+                        _prev_sel = st.session_state.get('_render_selection')
                         st.session_state['_render_key'] = _render_key
+                        st.session_state['_render_selection'] = _selected_layers
                         # The active render's on-disk identity (used by cache save/load).
                         st.session_state['_tgz_digest'] = _render_key
 
@@ -406,14 +454,29 @@ def render_sidebar():
                             # running — never spawn a second thread for it.
                             st.info("Render already in progress for this design — it will appear when ready.")
                         else:
-                            # Not cached — start background render thread
+                            # Not cached — reuse what a previous render of this
+                            # archive already produced, render only the rest.
+                            _prerendered = _assemble_prerendered(
+                                _raw_digest, _selected_layers, _scanned,
+                                _prev_key, _prev_sel, _render_key)
+                            if _prerendered and _selected_layers:
+                                st.info(
+                                    f"♻️ Reusing {len(_prerendered)} of "
+                                    f"{len(_selected_layers)} layers — rendering only what changed."
+                                )
+
+                            # Start background render thread
                             _prog_file = Path(tempfile.mktemp(suffix='_render.json'))
                             _prog_file.write_text('{"status":"running"}')
 
-                            def _bg_render(_bytes=_tgz_bytes, _digest=_render_key, _name=gerber_file.name, _pf=_prog_file, _lf=_selected_layers):
+                            def _bg_render(_bytes=_tgz_bytes, _digest=_render_key, _name=gerber_file.name,
+                                           _pf=_prog_file, _lf=_selected_layers,
+                                           _pre=_prerendered, _raw=_raw_digest):
                                 try:
-                                    r = render_odb_to_cam(_bytes, _name, layer_filter=_lf, digest=_digest)
-                                    save_render_cache(r, digest=_digest)
+                                    r = render_odb_to_cam(_bytes, _name, layer_filter=_lf,
+                                                          digest=_digest, prerendered_layers=_pre)
+                                    save_render_cache(r, digest=_digest,
+                                                      tgz_digest=_raw, selection=_lf)
                                     _pf.write_text('{"status":"done"}')
                                 except Exception as e:
                                     _pf.write_text(json.dumps({"status": "error", "error": str(e)}))
