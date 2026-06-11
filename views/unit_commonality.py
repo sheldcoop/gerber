@@ -8,7 +8,7 @@ from export import export_current_view
 
 from views.cm_render import (
     _place_pairs, _layer_color_map, _layer_sort_key, _display_dims,
-    _add_dim_annotations, _add_grid, _add_density_heatmap, prewarm_layer_urls,
+    _add_dim_annotations, _add_grid, prewarm_layer_urls,
 )
 from views.cm_geometry import _select_units, _compute_origins
 
@@ -245,12 +245,6 @@ def _render_defect_state(rodb, aoi, align_args):
     _panel_lbl = ", ".join(panel_filter) if panel_filter else None
     _add_dim_annotations(fig, disp_w, disp_h, active_layer, panel_label=_panel_lbl)
 
-    _show_heatmap = st.toggle("🌡️ Density Heatmap", value=False,
-                              help="Overlay a 2D defect density heatmap instead of individual dots",
-                              key="cm_heatmap_toggle")
-    if _show_heatmap and len(cm_plot) >= 3:
-        _add_density_heatmap(fig, cm_plot, disp_w, disp_h)
-
     n_def, n_units = len(cm_plot), len(sel_units)
     fig.update_layout(title=dict(
         text=f"{n_def} defects · {n_units} units · avg {n_def/max(n_units,1):.1f}/unit",
@@ -269,7 +263,6 @@ def _render_defect_state(rodb, aoi, align_args):
         tuple(sorted(panel_filter)) if panel_filter else (),
         float(manual_rot), float(off_x), float(off_y),
         cfg.color_mode, cfg.marker_style,
-        bool(_show_heatmap),
         bool(st.session_state.get('invert_polarity', False)),
         tuple(
             (n, bool(st.session_state.get(f"vis_{n}", False)),

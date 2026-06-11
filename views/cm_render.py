@@ -9,7 +9,6 @@ unit_commonality.py so the view module stays a thin orchestrator.
 import logging
 import threading
 
-import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from typing import Any, Tuple
@@ -301,18 +300,3 @@ def _add_grid(fig, cell_w, cell_h, step=5.0):
         _g += step
 
 
-def _add_density_heatmap(fig, cm_plot, cell_w, cell_h):
-    try:
-        _hx = cm_plot['ALIGNED_X'].dropna().values
-        _hy = cm_plot['ALIGNED_Y'].dropna().values
-        _nx, _ny = 60, 60
-        _gx = np.linspace(0, cell_w, _nx)
-        _gy = np.linspace(0, cell_h, _ny)
-        _z, _, _ = np.histogram2d(_hy, _hx, bins=[_ny, _nx],
-                                  range=[[0, cell_h], [0, cell_w]])
-        from scipy.ndimage import gaussian_filter as _gf
-        _z = _gf(_z.astype(float), sigma=2.0)
-        fig.add_trace(go.Heatmap(z=_z, x=_gx, y=_gy, colorscale='Hot',
-                                 opacity=0.55, showscale=False, hoverinfo='skip'))
-    except Exception:
-        st.warning("Heatmap requires scipy. Install with: pip install scipy")
