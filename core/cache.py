@@ -36,7 +36,8 @@ def compute_tgz_digest(tgz_bytes: bytes) -> str:
 # manifest schema, build_stack_svg recolouring). The version is folded into every
 # render key, so old on-disk entries become unreachable — never wrongly served —
 # and age out via prune_render_cache().
-CACHE_VERSION = 1
+# v2: manifest gains 'tgz_digest' + 'selection' (incremental layer reuse).
+CACHE_VERSION = 2
 
 
 def compose_render_key(digest: str, layer_filter, cache_version: int = CACHE_VERSION) -> str:
@@ -101,11 +102,16 @@ def _panel_layout_from_dict(d: Optional[dict]):
     )
 
 
-def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) -> None:
+def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None,
+                      tgz_digest: str = None, selection: list = None) -> None:
     """Persist a RenderedODB to disk under ~/.cache/gerber-vrs/cam/{digest}/.
 
     Pass ``digest`` (pre-computed via compute_tgz_digest) to avoid re-hashing.
     Falls back to computing from ``tgz_bytes`` when ``digest`` is omitted.
+
+    ``tgz_digest`` (raw archive MD5) and ``selection`` (rendered layer names,
+    None = all) make the entry discoverable as an incremental-reuse source.
+    When omitted on a re-save, the existing manifest's values carry forward.
     """
     if digest is None:
         if tgz_bytes is None:
@@ -114,6 +120,18 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
     try:
         cache_dir = _cache_dir(digest)
         cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if tgz_digest is None or selection is None:
+            # Re-save without reuse metadata (e.g. after a lazy panel-SVG build):
+            # carry the existing manifest's fields forward so reuse keeps working.
+            try:
+                _prev = json.loads((cache_dir / 'manifest.json').read_text(encoding='utf-8'))
+                if tgz_digest is None:
+                    tgz_digest = _prev.get('tgz_digest')
+                if selection is None:
+                    selection = _prev.get('selection')
+            except Exception:
+                pass
 
         layer_meta = {}
         for name, lyr in rendered.layers.items():
@@ -146,6 +164,9 @@ def save_render_cache(rendered, *, digest: str = None, tgz_bytes: bytes = None) 
             'warnings': rendered.warnings,
             'panel_layout': _panel_layout_to_dict(rendered.panel_layout),
             'layers': layer_meta,
+            # Incremental-reuse metadata (None-safe; loaders tolerate absence).
+            'tgz_digest': tgz_digest,
+            'selection': sorted(n.lower() for n in selection) if selection else None,
         }
         (cache_dir / 'manifest.json').write_text(
             json.dumps(manifest, separators=(',', ':')), encoding='utf-8'
@@ -227,6 +248,49 @@ def get_cache_size() -> tuple:
         return (total, f"{total / (1024 * 1024 * 1024):.2f} GB")
 
 
+def _layer_from_cache(cache_dir: Path, name: str, meta: dict) -> Optional[object]:
+    """Rebuild one RenderedLayer from its cached SVG + manifest meta.
+
+    Returns None when the SVG file is missing (partial cache → caller decides).
+    """
+    from gerber_renderer import RenderedLayer
+
+    svg_path = cache_dir / f"{name}.svg"
+    if not svg_path.exists():
+        return None
+    svg_string = svg_path.read_text(encoding='utf-8')
+    svg_data_url = _svg_to_data_url_fast(svg_string)
+
+    # Reconstruct stack color variant (recolour fg + transparent bg, no to_svg() call)
+    fg_color = meta.get('fg_color', COPPER_FG)
+    stack_color = meta.get('stack_color') or fg_color
+    stack_svg = build_stack_svg(svg_string, fg_color, stack_color)
+    color_svg_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
+
+    panel_svg_data_url = ''
+    panel_svg_path = cache_dir / f"{name}.panel.svg"
+    if panel_svg_path.exists():
+        try:
+            panel_svg_data_url = _svg_to_data_url_fast(
+                panel_svg_path.read_text(encoding='utf-8')
+            )
+        except Exception:
+            pass
+
+    return RenderedLayer(
+        name=name,
+        layer_type=meta['layer_type'],
+        svg_string=svg_string,
+        svg_data_url=svg_data_url,
+        color_svg_urls=color_svg_urls,
+        gerber_file=None,
+        bounds=tuple(meta['bounds']),
+        feature_count=meta['feature_count'],
+        panel_svg_data_url=panel_svg_data_url,
+        stats=meta['stats'],
+    )
+
+
 def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optional[object]:
     """Return a cached RenderedODB, or None on cache miss.
 
@@ -243,44 +307,14 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
             return None
 
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-        from gerber_renderer import RenderedLayer, RenderedODB
+        from gerber_renderer import RenderedODB
 
         layers = {}
         for name, meta in manifest['layers'].items():
-            svg_path = cache_dir / f"{name}.svg"
-            if not svg_path.exists():
+            layer = _layer_from_cache(cache_dir, name, meta)
+            if layer is None:
                 return None  # partial cache — force full re-render
-            svg_string = svg_path.read_text(encoding='utf-8')
-            svg_data_url = _svg_to_data_url_fast(svg_string)
-
-            # Reconstruct stack color variant (recolour fg + transparent bg, no to_svg() call)
-            fg_color = meta.get('fg_color', COPPER_FG)
-            stack_color = meta.get('stack_color') or fg_color
-            stack_svg = build_stack_svg(svg_string, fg_color, stack_color)
-            color_svg_urls = {stack_color: _svg_to_data_url_fast(stack_svg)}
-
-            panel_svg_data_url = ''
-            panel_svg_path = cache_dir / f"{name}.panel.svg"
-            if panel_svg_path.exists():
-                try:
-                    panel_svg_data_url = _svg_to_data_url_fast(
-                        panel_svg_path.read_text(encoding='utf-8')
-                    )
-                except Exception:
-                    pass
-
-            layers[name] = RenderedLayer(
-                name=name,
-                layer_type=meta['layer_type'],
-                svg_string=svg_string,
-                svg_data_url=svg_data_url,
-                color_svg_urls=color_svg_urls,
-                gerber_file=None,
-                bounds=tuple(meta['bounds']),
-                feature_count=meta['feature_count'],
-                panel_svg_data_url=panel_svg_data_url,
-                stats=meta['stats'],
-            )
+            layers[name] = layer
 
         return RenderedODB(
             layers=layers,
@@ -292,3 +326,68 @@ def load_render_cache(*, digest: str = None, tgz_bytes: bytes = None) -> Optiona
         )
     except Exception:
         return None
+
+
+# ── Incremental-reuse helpers ─────────────────────────────────────────────────
+
+def load_render_manifest(render_key: str) -> Optional[dict]:
+    """Read just the manifest (KBs) for a cached render, or None."""
+    try:
+        return json.loads(
+            (_cache_dir(render_key) / 'manifest.json').read_text(encoding='utf-8')
+        )
+    except Exception:
+        return None
+
+
+def load_cached_layers(render_key: str, names) -> Optional[dict]:
+    """Partial load: rebuild only the named RenderedLayers from a cache entry.
+
+    Returns {name: RenderedLayer} (gerber_file=None), or None if the manifest
+    or any requested SVG is missing — callers fall back to a full render.
+    """
+    manifest = load_render_manifest(render_key)
+    if manifest is None:
+        return None
+    try:
+        cache_dir = _cache_dir(render_key)
+        meta_by_lower = {n.lower(): (n, m) for n, m in manifest['layers'].items()}
+        out = {}
+        for want in names:
+            hit = meta_by_lower.get(str(want).lower())
+            if hit is None:
+                return None
+            real_name, meta = hit
+            layer = _layer_from_cache(cache_dir, real_name, meta)
+            if layer is None:
+                return None
+            out[real_name] = layer
+        return out
+    except Exception:
+        return None
+
+
+def find_reuse_source(tgz_digest: str, exclude_key: str = None) -> Optional[tuple]:
+    """Find the best same-archive cache entry to reuse layers from.
+
+    Scans every manifest under the CAM cache dir for one whose 'tgz_digest'
+    matches; among matches, prefers the one with the most rendered layers.
+    Returns (render_key, manifest) or None. Manifests without the reuse
+    fields (pre-v2 or foreign) are skipped.
+    """
+    if not tgz_digest or not _CAM_CACHE_DIR.exists():
+        return None
+    best = None
+    try:
+        for d in _CAM_CACHE_DIR.iterdir():
+            if not d.is_dir() or d.name == exclude_key:
+                continue
+            manifest = load_render_manifest(d.name)
+            if not manifest or manifest.get('tgz_digest') != tgz_digest:
+                continue
+            n_layers = len(manifest.get('layers', {}))
+            if best is None or n_layers > best[2]:
+                best = (d.name, manifest, n_layers)
+    except Exception:
+        return None
+    return (best[0], best[1]) if best else None

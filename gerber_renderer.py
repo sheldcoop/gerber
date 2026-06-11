@@ -96,7 +96,8 @@ class RenderedODB:
 
 def render_odb_to_cam(data: bytes, filename: str = '',
                       layer_filter: list = None,
-                      digest: str = None) -> RenderedODB:
+                      digest: str = None,
+                      prerendered_layers: dict = None) -> RenderedODB:
     """
     Parse ODB++ archive and render each copper layer as CAM-quality SVG.
 
@@ -106,6 +107,9 @@ def render_odb_to_cam(data: bytes, filename: str = '',
         layer_filter: optional list of layer names to render (None = all copper)
         digest: pre-computed MD5 hex digest (from compute_tgz_digest).  Pass this
                 to skip re-hashing data on every call.
+        prerendered_layers: {name: RenderedLayer} reused verbatim from a previous
+                render of the same archive (see core/render_plan) — only the
+                remaining selected layers are parsed and rendered.
 
     Returns:
         RenderedODB with SVG strings and GerberFile objects per layer.
@@ -130,8 +134,9 @@ def render_odb_to_cam(data: bytes, filename: str = '',
             _RENDER_MEM_CACHE.popitem(last=False)
         return cache_hit
 
-    # 3. Full render
-    result = _render_pipeline(data, filename, layer_filter)
+    # 3. Full (or incremental, when prerendered layers are supplied) render
+    result = _render_pipeline(data, filename, layer_filter,
+                              prerendered_layers=prerendered_layers)
     save_render_cache(result, digest=digest)
     _RENDER_MEM_CACHE[digest] = result
     if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:

@@ -43,10 +43,18 @@ logger = logging.getLogger(__name__)
 _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
 
 
-def _render_pipeline(data: bytes, filename: str, layer_filter: list):
+def _render_pipeline(data: bytes, filename: str, layer_filter: list,
+                     prerendered_layers: dict = None):
     """Parse ODB++ archive and render each layer as CAM-quality SVG.
 
     Returns a RenderedODB instance (no caching — caller handles that).
+
+    ``prerendered_layers`` ({name: RenderedLayer, gerber_file=None}) are taken
+    verbatim — they skip parsing and SVG rendering. The caller (via
+    core/render_plan.plan_layer_reuse) guarantees they are valid for this
+    selection; drill clipping (Phase 5) skips them via the gerber_file=None
+    guard, and their bounds still feed board_bounds so the result equals a
+    fresh render by construction.
     """
     import shutil
     # Lazy import to avoid circular dependency with gerber_renderer
@@ -54,6 +62,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
 
     tmp_dir, job_root = _extract_odb_tgz(data)
     warnings = []
+    prerendered_layers = prerendered_layers or {}
 
     try:
         # ── Phase 1: units, step name, layer list ─────────────────────────
@@ -86,6 +95,10 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 (n, t) for n, t in matrix_layers
                 if t in _RENDERABLE_TYPES and not _IMPEDANCE_RE.match(n)
             ]
+
+        # Prerendered layers skip parse + render entirely (Phases 2-3).
+        _pre_lower = {n.lower() for n in prerendered_layers}
+        selected = [(n, t) for n, t in selected if n.lower() not in _pre_lower]
 
         # ── Phase 2: parse layers in parallel ─────────────────────────────
         def _process_layer(args):
@@ -149,10 +162,11 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             return name, ltype, gf, stats, None
 
         parse_results = []
-        with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(selected))) as executor:
-            futures = {executor.submit(_process_layer, item): item for item in selected}
-            for future in as_completed(futures):
-                parse_results.append(future.result())
+        if selected:
+            with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(selected))) as executor:
+                futures = {executor.submit(_process_layer, item): item for item in selected}
+                for future in as_completed(futures):
+                    parse_results.append(future.result())
 
         # ── Phase 3: render SVGs in parallel ──────────────────────────────
         valid_results = []
@@ -167,8 +181,13 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
             for i, (name, _, _, _) in enumerate(valid_results)
         }
 
-        rendered_layers = {}
-        all_bounds = []
+        # Seed with reused layers; their bounds feed board_bounds exactly as a
+        # fresh render of the same layer would (Phase 4 equality by construction).
+        rendered_layers = dict(prerendered_layers)
+        all_bounds = [
+            lyr.bounds for lyr in prerendered_layers.values()
+            if lyr.layer_type in ('copper', 'signal', 'power', 'mixed', 'outline')
+        ]
 
         def _render_layer(name, ltype, gf, stats):
             fg_color = layer_fg(ltype)
@@ -404,7 +423,7 @@ def _render_pipeline(data: bytes, filename: str, layer_filter: list):
                 (lo for lo in rendered_layers.values() if lo.layer_type != 'drill'),
                 None
             )
-            if _first_copper:
+            if _first_copper and not _first_copper.panel_svg_data_url:
                 try:
                     _first_copper.panel_svg_data_url = build_panel_svg(
                         _first_copper.svg_string, panel_layout
