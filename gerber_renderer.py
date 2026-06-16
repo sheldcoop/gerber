@@ -1,0 +1,243 @@
+"""
+gerber_renderer.py — ODB++ to Gerbonara CAM-quality SVG renderer.
+
+Public API:
+  render_odb_to_cam(data, filename, layer_filter) → RenderedODB
+  scan_available_layers(data) → [(name, type), ...]
+  render_layer_svg(data, layer_name, fg_color, bg_color) → SVG string
+
+Implementation is split across core/ modules:
+  core/cache.py         — disk cache + SVG data URL helpers
+  core/panel_builder.py — composite panel SVG from unit SVGs
+  core/layer_renderer.py — parse ODB++ layer into GerberFile
+  core/step_layout.py   — step-repeat hierarchy → unit positions
+  core/pipeline.py      — main rendering pipeline
+"""
+
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+
+from gerbonara import GerberFile
+
+from core.constants import COPPER_FG, SVG_BG
+
+from odb_parser import (
+    _extract_odb_tgz,
+    _parse_matrix,
+    _scan_layers_dir,
+    _find_step,
+)
+
+from core.cache import save_render_cache, load_render_cache, compute_tgz_digest  # re-exported for callers
+from core.pipeline import _render_pipeline, LAYER_COLORS
+from core.panel_builder import build_panel_svg  # re-exported for views that import it here
+
+import collections as _collections
+
+# Module-level in-process LRU: survives Streamlit re-runs within the same worker process.
+# Eliminates disk I/O for repeated renders of the same file in one session.
+_RENDER_MEM_CACHE: '_collections.OrderedDict[str, RenderedODB]' = _collections.OrderedDict()
+_RENDER_MEM_CACHE_MAX = 3
+
+
+# Pre-defined color palette for stacking (also used by pipeline.py)
+# Kept here so external code can import LAYER_COLORS from gerber_renderer.
+__all__ = [
+    'RenderedLayer', 'PanelLayout', 'RenderedODB', 'LAYER_COLORS',
+    'render_odb_to_cam', 'scan_available_layers', 'render_layer_svg',
+    'svg_to_png_data_url',
+]
+
+
+@dataclass
+class RenderedLayer:
+    """A single rendered copper layer with pre-cached SVG variants."""
+    name: str
+    layer_type: str
+    svg_string: str              # default copper color SVG
+    svg_data_url: str            # pre-encoded base64 data URL (default color)
+    color_svg_urls: dict         # {color_hex: data_url} for stacking
+    gerber_file: GerberFile
+    bounds: tuple                # (min_x, min_y, max_x, max_y) in mm
+    feature_count: int
+    panel_svg_data_url: str = '' # pre-rendered panel tile SVG (composite SVG data url)
+    panel_png_data_url: str = '' # rasterized PNG of panel_svg_data_url (lazy, on demand)
+    stats: dict = field(default_factory=dict)
+
+
+@dataclass
+class PanelLayout:
+    """Panel tiling layout derived from TGZ STEP-REPEAT data."""
+    unit_positions: list          # [(x_mm, y_mm), ...] centered for panel SVG display
+    unit_bounds: tuple            # (width_mm, height_mm) of a single unit
+    total_units: int
+    rows: int                     # effective total rows across entire panel
+    cols: int                     # effective total cols across entire panel
+    step_hierarchy: dict          # raw step-repeat data {step: [StepRepeat, ...]}
+    panel_width: float = 510.0    # mm (from ODB++ panel profile)
+    panel_height: float = 515.0   # mm (from ODB++ panel profile)
+    unit_positions_raw: list = field(default_factory=list)  # raw ODB++ coords (pre-centering)
+    dominant_angle: float = 0.0       # dominant ANGLE of placements in the cluster step (degrees)
+
+
+@dataclass
+class RenderedODB:
+    """All rendered layers from an ODB++ archive."""
+    layers: dict  # name → RenderedLayer
+    board_bounds: tuple  # aggregate (min_x, min_y, max_x, max_y) in mm
+    step_name: str = ''
+    units: str = ''
+    panel_layout: Optional[PanelLayout] = None
+    warnings: list = field(default_factory=list)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def render_odb_to_cam(data: bytes, filename: str = '',
+                      layer_filter: list = None,
+                      digest: str = None,
+                      prerendered_layers: dict = None) -> RenderedODB:
+    """
+    Parse ODB++ archive and render each copper layer as CAM-quality SVG.
+
+    Args:
+        data: raw bytes of the .tgz archive
+        filename: original filename (for error messages)
+        layer_filter: optional list of layer names to render (None = all copper)
+        digest: pre-computed MD5 hex digest (from compute_tgz_digest).  Pass this
+                to skip re-hashing data on every call.
+        prerendered_layers: {name: RenderedLayer} reused verbatim from a previous
+                render of the same archive (see core/render_plan) — only the
+                remaining selected layers are parsed and rendered.
+
+    Returns:
+        RenderedODB with SVG strings and GerberFile objects per layer.
+    """
+    if digest is None:
+        # Compose the versioned key exactly like the app does (CACHE_VERSION +
+        # layer selection), so direct callers share the same cache namespace and
+        # two different layer_filters never collide on the raw archive digest.
+        from core.cache import compose_render_key
+        digest = compose_render_key(compute_tgz_digest(data), layer_filter)
+
+    # 1. In-process LRU (zero I/O, zero hashing)
+    if digest in _RENDER_MEM_CACHE:
+        _RENDER_MEM_CACHE.move_to_end(digest)
+        return _RENDER_MEM_CACHE[digest]
+
+    # 2. Disk cache
+    cache_hit = load_render_cache(digest=digest)
+    if cache_hit:
+        _RENDER_MEM_CACHE[digest] = cache_hit
+        if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
+            _RENDER_MEM_CACHE.popitem(last=False)
+        return cache_hit
+
+    # 3. Full (or incremental, when prerendered layers are supplied) render
+    result = _render_pipeline(data, filename, layer_filter,
+                              prerendered_layers=prerendered_layers)
+    save_render_cache(result, digest=digest)
+    _RENDER_MEM_CACHE[digest] = result
+    if len(_RENDER_MEM_CACHE) > _RENDER_MEM_CACHE_MAX:
+        _RENDER_MEM_CACHE.popitem(last=False)
+    return result
+
+
+def clear_render_cache(digest: str = None):
+    """
+    Evict a rendered result from both the in-process LRU and disk cache.
+
+    Pass digest to evict a specific entry; pass None to evict everything.
+    Called by the sidebar "Force re-render" button so code changes take
+    effect without restarting Streamlit.
+    """
+    from pathlib import Path as _Path
+    import shutil as _shutil
+
+    if digest is None:
+        _RENDER_MEM_CACHE.clear()
+        cam_dir = _Path.home() / '.cache' / 'gerber-vrs' / 'cam'
+        if cam_dir.exists():
+            _shutil.rmtree(cam_dir, ignore_errors=True)
+    else:
+        _RENDER_MEM_CACHE.pop(digest, None)
+        from core.cache import _cache_dir
+        entry = _cache_dir(digest)
+        _shutil.rmtree(entry, ignore_errors=True)
+
+
+def scan_available_layers(data: bytes) -> list:
+    """
+    Quick scan of ODB++ archive — returns [(name, type), ...] for renderable layers.
+    No geometry parsing, just reads the matrix file. Takes ~0.1s.
+    """
+    import re
+    import shutil
+    _IMPEDANCE_RE = re.compile(r'^L\d{2}_', re.IGNORECASE)
+    renderable_types = {'copper', 'signal', 'power', 'mixed', 'soldermask', 'drill'}
+
+    tmp_dir, job_root = _extract_odb_tgz(data)
+    try:
+        matrix_layers = _parse_matrix(job_root)
+        if not matrix_layers:
+            steps_dir = os.path.join(job_root, 'steps')
+            step_name = 'unit' if os.path.isdir(os.path.join(steps_dir, 'unit')) else _find_step(job_root)
+            matrix_layers = _scan_layers_dir(os.path.join(job_root, 'steps', step_name, 'layers'))
+        return [
+            (n, t) for n, t in matrix_layers
+            if t in renderable_types and not _IMPEDANCE_RE.match(n)
+        ]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def render_layer_svg(data: bytes, layer_name: str,
+                     fg_color: str = COPPER_FG, bg_color: str = SVG_BG) -> Optional[str]:
+    """Convenience: render a single layer and return SVG string."""
+    result = render_odb_to_cam(data, layer_filter=[layer_name])
+    layer = result.layers.get(layer_name) or next(iter(result.layers.values()), None)
+    if layer:
+        svg_tag = layer.gerber_file.to_svg(fg=fg_color, bg=bg_color)
+        return str(svg_tag)
+    return None
+
+
+def svg_to_png_data_url(svg_data_url: str, width_mm: float, height_mm: float) -> Optional[str]:
+    """
+    Convert SVG data URL to PNG data URL using cairosvg.
+    
+    Args:
+        svg_data_url: base64-encoded SVG data URL
+        width_mm: target width in mm
+        height_mm: target height in mm
+    
+    Returns:
+        PNG data URL or None if conversion fails
+    """
+    try:
+        import base64
+        import io
+        from cairosvg import svg2png
+        
+        # Decode the SVG data URL
+        if svg_data_url.startswith('data:image/svg+xml;base64,'):
+            svg_b64 = svg_data_url.split(',', 1)[1]
+            svg_bytes = base64.b64decode(svg_b64)
+            svg_string = svg_bytes.decode('utf-8')
+        else:
+            return None
+        
+        # Convert SVG to PNG (scale to reasonable resolution: ~10 pixels per mm)
+        png_bytes = svg2png(
+            bytestring=svg_bytes,
+            output_width=int(width_mm * 10),
+            output_height=int(height_mm * 10)
+        )
+        
+        # Encode as PNG data URL
+        png_b64 = base64.b64encode(png_bytes).decode('utf-8')
+        return f'data:image/png;base64,{png_b64}'
+    
+    except Exception:
+        return None

@@ -1,0 +1,17 @@
+streamlit>=1.50.0
+plotly>=6.0.0
+pandas>=2.0.0
+numpy>=1.26.0
+openpyxl>=3.1.0
+shapely>=2.0.0
+gerbonara>=1.0.0
+unlzw3>=0.2.1
+pyarrow>=14.0.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
+hypothesis>=6.0.0
+kaleido>=0.2.1
+scikit-learn>=1.3.0
+Pillow>=10.0.0
+polars>=1.0.0      # 3-10× faster Excel reads (aoi_loader prefers it, pandas fallback)
+fastexcel>=0.10.0  # calamine engine backend required by polars.read_excel
