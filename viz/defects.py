@@ -1,11 +1,32 @@
 from __future__ import annotations
 """viz/defects.py — AOI defect markers, hover/customdata, drill + component traces."""
 
+import hashlib
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from core.constants import DEFECT_TYPE_COLORS, MARKER_STYLES
+from core.constants import (
+    DEFECT_TYPE_COLORS,
+    MARKER_STYLES,
+    VERIFICATION_CODE_COLORS,
+)
+
+
+def _stable_group_color(group_name: str) -> str:
+    """Constant colour for a defect/verification group, identical every session.
+
+    Predefined codes (e.g. CU22, CU18) use the fixed VERIFICATION_CODE_COLORS map
+    so they never change colour or collide. Any other value falls back to a
+    deterministic index into DEFECT_TYPE_COLORS via md5 (not Python's built-in
+    hash(), which is randomised per process).
+    """
+    name = str(group_name)
+    if name in VERIFICATION_CODE_COLORS:
+        return VERIFICATION_CODE_COLORS[name]
+    digest = int(hashlib.md5(name.encode('utf-8')).hexdigest(), 16)
+    return DEFECT_TYPE_COLORS[digest % len(DEFECT_TYPE_COLORS)]
 from viz.layout import OverlayConfig
 
 
@@ -93,14 +114,13 @@ def _add_defect_traces(
             showlegend=False
         ))
 
-    # Determine grouping column and color palette. Only two modes are supported:
-    # by_verification (when the column exists) and the default by_type.
+    # Determine grouping column. Only two modes are supported: by_verification
+    # (when the column exists) and the default by_type. Colours come from the
+    # constant _stable_group_color() lookup below, not a position-based palette.
     if config.color_mode == 'by_verification' and 'VERIFICATION' in filtered.columns:
         group_col = 'VERIFICATION'
-        palette = DEFECT_TYPE_COLORS
     else:
         group_col = 'DEFECT_TYPE'
-        palette = DEFECT_TYPE_COLORS
 
     # Get marker style
     marker_config = MARKER_STYLES.get(config.marker_style, MARKER_STYLES['dot'])
@@ -109,9 +129,9 @@ def _add_defect_traces(
     hover_template = _build_hover_template(filtered)
     customdata = _build_customdata(filtered)
 
-    # Add one trace per group — color is stable (hash of name), not position-dependent.
-    # This ensures CU22 is always the same color regardless of which groups happen to
-    # be present in the current filter selection.
+    # Add one trace per group — color is a constant, predefined value per code
+    # (see _stable_group_color), so CU22/CU18 are always the same distinct colours
+    # regardless of which groups are present or which session the app runs in.
     #
     # Sort groups so named codes appear before the '—' (unknown) catch-all, giving a
     # cleaner legend order regardless of pandas sort order.
@@ -120,7 +140,7 @@ def _add_defect_traces(
         key=lambda kv: ('zzz' if str(kv[0]) in ('—', '') else str(kv[0]).lower()),
     )
     for group_name, group_df in groups:
-        color = palette[abs(hash(str(group_name))) % len(palette)]
+        color = _stable_group_color(group_name)
 
         # Build customdata for this group
         group_customdata = _build_customdata(group_df)

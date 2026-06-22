@@ -3,6 +3,11 @@
 import re
 from typing import Optional
 
+# Panel-first scheme: Panel_09_BU_01_B_1.xlsx  → panel=9, buildup=1, side='B', section=1
+FILENAME_PATTERN_PANEL_FIRST = re.compile(
+    r'Panel[_\-]?(\d{1,2})[_\-]?BU[_\-]?(\d{1,2})[_\-]?([FfBb])(?:[_\-]?(\d+))?',
+    re.IGNORECASE
+)
 FILENAME_PATTERN_NEW = re.compile(
     r'BU[_\-]?(\d{1,2})\s*([FfBb])[_\-]Panel[_\-]?(\d+)(?:[_\-]S?(\d+))?',
     re.IGNORECASE
@@ -17,6 +22,8 @@ def _parse_filename(filename: str) -> tuple[int, str, str, int, list[str]]:
     Extract buildup number, side, panel ID and section from the filename.
 
     Supported formats:
+      Panel-first: Panel_09_BU_01_B_1.xlsx → buildup=1, side='B', panel='Panel_09', section=1
+                   Panel_09_BU_02_F.xlsx   → buildup=2, side='F', panel='Panel_09', section=1
       New:    BU_01F_Panel1_S2.xlsx      → buildup=1, side='F', panel='Panel_01', section=2
               BU_01F_Panel1.xlsx         → buildup=1, side='F', panel='Panel_01', section=1
               BU-01B-Panel-30-1.xlsx     → buildup=1, side='B', panel='Panel_30', section=1
@@ -27,6 +34,16 @@ def _parse_filename(filename: str) -> tuple[int, str, str, int, list[str]]:
         (buildup_number, side_letter, panel_id, section_number, warnings)
     """
     warnings = []
+
+    # ── Panel-first format: Panel_09_BU_01_B_1 ───────────────────────────
+    # Checked first so it wins over the BU-first pattern for these names.
+    m = FILENAME_PATTERN_PANEL_FIRST.search(filename)
+    if m:
+        buildup  = int(m.group(2))
+        side     = m.group(3).upper()
+        panel_id = f"Panel_{int(m.group(1)):02d}"
+        section  = int(m.group(4)) if m.group(4) else 1
+        return (buildup, side, panel_id, section, warnings)
 
     # ── New format: BU_01F_Panel1_S2 ─────────────────────────────────────
     m = FILENAME_PATTERN_NEW.search(filename)

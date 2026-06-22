@@ -51,6 +51,20 @@ DEFECT_TYPE_COLORS = [
     '#FFFF44', '#FF6644', '#66FF44', '#4466FF', '#FF4466',
 ]
 
+# Fixed, predefined colours per AOI verification code so each code is the SAME
+# colour every session (no per-run hash randomisation) and visually distinct.
+# CU22 (red) and CU18 (blue) are deliberately far apart on the wheel.
+VERIFICATION_CODE_COLORS = {
+    'CU22': '#E6194B',  # red
+    'CU18': '#1F6FE6',  # blue   — deliberately very different from CU22
+    'CU14': '#3CB44B',  # green
+    'CU10': '#F58231',  # orange
+    'GE22': '#911EB4',  # purple
+    'GE57': '#00B8B8',  # teal/cyan
+    'F':    '#F032E6',  # magenta
+    '—':    '#999999',  # grey (unknown / unverified)
+}
+
 # Engineering-standard RGB colours per PCB layer type (used by the rasteriser).
 LAYER_TYPE_COLORS = {
     'copper':      {'r': 184, 'g': 115, 'b': 51},   # copper brown
