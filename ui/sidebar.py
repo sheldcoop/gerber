@@ -50,16 +50,9 @@ def _cache_size_cached():
     return get_cache_size()
 
 
-# Copper build-ups rendered by default at startup — the innermost two build-ups
-# (2F, 1FCO, 1BCO, 2B in COPPER_TOP_DOWN). Everything else starts unchecked.
-_DEFAULT_RENDER_COPPER_IDX = {2, 3, 4, 5}
-
-
-def _default_render_selected(name: str, layer_type: str) -> bool:
-    """Default picker state: only 1FCO/1BCO/2F/2B copper on; everything else off."""
-    if layer_type in _COPPER_RENDER_TYPES:
-        return copper_order_index(name) in _DEFAULT_RENDER_COPPER_IDX
-    return False
+def _default_render_selected(layer_type: str) -> bool:
+    """Default picker state: copper + soldermask on, drill/via off (the slow ones)."""
+    return layer_type in _COPPER_RENDER_TYPES or layer_type == 'soldermask'
 
 
 def _design_unchanged(prev_key, new_key, has_rendered: bool) -> bool:
@@ -263,7 +256,7 @@ def render_sidebar():
                             st.checkbox(
                                 _n,
                                 value=st.session_state.get(
-                                    f"render_sel_{_n}", _default_render_selected(_n, _t)),
+                                    f"render_sel_{_n}", _default_render_selected(_t)),
                                 key=f"render_sel_{_n}",
                                 help=f"type: {_t}",
                             )
@@ -275,7 +268,7 @@ def render_sidebar():
 
                     _sel_now = [
                         n for n, t in _scanned
-                        if st.session_state.get(f"render_sel_{n}", _default_render_selected(n, t))
+                        if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
                     ]
                     _has_copper = any(
                         t in _COPPER_RENDER_TYPES for n, t in _scanned if n in set(_sel_now)
@@ -372,7 +365,7 @@ def render_sidebar():
                 _scanned = st.session_state.get('_scanned_layers', [])
                 _selected_layers = [
                     n for n, t in _scanned
-                    if st.session_state.get(f"render_sel_{n}", _default_render_selected(n, t))
+                    if st.session_state.get(f"render_sel_{n}", _default_render_selected(t))
                 ] or None
                 _render_key = compose_render_key(_raw_digest, _selected_layers)
 
