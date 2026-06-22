@@ -166,37 +166,6 @@ def prewarm_layer_urls(rodb, swap_angle: float, manual_rot: float = 0.0) -> None
     threading.Thread(target=_worker, name="cm-prewarm", daemon=True).start()
 
 
-# Tolerance (mm) for deciding the unit cell is genuinely bigger than the copper
-# bbox — i.e. we have a real board profile rather than the copper-bbox fallback.
-_UNIT_FRAME_TOL = 0.5
-
-
-def _design_anchor(copper_bounds, cell_w, cell_h):
-    """Decide how to anchor + size the reference design overlay.
-
-    Returns (ref_shift, ref_w, ref_h).
-
-    The defect cloud is placed in the unit's step-origin frame (ALIGNED = X_MM −
-    step_origin), so it fills the whole unit cell [0, cell_w] × [0, cell_h]. To make
-    the design overlay register with the defects we have two regimes:
-
-    • Unit frame (a real board profile exists → the cell is larger than the copper
-      bbox): anchor the design at its NATIVE unit-local coordinates (shift = 0) and
-      use the unit cell as the reference footprint. Copper then sits where it
-      physically is inside the unit — surrounded by dielectric — instead of being
-      jammed into the bottom-left corner, so defects land on the real copper.
-
-    • Legacy fallback (no usable profile → cell ≈ copper bbox): keep the old
-      behaviour of shifting the copper bbox corner to the origin so the artwork
-      fills the view. Defect/design registration is unchanged for these boards.
-    """
-    cmnx, cmny, cmxx, cmxy = copper_bounds
-    copper_w, copper_h = cmxx - cmnx, cmxy - cmny
-    if cell_w >= copper_w + _UNIT_FRAME_TOL or cell_h >= copper_h + _UNIT_FRAME_TOL:
-        return (0.0, 0.0), cell_w, cell_h
-    return (-cmnx, -cmny), copper_w, copper_h
-
-
 def _layer_placement(b, ref_shift, ref_w, ref_h, swap_angle, svg_rot):
     """Pure geometry: where to anchor a layer's image (Plotly top-left x,y + size).
 
