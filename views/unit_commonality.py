@@ -191,25 +191,13 @@ def _render_defect_state(rodb, aoi, align_args):
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
 
-    # ── Auto-registration ────────────────────────────────────────────────────
-    # Defects are referenced to the unit's lower-left (the step origin); the design
-    # overlay is referenced to the copper-bbox lower-left (−copper_min). Those two
-    # corners differ by a small constant, which previously had to be cancelled by a
-    # manual X/Y nudge. Measure that gap and apply it automatically so both use the
-    # SAME corner: gap = (centering shift baked into unit_positions) − (copper corner).
-    # Gated to un-rotated units (the defect frame matches the SVG frame there); the
-    # manual offset still stacks on top for any residual. Rotated units are left to
-    # the manual nudge until verified.
-    _pl = rodb.panel_layout if rodb else None
-    if (first_lyr and _pl and round(dom_angle) % 360 == 0
-            and getattr(_pl, 'unit_positions_raw', None) and _pl.unit_positions):
-        try:
-            _shift_x = _pl.unit_positions[0][0] - _pl.unit_positions_raw[0][0]
-            _shift_y = _pl.unit_positions[0][1] - _pl.unit_positions_raw[0][1]
-            off_x += _shift_x - first_lyr.bounds[0]
-            off_y += _shift_y - first_lyr.bounds[1]
-        except (IndexError, TypeError):
-            pass
+    # Align defects on the copper minimum — the same lower-left corner the design
+    # overlay uses (ref_shift = -copper_min). Subtracting copper_min puts the defects
+    # in the copper's frame so they sit on the design without a manual nudge. The
+    # manual offset still stacks on top for any residual.
+    if first_lyr:
+        off_x -= first_lyr.bounds[0]
+        off_y -= first_lyr.bounds[1]
 
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
