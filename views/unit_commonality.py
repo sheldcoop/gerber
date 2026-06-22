@@ -187,17 +187,11 @@ def _render_defect_state(rodb, aoi, align_args):
     pairs = list(zip(src['UNIT_INDEX_Y'].astype(int), src['UNIT_INDEX_X'].astype(int)))
     ox_arr = [origins.get(p, (0.0, 0.0))[0] for p in pairs]
     oy_arr = [origins.get(p, (0.0, 0.0))[1] for p in pairs]
+    # Defects are placed purely as X_MM − step_origin (+ manual offset); they fill the
+    # unit cell [0, cell] from the lower-left corner. Copper is centered into that same
+    # cell by _design_anchor, so defects land on it without any copper_min adjustment.
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
-
-    # Match the defect offset to whichever anchor regime _design_anchor chose:
-    # unit frame (profile available) → ref_shift=(0,0), defects stay in ODB local coords;
-    # legacy fallback → ref_shift=(-copper_min), defects shift to copper-relative frame.
-    # Both cases keep defects and the design overlay in the same coordinate frame.
-    if first_lyr:
-        _ds_ref_shift, _, _ = _design_anchor(first_lyr.bounds, cell_w, cell_h)
-        off_x += _ds_ref_shift[0]
-        off_y += _ds_ref_shift[1]
 
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
