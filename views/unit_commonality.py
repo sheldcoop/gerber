@@ -191,6 +191,14 @@ def _render_defect_state(rodb, aoi, align_args):
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
 
+    # Align defects on the copper minimum — the same lower-left corner the design
+    # overlay uses (ref_shift = -copper_min). Subtracting copper_min puts the defects
+    # in the copper's frame so they sit on the design without a manual nudge. The
+    # manual offset still stacks on top for any residual.
+    if first_lyr:
+        off_x -= first_lyr.bounds[0]
+        off_y -= first_lyr.bounds[1]
+
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
         manual_rot = st.number_input(
@@ -235,11 +243,14 @@ def _render_defect_state(rodb, aoi, align_args):
 
     active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
     if active_layer is None:
-        # No reference layers — draw the unit cell outline and apply layout.
-        fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
-                      line=dict(color="rgba(0,180,80,0.5)", width=1.5),
-                      fillcolor="rgba(0,0,0,0)", layer="below")
+        # No reference layers selected — still need to apply the base layout.
         _apply_layout(fig, cfg)
+    # Always draw the unit cell outline, even when a copper layer is shown. Copper is
+    # smaller than the unit, so this lets you see BOTH the copper design and the unit
+    # boundary (the margin between the copper edge and the unit edge).
+    fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
+                  line=dict(color="rgba(0,180,80,0.5)", width=1.5),
+                  fillcolor="rgba(0,0,0,0)", layer="below")
 
     _add_grid(fig, disp_w, disp_h)
     _panel_lbl = ", ".join(panel_filter) if panel_filter else None
