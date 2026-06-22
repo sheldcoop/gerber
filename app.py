@@ -103,14 +103,21 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
     # --- Analysis Scope: Capsule Toggle Buttons (AOI Excel data only) ---
     if aoi and aoi.has_data:
-        if 'scope_bu_sel' not in st.session_state:
-            st.session_state['scope_bu_sel'] = list(aoi.buildup_numbers)
-        if 'scope_side_sel' not in st.session_state:
-            st.session_state['scope_side_sel'] = ['Front', 'Back']
-        if 'scope_panel_sel' not in st.session_state:
-            # Default to first panel only — panel selector is single-select (radio).
-            _default_panel = sorted(aoi.panel_ids)[:1] if aoi.panel_ids else []
-            st.session_state['scope_panel_sel'] = _default_panel
+        # Validate persisted scope selections against the CURRENT dataset every rerun.
+        # A "set if absent" guard would cling to the previous file's panels/buildups, so a
+        # newly uploaded Excel with different ids gets filtered to empty ("no defects")
+        # until the app is refreshed. Prune to values that still exist; fall back to the
+        # default when nothing valid remains.
+        _valid_bu = set(aoi.buildup_numbers)
+        _cur_bu = [b for b in st.session_state.get('scope_bu_sel', []) if b in _valid_bu]
+        st.session_state['scope_bu_sel'] = _cur_bu or list(aoi.buildup_numbers)
+
+        st.session_state.setdefault('scope_side_sel', ['Front', 'Back'])
+
+        # Panel selector is single-select (radio); default to first panel only.
+        _valid_p = set(aoi.panel_ids)
+        _cur_p = [p for p in st.session_state.get('scope_panel_sel', []) if p in _valid_p]
+        st.session_state['scope_panel_sel'] = _cur_p or (sorted(aoi.panel_ids)[:1] if aoi.panel_ids else [])
 
         with st.expander("🔬 Analysis Scope", expanded=True):
 

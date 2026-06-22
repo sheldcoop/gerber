@@ -36,7 +36,7 @@ def render_panelization_data(parsed, aoi, align_args) -> None:
                help="Physical unit height in panel space. For rotated units (90°/270°) this is the local X dimension.")
     _c5.metric("Total Units", pl.total_units)
 
-    _c6, _c7, _c8 = st.columns(3)
+    _c6, _c7, _c8, _c9 = st.columns(4)
     _c6.metric("Rows", pl.rows)
     _c7.metric("Cols", pl.cols)
     if _dom:
@@ -55,7 +55,7 @@ def render_panelization_data(parsed, aoi, align_args) -> None:
         _bb = _rodb.board_bounds
         _agg_w = _bb[2] - _bb[0]
         _agg_h = _bb[3] - _bb[1]
-        _c8.metric(
+        _c9.metric(
             "Copper (1st / all layers)",
             f"{_cop_w:.2f}×{_cop_h:.2f} / {_agg_w:.2f}×{_agg_h:.2f} mm",
             help=(
@@ -63,7 +63,7 @@ def render_panelization_data(parsed, aoi, align_args) -> None:
                 "Right: aggregate of ALL copper layers.\n"
                 "Use Profile above for board outline dimensions."
             )
-        ) if not _dom else None
+        )
 
     st.divider()
 
