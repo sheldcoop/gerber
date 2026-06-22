@@ -12,6 +12,7 @@ from aoi_loader import (
     _normalize_col_name,
     _auto_map_columns,
     _extract_buildup_side,
+    _parse_filename,
     _load_single_aoi,
     COLUMN_ALIASES,
     REQUIRED_COLUMNS,
@@ -156,6 +157,27 @@ class TestFilenamePattern:
         assert match is not None
         assert int(match.group(1)) == expected_bu
         assert match.group(2).upper() == expected_side
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Panel-first filename scheme (Panel_09_BU_01_B_1.xlsx)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPanelFirstFilename:
+    @pytest.mark.parametrize("filename,bu,side,panel,section", [
+        ('Panel_09_BU_01_B_1.xlsx', 1, 'B', 'Panel_09', 1),
+        ('Panel_09_BU_01_F_2.xlsx', 1, 'F', 'Panel_09', 2),
+        ('Panel_09_BU_02_F_1.xlsx', 2, 'F', 'Panel_09', 1),
+        ('Panel_09_BU_02_B.xlsx',   2, 'B', 'Panel_09', 1),  # section optional
+        ('Panel-1-BU-12-f-3.xlsx', 12, 'F', 'Panel_01', 3),  # dash separators
+    ])
+    def test_panel_first_parsing(self, filename, bu, side, panel, section):
+        b, s, p, sec, warnings = _parse_filename(filename)
+        assert b == bu
+        assert s == side
+        assert p == panel
+        assert sec == section
+        assert warnings == []  # clean parse, no fallback warning
 
 
 # ═══════════════════════════════════════════════════════════════════════════

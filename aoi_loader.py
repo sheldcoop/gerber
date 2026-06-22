@@ -5,7 +5,11 @@ Loads Orbotech AOI defect data from Excel files, auto-detects column mappings,
 extracts buildup layer, side (Front/Back), panel number and section from filenames,
 and converts coordinates from microns to mm.
 
-Filename convention (new format):
+Filename convention (Panel-first format):
+  Panel_09_BU_01_B_1.xlsx    → Panel 9, Buildup 1, Back,  Section 1
+  Panel_09_BU_02_F.xlsx      → Panel 9, Buildup 2, Front, Section 1 (section optional)
+
+Filename convention (BU-first format):
   BU_01F_Panel1_S1.xlsx      → Buildup 1, Front, Panel 1,  Section 1
   BU_02B_Panel2_S3.xlsx      → Buildup 2, Back,  Panel 2,  Section 3
   BU_01F_Panel1.xlsx         → Buildup 1, Front, Panel 1,  Section 1 (section optional)
@@ -28,15 +32,12 @@ Expected Excel columns (auto-detected by alias matching):
   ENHANCED_IMAGE, VERIFICATION
 """
 
-import hashlib
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import streamlit as st
 
 logger = logging.getLogger(__name__)
 
@@ -187,27 +188,6 @@ def _load_single_aoi(
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=64)
-def _load_single_aoi_cached(
-    file_digest: str,
-    filename: str,
-    buildup: int,
-    side: str,
-    panel_id: str,
-    section: int,
-    _file_bytes: bytes,
-) -> AOILoadResult:
-    """Per-file Excel parse, cached by content digest + classification.
-
-    Re-clicking Load & Process re-parses only files whose bytes or sidebar
-    classification actually changed. ``_file_bytes`` is underscore-prefixed so
-    Streamlit never hashes the raw Excel — ``file_digest`` is the key.
-    `_load_single_aoi` itself stays undecorated (imported directly by tests).
-    """
-    return _load_single_aoi(_file_bytes, filename, buildup, side,
-                            panel_id=panel_id, section=section)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -265,10 +245,10 @@ def load_aoi_files(uploaded_files: list, classifications: Optional[list] = None)
             buildup, side, panel_id, section, extract_warnings = _parse_filename(filename)
             all_warnings.extend(extract_warnings)
 
-        # Load and process the file (cached per content digest + classification)
-        _digest = hashlib.md5(file_bytes).hexdigest()
-        result = _load_single_aoi_cached(_digest, filename, buildup, side,
-                                         panel_id, section, file_bytes)
+        # Parse the file fresh every time — Excel data is intentionally NOT
+        # cached, so a newly uploaded file always shows its current contents.
+        result = _load_single_aoi(file_bytes, filename, buildup, side,
+                                  panel_id=panel_id, section=section)
         all_warnings.extend(result.warnings)
 
         if not result.df.empty:
@@ -326,9 +306,9 @@ def load_aoi_with_manual_side(
 
     for filename, file_bytes in all_bytes:
         buildup, side = buildup_side_map.get(filename, (0, 'F'))
-        _digest = hashlib.md5(file_bytes).hexdigest()
-        result = _load_single_aoi_cached(_digest, filename, buildup, side,
-                                         'Panel_01', 1, file_bytes)
+        # Parse fresh every time — Excel data is intentionally not cached.
+        result = _load_single_aoi(file_bytes, filename, buildup, side,
+                                  panel_id='Panel_01', section=1)
         all_warnings.extend(result.warnings)
         if not result.df.empty:
             all_results.append(result)
