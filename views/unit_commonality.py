@@ -8,7 +8,7 @@ from export import export_current_view
 
 from views.cm_render import (
     _place_pairs, _layer_color_map, _layer_sort_key, _display_dims,
-    _add_dim_annotations, _add_grid, prewarm_layer_urls,
+    _add_dim_annotations, _add_grid, prewarm_layer_urls, _design_anchor,
 )
 from views.cm_geometry import _select_units, _compute_origins
 
@@ -59,8 +59,8 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
         cw = _rb[2] - _rb[0]
         ch = _rb[3] - _rb[1]
 
-    _ref_b  = _ref_lyr.bounds
-    _ref_shift = (-_ref_b[0], -_ref_b[1])
+    # Anchor + size the design from the UNROTATED cell dims (before the swap below).
+    _ref_shift, _ref_w, _ref_h = _design_anchor(_ref_lyr.bounds, cw, ch)
     _is_multi = len(na_checked) > 1
     _sorted = sorted(na_checked, key=_layer_sort_key)
 
@@ -70,8 +70,6 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
     # At 90/270 the unit footprint is rotated — swap canvas dims once (not per layer).
     if _swap:
         cw, ch = ch, cw
-
-    _ref_w, _ref_h = _ref_b[2] - _ref_b[0], _ref_b[3] - _ref_b[1]
     fig = go.Figure()
     _place_pairs(fig, _sorted, _ref_shift, _rot_deg, _rot_deg, _is_multi,
                  _layer_color_map(rodb_cm_check), _ref_w, _ref_h)
@@ -95,12 +93,15 @@ def _render_empty_state(rodb_cm_check: Any, na_checked: List[Tuple[str, Any]]) -
 # Reference design layer overlay
 # ---------------------------------------------------------------------------
 
-def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
+def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg,
+                              cell_w, cell_h):
     """Draw checked reference design layers under the defect cloud. Returns the
     active (top-most) layer name, or None.
 
     svg_rot: degrees to rotate the SVG content (auto panel angle + manual nudge).
     swap_angle: the auto panel angle (orthogonal) that decides the 90/270 placement swap.
+    cell_w/cell_h: UNROTATED unit cell dims — used to anchor the design in the unit
+    frame so it registers with the defects (see _design_anchor).
     """
     if not (rodb and rodb.layers and first_lyr):
         return None
@@ -113,9 +114,7 @@ def _overlay_reference_layers(fig, rodb, svg_rot, swap_angle, first_lyr, cfg):
         return None
     active = pairs[-1][0]
 
-    _ref_b = first_lyr.bounds
-    ref_shift = (-_ref_b[0], -_ref_b[1])
-    _ref_w, _ref_h = _ref_b[2] - _ref_b[0], _ref_b[3] - _ref_b[1]
+    ref_shift, _ref_w, _ref_h = _design_anchor(first_lyr.bounds, cell_w, cell_h)
     _place_pairs(fig, pairs, ref_shift, svg_rot, swap_angle, is_multi,
                  _layer_color_map(rodb), _ref_w, _ref_h)
     _apply_layout(fig, cfg)
@@ -191,13 +190,14 @@ def _render_defect_state(rodb, aoi, align_args):
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
 
-    # Align defects on the copper minimum — the same lower-left corner the design
-    # overlay uses (ref_shift = -copper_min). Subtracting copper_min puts the defects
-    # in the copper's frame so they sit on the design without a manual nudge. The
-    # manual offset still stacks on top for any residual.
+    # Match the defect offset to whichever anchor regime _design_anchor chose:
+    # unit frame (profile available) → ref_shift=(0,0), defects stay in ODB local coords;
+    # legacy fallback → ref_shift=(-copper_min), defects shift to copper-relative frame.
+    # Both cases keep defects and the design overlay in the same coordinate frame.
     if first_lyr:
-        off_x -= first_lyr.bounds[0]
-        off_y -= first_lyr.bounds[1]
+        _ds_ref_shift, _, _ = _design_anchor(first_lyr.bounds, cell_w, cell_h)
+        off_x += _ds_ref_shift[0]
+        off_y += _ds_ref_shift[1]
 
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
@@ -241,7 +241,8 @@ def _render_defect_state(rodb, aoi, align_args):
 
     fig = build_defect_only_figure(cm_plot, cfg)
 
-    active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
+    active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg,
+                                             cell_w, cell_h)
     if active_layer is None:
         # No reference layers selected — still need to apply the base layout.
         _apply_layout(fig, cfg)
@@ -319,9 +320,8 @@ def _render_empty_layers(rodb, first_lyr, cell_w, cell_h):
     if not checked:
         st.caption("☝️ Select a layer in the sidebar to view the design.")
         return
-    _rb = first_lyr.bounds
-    _ref_shift = (-_rb[0], -_rb[1])
-    _ref_w, _ref_h = _rb[2] - _rb[0], _rb[3] - _rb[1]
+    # Anchor + size the design from the UNROTATED cell dims (before the swap below).
+    _ref_shift, _ref_w, _ref_h = _design_anchor(first_lyr.bounds, cell_w, cell_h)
     is_multi = len(checked) > 1
     _rot = float(round(getattr(rodb.panel_layout, 'dominant_angle', 0.0)) % 360) if rodb.panel_layout else 0.0
     _swap = _rot in (90.0, 270.0)
