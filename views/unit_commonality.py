@@ -191,6 +191,26 @@ def _render_defect_state(rodb, aoi, align_args):
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
 
+    # ── Auto-registration ────────────────────────────────────────────────────
+    # Defects are referenced to the unit's lower-left (the step origin); the design
+    # overlay is referenced to the copper-bbox lower-left (−copper_min). Those two
+    # corners differ by a small constant, which previously had to be cancelled by a
+    # manual X/Y nudge. Measure that gap and apply it automatically so both use the
+    # SAME corner: gap = (centering shift baked into unit_positions) − (copper corner).
+    # Gated to un-rotated units (the defect frame matches the SVG frame there); the
+    # manual offset still stacks on top for any residual. Rotated units are left to
+    # the manual nudge until verified.
+    _pl = rodb.panel_layout if rodb else None
+    if (first_lyr and _pl and round(dom_angle) % 360 == 0
+            and getattr(_pl, 'unit_positions_raw', None) and _pl.unit_positions):
+        try:
+            _shift_x = _pl.unit_positions[0][0] - _pl.unit_positions_raw[0][0]
+            _shift_y = _pl.unit_positions[0][1] - _pl.unit_positions_raw[0][1]
+            off_x += _shift_x - first_lyr.bounds[0]
+            off_y += _shift_y - first_lyr.bounds[1]
+        except (IndexError, TypeError):
+            pass
+
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
         manual_rot = st.number_input(
@@ -235,11 +255,14 @@ def _render_defect_state(rodb, aoi, align_args):
 
     active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg)
     if active_layer is None:
-        # No reference layers — draw the unit cell outline and apply layout.
-        fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
-                      line=dict(color="rgba(0,180,80,0.5)", width=1.5),
-                      fillcolor="rgba(0,0,0,0)", layer="below")
+        # No reference layers selected — still need to apply the base layout.
         _apply_layout(fig, cfg)
+    # Always draw the unit cell outline, even when a copper layer is shown. Copper is
+    # smaller than the unit, so this lets you see BOTH the copper design and the unit
+    # boundary (the margin between the copper edge and the unit edge).
+    fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
+                  line=dict(color="rgba(0,180,80,0.5)", width=1.5),
+                  fillcolor="rgba(0,0,0,0)", layer="below")
 
     _add_grid(fig, disp_w, disp_h)
     _panel_lbl = ", ".join(panel_filter) if panel_filter else None
