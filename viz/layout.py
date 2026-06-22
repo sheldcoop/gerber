@@ -22,7 +22,7 @@ class OverlayConfig:
     defect_types: list[str] = field(default_factory=list)
     buildup_filter: list[int] = field(default_factory=list)
     side_filter: str = 'Both'        # 'Front', 'Back', 'Both'
-    marker_style: str = 'crosshair'  # 'crosshair', 'dot', 'x_mark'
+    marker_style: str = 'dot'        # 'dot', 'crosshair', 'x_mark'
     color_mode: str = 'by_type'      # 'by_type', 'by_verification'
     board_bounds: tuple[float, float, float, float] = (0, 0, 0, 0)
     offset_x: float = 0.0            # Visual X translation for the ODB++ render

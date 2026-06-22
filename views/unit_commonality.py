@@ -187,11 +187,25 @@ def _render_defect_state(rodb, aoi, align_args):
     pairs = list(zip(src['UNIT_INDEX_Y'].astype(int), src['UNIT_INDEX_X'].astype(int)))
     ox_arr = [origins.get(p, (0.0, 0.0))[0] for p in pairs]
     oy_arr = [origins.get(p, (0.0, 0.0))[1] for p in pairs]
-    # Defects are placed purely as X_MM − step_origin (+ manual offset); they fill the
-    # unit cell [0, cell] from the lower-left corner. Copper is centered into that same
-    # cell by _design_anchor, so defects land on it without any copper_min adjustment.
+
+    # ── Normalize defects to the COPPER bounding box ───────────────────────
+    # Re-anchor from the unit corner to the copper corner so on-copper defects collapse
+    # into [0, copper]; copper is drawn corner-to-corner (cell==copper → _design_anchor
+    # corner-anchors it). The larger unit outline is drawn separately (white) around it.
+    _cb = first_lyr.bounds if first_lyr else (0.0, 0.0, cell_w, cell_h)
+    _copper_w = _cb[2] - _cb[0]
+    _copper_h = _cb[3] - _cb[1]
+    _margin_x = max(0.0, (cell_w - _copper_w) / 2.0)
+    _margin_y = max(0.0, (cell_h - _copper_h) / 2.0)
+
+    # Effective reference cell = the copper bbox; drives the canvas, outlines and anchor.
+    ref_w, ref_h = _copper_w, _copper_h
+
     off_x = align_args.get('manual_offset_x', 0.0)
     off_y = align_args.get('manual_offset_y', 0.0)
+    # Shift the unit-corner frame to the copper corner by removing the per-side margin.
+    off_x -= _margin_x
+    off_y -= _margin_y
 
     # Optional manual rotation override (rotates the entire view: CAD, defects, and canvas).
     with st.form("cm_rotation_form", border=False):
@@ -221,7 +235,7 @@ def _render_defect_state(rodb, aoi, align_args):
 
     cfg = OverlayConfig()
     cfg.color_mode     = st.session_state.get('color_mode_select', 'by_type')
-    cfg.marker_style   = st.session_state.get('marker_style_select', 'crosshair')
+    cfg.marker_style   = st.session_state.get('marker_style_select', 'dot')
     cfg.buildup_filter = bu
     cfg.defect_types   = st.session_state.get('defect_type_select', aoi.defect_types)
     cfg.side_filter    = 'Both'
@@ -230,21 +244,26 @@ def _render_defect_state(rodb, aoi, align_args):
     #    only swap the displayed cell dims and rotate the reference DESIGN to match. ──
     theta = round(dom_angle) % 360
     svg_rot = (theta + manual_rot) % 360  # manual nudge sits on top of the auto angle
-    disp_w, disp_h = _display_dims(cell_w, cell_h, theta)
+    disp_w, disp_h = _display_dims(ref_w, ref_h, theta)
     cfg.board_bounds = (-1.0, -1.0, disp_w + 1.0, disp_h + 1.0)
 
     fig = build_defect_only_figure(cm_plot, cfg)
 
     active_layer = _overlay_reference_layers(fig, rodb, svg_rot, theta, first_lyr, cfg,
-                                             cell_w, cell_h)
+                                             ref_w, ref_h)
     if active_layer is None:
         # No reference layers selected — still need to apply the base layout.
         _apply_layout(fig, cfg)
-    # Always draw the unit cell outline, even when a copper layer is shown. Copper is
-    # smaller than the unit, so this lets you see BOTH the copper design and the unit
-    # boundary (the margin between the copper edge and the unit edge).
+    # Copper boundary (green) traces the canvas extent (= copper bbox, where defects
+    # normalize). The larger UNIT outline (white) is drawn margin-out on each side so the
+    # dielectric border around the copper stays visible. Margins swap with the display
+    # rotation, matching _display_dims.
     fig.add_shape(type="rect", x0=0, y0=0, x1=disp_w, y1=disp_h,
                   line=dict(color="rgba(0,180,80,0.5)", width=1.5),
+                  fillcolor="rgba(0,0,0,0)", layer="below")
+    _mdx, _mdy = (_margin_y, _margin_x) if theta in (90, 270) else (_margin_x, _margin_y)
+    fig.add_shape(type="rect", x0=-_mdx, y0=-_mdy, x1=disp_w + _mdx, y1=disp_h + _mdy,
+                  line=dict(color="rgba(255,255,255,0.85)", width=1.5),
                   fillcolor="rgba(0,0,0,0)", layer="below")
 
     _add_grid(fig, disp_w, disp_h)

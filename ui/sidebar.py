@@ -676,7 +676,7 @@ def render_sidebar():
                 st.header("3. Display Options")
                 marker_style = st.selectbox(
                     "Marker Style",
-                    ['crosshair', 'dot', 'x_mark'],
+                    ['dot', 'crosshair', 'x_mark'],  # 'dot' first → default selection
                     format_func=lambda x: x.replace('_', ' ').title(),
                     key='marker_style_select',
                 )
