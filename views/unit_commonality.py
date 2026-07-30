@@ -2,7 +2,8 @@ import streamlit as st
 import plotly.graph_objects as go
 from typing import Any, Tuple, List
 
-from core.data_utils import compute_cm_geometry, filter_aoi_cm, _align_defects
+from core.data_utils import compute_cm_geometry, _align_defects
+from core.scope import scoped_defects
 from visualizer import OverlayConfig, build_defect_only_figure, _apply_layout
 from export import export_current_view
 
@@ -145,24 +146,15 @@ def _render_defect_state(rodb, aoi, align_args):
 
     origins, cell_w, cell_h, first_lyr = _compute_origins(rodb, q_rows, q_cols, gap_x, gap_y)
 
-    # ── Scope — read from global Analysis Scope (sidebar) ───────────────────
-    # Buildup: use whatever is active in the global scope bar (BU-01, BU-02 …)
+    # ── Scope — one read of the global Analysis Scope (see core/scope.py) ────
+    # scoped_defects applies buildup, side, panel AND verification code in one go.
     bu = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-
-    # Panel filter — read from the global Analysis Scope (scope_panel_sel).
     panel_filter = st.session_state.get('panel_filter_select', None)
+    src = scoped_defects(aoi).copy()
 
-    # Scope filter (buildup/side) then restrict to the selected units.
-    side = st.session_state.get('scope_side_sel', ['Front', 'Back'])
-    src = filter_aoi_cm(
-        aoi.all_defects,
-        tuple(sorted(bu)) if bu else (),
-        tuple(sorted(side)),
-    ).copy()
-
-    # Apply panel filter from global scope.
-    if panel_filter is not None and 'PANEL_ID' in src.columns:
-        src = src[src['PANEL_ID'].isin(panel_filter)].copy()
+    if src.empty:
+        st.info("No defects match the current Analysis Scope — widen the scope above.")
+        return
 
     if 'UNIT_INDEX_Y' not in src.columns or 'UNIT_INDEX_X' not in src.columns:
         st.error("Cannot align defects: AOI data is missing UNIT_INDEX_X / UNIT_INDEX_Y columns.")
@@ -242,7 +234,13 @@ def _render_defect_state(rodb, aoi, align_args):
         _apply_layout(fig, cfg)
 
     _add_grid(fig, disp_w, disp_h)
-    _panel_lbl = ", ".join(panel_filter) if panel_filter else None
+    # Naming every panel overflows the annotation card once panels are multi-select.
+    if not panel_filter:
+        _panel_lbl = None
+    elif len(panel_filter) <= 3:
+        _panel_lbl = ", ".join(panel_filter)
+    else:
+        _panel_lbl = f"{len(panel_filter)} panels"
     _add_dim_annotations(fig, disp_w, disp_h, active_layer, panel_label=_panel_lbl)
 
     n_def, n_units = len(cm_plot), len(sel_units)
