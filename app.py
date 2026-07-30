@@ -103,14 +103,37 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
 
     # --- Analysis Scope: Capsule Toggle Buttons (AOI Excel data only) ---
     if aoi and aoi.has_data:
+        from core.scope import available_verifications, default_side
+
+        _all_verif_codes = available_verifications(aoi)
+
         if 'scope_bu_sel' not in st.session_state:
             st.session_state['scope_bu_sel'] = list(aoi.buildup_numbers)
         if 'scope_side_sel' not in st.session_state:
-            st.session_state['scope_side_sel'] = ['Front', 'Back']
+            st.session_state['scope_side_sel'] = default_side(aoi)
         if 'scope_panel_sel' not in st.session_state:
-            # Default to first panel only — panel selector is single-select (radio).
-            _default_panel = sorted(aoi.panel_ids)[:1] if aoi.panel_ids else []
-            st.session_state['scope_panel_sel'] = _default_panel
+            st.session_state['scope_panel_sel'] = sorted(aoi.panel_ids)
+        if 'scope_verif_sel' not in st.session_state:
+            st.session_state['scope_verif_sel'] = list(_all_verif_codes)
+
+        # Side is single-select; coerce anything stale back to exactly one valid side.
+        # Covers a two-side list left over from the old multi-select behaviour, and a
+        # side the freshly-loaded data doesn't actually contain.
+        _sides_present = [
+            s for s, code in (('Front', 'F'), ('Back', 'B'))
+            if code in (getattr(aoi, 'sides', []) or [])
+        ] or ['Front', 'Back']
+        _stored_side = st.session_state.get('scope_side_sel') or []
+        if len(_stored_side) != 1 or _stored_side[0] not in _sides_present:
+            st.session_state['scope_side_sel'] = default_side(aoi)
+
+        # Drop panels/codes that no longer exist (a re-upload can change both).
+        st.session_state['scope_panel_sel'] = [
+            p for p in st.session_state['scope_panel_sel'] if p in aoi.panel_ids
+        ] or sorted(aoi.panel_ids)
+        st.session_state['scope_verif_sel'] = [
+            v for v in st.session_state['scope_verif_sel'] if v in _all_verif_codes
+        ]
 
         with st.expander("🔬 Analysis Scope", expanded=True):
 
@@ -119,10 +142,23 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             if len(_panel_ids) > 1:
                 def _toggle_panel(pid):
                     def cb():
-                        # Radio-style: selecting a panel makes it the ONLY active one.
-                        # Never show two panels' defects overlaid — user checks one at a time.
-                        st.session_state['scope_panel_sel'] = [pid]
+                        current = list(st.session_state.get('scope_panel_sel', sorted(_panel_ids)))
+                        if pid in current:
+                            if len(current) > 1:
+                                current.remove(pid)
+                        else:
+                            current.append(pid)
+                        st.session_state['scope_panel_sel'] = sorted(current)
                     return cb
+
+                _pc1, _pc2 = st.columns([5, 1])
+                _pc1.caption("**Panels** — click to include/exclude (multi-select):")
+
+                def _all_panels():
+                    st.session_state['scope_panel_sel'] = sorted(_panel_ids)
+
+                _pc2.button("All", key="scope_panel_all", width="stretch",
+                            on_click=_all_panels, help="Select every panel")
 
                 p_cols = st.columns(min(len(_panel_ids), 8), gap="small")
                 for _pi, _pid in enumerate(sorted(_panel_ids)):
@@ -165,35 +201,43 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
                         on_click=_toggle_bu(bu_num),
                     )
 
-            s_cols = st.columns(2, gap="small")
-
-            def _toggle_side(side):
+            # ── Side — single-select: exactly one side is active at a time ────
+            def _set_side(side):
                 def cb():
-                    current = list(st.session_state.get('scope_side_sel', ['Front', 'Back']))
-                    if side in current:
-                        if len(current) > 1:
-                            current.remove(side)
-                    else:
-                        current.append(side)
-                    st.session_state['scope_side_sel'] = current
+                    st.session_state['scope_side_sel'] = [side]
                 return cb
 
-            is_front = 'Front' in st.session_state['scope_side_sel']
-            is_back  = 'Back'  in st.session_state['scope_side_sel']
-            s_cols[0].button("Front", key="scope_side_f", type="primary" if is_front else "secondary",
-                             width="stretch", on_click=_toggle_side("Front"))
-            s_cols[1].button("Back",  key="scope_side_b", type="primary" if is_back  else "secondary",
-                             width="stretch", on_click=_toggle_side("Back"))
+            s_cols = st.columns(len(_sides_present), gap="small")
+            _active_side = st.session_state['scope_side_sel'][0]
+            for _si, _side in enumerate(_sides_present):
+                s_cols[_si].button(
+                    _side,
+                    key=f"scope_side_{_side[0].lower()}",
+                    type="primary" if _active_side == _side else "secondary",
+                    width="stretch",
+                    on_click=_set_side(_side),
+                )
+
+            # ── Verification codes — one global filter for every view ─────────
+            if _all_verif_codes:
+                st.divider()
+                st.multiselect(
+                    "Verification codes",
+                    options=_all_verif_codes,
+                    key="scope_verif_sel",
+                    help="Which defect codes to include. Applies to every view.",
+                )
+                if not st.session_state['scope_verif_sel']:
+                    st.warning(
+                        "No verification codes selected — all views will be empty. "
+                        "Pick at least one code above."
+                    )
 
         st.session_state['buildup_filter_select'] = st.session_state.get('scope_bu_sel', aoi.buildup_numbers)
         st.session_state['panel_filter_select'] = st.session_state.get('scope_panel_sel', aoi.panel_ids)
-        active_sides = st.session_state.get('scope_side_sel', ['Front', 'Back'])
-        if set(active_sides) == {'Front', 'Back'}:
-            st.session_state['side_cap_select'] = 'All'
-        elif 'Front' in active_sides:
-            st.session_state['side_cap_select'] = 'Front'
-        else:
-            st.session_state['side_cap_select'] = 'Back'
+        st.session_state['verif_filter_select'] = st.session_state.get('scope_verif_sel', _all_verif_codes)
+        # Side is always exactly one value now, so 'All' is no longer reachable.
+        st.session_state['side_cap_select'] = st.session_state['scope_side_sel'][0]
         st.divider()
 
     view_mode = st.session_state['_view_mode']
