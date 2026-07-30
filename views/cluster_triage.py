@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from core.data_utils import compute_cm_geometry, filter_aoi_cm
+from core.data_utils import compute_cm_geometry
+from core.scope import scoped_defects, scope_caption
 
 @st.fragment
 def render_cluster_triage(parsed, aoi, align_args) -> None:
@@ -15,35 +16,13 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
     else:
         import plotly.express as _px2
 
-        # ── Global Analysis Scope (same pattern as Commonality) ──────────
-        _ct_bu    = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-        _ct_side  = st.session_state.get('scope_side_sel', ['Front', 'Back'])
-        _ct_panel = st.session_state.get('panel_filter_select', None)
-        _ct_df = filter_aoi_cm(
-            aoi.all_defects,
-            tuple(sorted(_ct_bu)) if _ct_bu else (),
-            tuple(sorted(_ct_side)),
-        )
-        if _ct_panel is not None and 'PANEL_ID' in _ct_df.columns:
-            _ct_df = _ct_df[_ct_df['PANEL_ID'].isin(_ct_panel)].copy()
+        # ── Global Analysis Scope — buildup, side, panel and verification ──
+        _ct_df = scoped_defects(aoi).copy()
+        st.caption("Scope: " + scope_caption(aoi))
 
-        # ── Verification code filter ──────────────────────────────────────
-        if 'VERIFICATION' in _ct_df.columns:
-            _ct_all_verif = sorted(_ct_df['VERIFICATION'].dropna().unique().tolist())
-            _ct_sel_verif = st.multiselect(
-                "Filter by verification code",
-                options=_ct_all_verif,
-                default=_ct_all_verif,
-                key="ct_verif_filter",
-                help="Only defects with these verification codes are clustered and counted.",
-            )
-            if _ct_sel_verif:
-                _ct_df = _ct_df[_ct_df['VERIFICATION'].isin(_ct_sel_verif)]
-
-        _scope_bits = [f"BU-{int(b):02d}" for b in (_ct_bu or [])] + list(_ct_side or [])
-        if _ct_panel:
-            _scope_bits += [str(p) for p in _ct_panel]
-        st.caption("Scope: " + (", ".join(str(s) for s in _scope_bits) if _scope_bits else "all data"))
+        if _ct_df.empty:
+            st.info("No defects match the current Analysis Scope — widen the scope above.")
+            return
 
         # ── Compute ALIGNED_X/Y directly (same logic as Commonality) ─────
         _ct_aligned = False
