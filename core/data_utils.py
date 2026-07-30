@@ -83,8 +83,19 @@ def filter_aoi_cm(
     _df: pd.DataFrame,
     buildup_filter: tuple,
     side_filter: tuple,
+    panel_filter: tuple | None = None,
+    verif_filter: tuple | None = None,
 ) -> pd.DataFrame:
-    """Scope-filter AOI defects for Commonality."""
+    """Scope-filter AOI defects — the single chokepoint for every view.
+
+    ``buildup_filter`` keeps its legacy semantics: an empty tuple means "keep all"
+    (the global scope bar guarantees at least one buildup is selected anyway).
+
+    ``panel_filter`` and ``verif_filter`` distinguish "not filtering" from "nothing
+    selected": ``None`` skips the filter entirely, while an empty tuple filters to an
+    empty frame. That distinction matters because clearing the verification
+    multiselect must show *nothing*, not silently fall back to everything.
+    """
     src = _df.copy()
     if buildup_filter and 'BUILDUP' in src.columns:
         src = src[src['BUILDUP'].isin(buildup_filter)]
@@ -93,6 +104,10 @@ def filter_aoi_cm(
             src = src[src['SIDE'] == 'F']
         elif 'Back' in side_filter and 'Front' not in side_filter:
             src = src[src['SIDE'] == 'B']
+    if panel_filter is not None and 'PANEL_ID' in src.columns:
+        src = src[src['PANEL_ID'].isin(panel_filter)]
+    if verif_filter is not None and 'VERIFICATION' in src.columns:
+        src = src[src['VERIFICATION'].isin(verif_filter)]
     return src
 
 
