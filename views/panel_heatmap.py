@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from alignment import get_panel_quadrant_bounds, FRAME_WIDTH, FRAME_HEIGHT
 from visualizer import OverlayConfig
 from core.data_utils import compute_cm_geometry, panels_per_cell_grid
+from core.scope import scoped_defects, scope_caption
 
 @st.fragment
 def render_panel_heatmap(parsed, aoi, align_args) -> None:
@@ -11,7 +12,16 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
     st.caption("Overlay a 2D density contour map of defects across the entire panel to spot systemic factory flaws.")
 
     if aoi and aoi.has_data:
-        hm_df = aoi.all_defects.copy()
+        # Scoped up front so buildup/side/panel/verification apply to BOTH modes.
+        # Previously this read aoi.all_defects raw and relied on build_heatmap_figure
+        # to mask, which left the Unit Grid Count path unfiltered.
+        hm_df = scoped_defects(aoi).copy()
+        st.caption("Scope: " + scope_caption(aoi))
+
+        if hm_df.empty:
+            st.info("No defects match the current Analysis Scope — widen the scope above.")
+            return
+
         _p_off_x = align_args.get('manual_offset_x', 0.0)
         _p_off_y = align_args.get('manual_offset_y', 0.0)
         if 'X_MM' not in hm_df.columns and 'X' in hm_df.columns:
@@ -45,43 +55,12 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
         hm_config.color_mode    = st.session_state.get('color_mode_select', 'by_type')
         hm_config.marker_style  = st.session_state.get('marker_style_select', 'dot')
         hm_config.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
-        hm_config.buildup_filter = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-        side_active = st.session_state.get('side_cap_select', 'All')
-        hm_config.side_filter   = 'Both' if side_active == 'All' else side_active
+        # hm_df is already scope-filtered, so leave the figure-level buildup/side masks
+        # off — same reason unit_commonality pins side_filter to 'Both'.
+        hm_config.buildup_filter = []
+        hm_config.side_filter   = 'Both'
 
-        # ── Panel Source Filter — one toggle per unique panel ─────────────
         _panel_col = 'PANEL_ID' if 'PANEL_ID' in hm_df.columns else 'SOURCE_FILE'
-        _all_sources = sorted(hm_df[_panel_col].unique().tolist()) if _panel_col in hm_df.columns else []
-        if _all_sources:
-            st.caption(f"**{len(_all_sources)} panel{'s' if len(_all_sources) != 1 else ''} loaded** — flip a toggle to exclude one panel from the analysis:")
-            _tog_cols = st.columns(min(len(_all_sources), 8))
-            _sel_sources = []
-            for _pi, _src in enumerate(_all_sources):
-                _short = f"P{_pi+1}"
-                _included = _tog_cols[_pi % len(_tog_cols)].toggle(
-                    _short, value=True,
-                    key=f"panel_tog_{_pi}",
-                    help=_src,
-                )
-                if _included:
-                    _sel_sources.append(_src)
-            if _sel_sources:
-                hm_df = hm_df[hm_df[_panel_col].isin(_sel_sources)]
-        else:
-            _sel_sources = []
-
-        # ── Verification filter ────────────────────────────────────────────
-        if 'VERIFICATION' in hm_df.columns:
-            _all_verif = sorted(hm_df['VERIFICATION'].dropna().unique().tolist())
-            _sel_verif = st.multiselect(
-                "Filter by verification code",
-                options=_all_verif,
-                default=_all_verif,
-                key="hm_verif_filter",
-                help="Only defects with these verification codes are shown in the heatmap.",
-            )
-            if _sel_verif:
-                hm_df = hm_df[hm_df['VERIFICATION'].isin(_sel_verif)]
 
         # ── View mode toggle ───────────────────────────────────────────────
         _hm_mode = st.radio(
@@ -150,6 +129,10 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
                 # ── Metric selector ────────────────────────────────────────
                 # Repeatability % only makes sense with >1 panel
                 _metric_options = ["Repeatability %", "Raw Count"] if _n_panels_total > 1 else ["Raw Count"]
+                # Narrowing the panel scope to one can strand "Repeatability %" in the
+                # widget key after it disappears from the options — drop it first.
+                if st.session_state.get('grid_metric_sel') not in _metric_options:
+                    st.session_state.pop('grid_metric_sel', None)
                 _grid_metric = st.radio(
                     "Metric",
                     _metric_options,
@@ -303,7 +286,7 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
 
                 _mc1, _mc2, _mc3, _mc4 = st.columns(4)
                 _mc1.metric("Total Defects", f"{_total_def:,}")
-                _mc2.metric("Panels Included", f"{len(_sel_sources) if _sel_sources else _n_panels_total}")
+                _mc2.metric("Panels Included", f"{_n_panels_total}")
                 _mc3.metric("Worst Column", f"Col {_worst_col_i}",
                             delta=f"{int(_col_sums[_worst_col_i])} defects",
                             delta_color="inverse")
