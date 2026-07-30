@@ -115,6 +115,8 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             st.session_state['scope_panel_sel'] = sorted(aoi.panel_ids)
         if 'scope_verif_sel' not in st.session_state:
             st.session_state['scope_verif_sel'] = list(_all_verif_codes)
+        if '_verif_last' not in st.session_state:
+            st.session_state['_verif_last'] = list(_all_verif_codes)
 
         # Side is single-select; coerce anything stale back to exactly one valid side.
         # Covers a two-side list left over from the old multi-select behaviour, and a
@@ -131,9 +133,11 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
         st.session_state['scope_panel_sel'] = [
             p for p in st.session_state['scope_panel_sel'] if p in aoi.panel_ids
         ] or sorted(aoi.panel_ids)
+        # Fall back to every code rather than to empty, so a re-upload that
+        # invalidates the stored selection can't blank every view.
         st.session_state['scope_verif_sel'] = [
             v for v in st.session_state['scope_verif_sel'] if v in _all_verif_codes
-        ]
+        ] or list(_all_verif_codes)
 
         with st.expander("🔬 Analysis Scope", expanded=True):
 
@@ -221,17 +225,25 @@ if st.session_state.get('data_loaded') and (parsed or aoi):
             # ── Verification codes — one global filter for every view ─────────
             if _all_verif_codes:
                 st.divider()
+
+                def _guard_verif():
+                    # Keep at least one code selected, matching the buildup/side
+                    # guards. Writing a widget key is allowed inside a callback
+                    # (it runs before the next render), unlike after the widget.
+                    if not st.session_state.get('scope_verif_sel'):
+                        st.session_state['scope_verif_sel'] = st.session_state.get(
+                            '_verif_last', list(_all_verif_codes))
+                    else:
+                        st.session_state['_verif_last'] = list(
+                            st.session_state['scope_verif_sel'])
+
                 st.multiselect(
                     "Verification codes",
                     options=_all_verif_codes,
                     key="scope_verif_sel",
+                    on_change=_guard_verif,
                     help="Which defect codes to include. Applies to every view.",
                 )
-                if not st.session_state['scope_verif_sel']:
-                    st.warning(
-                        "No verification codes selected — all views will be empty. "
-                        "Pick at least one code above."
-                    )
 
         st.session_state['buildup_filter_select'] = st.session_state.get('scope_bu_sel', aoi.buildup_numbers)
         st.session_state['panel_filter_select'] = st.session_state.get('scope_panel_sel', aoi.panel_ids)

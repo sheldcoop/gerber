@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 from typing import Any, Tuple, List
 
 from core.data_utils import compute_cm_geometry, _align_defects
-from core.scope import scoped_defects
+from core.scope import scoped_defects, read_scope
 from visualizer import OverlayConfig, build_defect_only_figure, _apply_layout
 from export import export_current_view
 
@@ -148,8 +148,11 @@ def _render_defect_state(rodb, aoi, align_args):
 
     # ── Scope — one read of the global Analysis Scope (see core/scope.py) ────
     # scoped_defects applies buildup, side, panel AND verification code in one go.
-    bu = st.session_state.get('buildup_filter_select', aoi.buildup_numbers)
-    panel_filter = st.session_state.get('panel_filter_select', None)
+    # _scope is the single source for the individual selections still needed below
+    # (the figure's buildup mask, the panel annotation, the PNG cache signature).
+    _scope = read_scope(aoi)
+    bu = _scope['bu']
+    panel_filter = _scope['panels']
     src = scoped_defects(aoi).copy()
 
     if src.empty:
@@ -258,8 +261,11 @@ def _render_defect_state(rodb, aoi, align_args):
     _png_sig = (
         tuple(sorted(sel_units)),
         tuple(sorted(bu)) if bu else (),
-        tuple(sorted(side)),
+        _scope['side'],
         tuple(sorted(panel_filter)) if panel_filter else (),
+        # Verification codes shape the figure too, so they belong here — without
+        # them, changing codes serves the previously rendered PNG.
+        None if _scope['verif'] is None else tuple(sorted(_scope['verif'])),
         float(manual_rot), float(off_x), float(off_y),
         cfg.color_mode, cfg.marker_style,
         bool(st.session_state.get('invert_polarity', False)),
