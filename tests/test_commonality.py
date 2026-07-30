@@ -102,6 +102,63 @@ class TestFilterAoiCm:
         out = filter_aoi_cm(self._df(), (), ('Front', 'Back'))
         assert len(out) == 4
 
+    # ── panel / verification scoping ──────────────────────────────────────
+    def _scoped_df(self):
+        return pd.DataFrame({
+            'BUILDUP': [1, 1, 2, 2],
+            'SIDE': ['F', 'B', 'F', 'B'],
+            'PANEL_ID': ['Panel_29', 'Panel_29', 'Panel_30', 'Panel_30'],
+            'VERIFICATION': ['CU22', 'CU18', 'CU22', 'GE22'],
+            'X_MM': [1, 2, 3, 4],
+        })
+
+    def test_panel_filter_subsets(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'),
+                            panel_filter=('Panel_30',))
+        assert set(out['PANEL_ID']) == {'Panel_30'}
+        assert len(out) == 2
+
+    def test_panel_filter_multi_select(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'),
+                            panel_filter=('Panel_29', 'Panel_30'))
+        assert len(out) == 4
+
+    def test_panel_filter_none_means_unfiltered(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'), panel_filter=None)
+        assert len(out) == 4
+
+    def test_empty_panel_filter_yields_empty(self):
+        # () must mean "nothing selected", NOT "keep everything" — a cleared
+        # selection has to show nothing rather than silently falling back to all.
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'), panel_filter=())
+        assert len(out) == 0
+
+    def test_verif_filter_subsets(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'),
+                            verif_filter=('CU22', 'CU18'))
+        assert set(out['VERIFICATION']) == {'CU22', 'CU18'}
+        assert len(out) == 3
+
+    def test_verif_filter_none_means_unfiltered(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'), verif_filter=None)
+        assert len(out) == 4
+
+    def test_empty_verif_filter_yields_empty(self):
+        out = filter_aoi_cm(self._scoped_df(), (), ('Front', 'Back'), verif_filter=())
+        assert len(out) == 0
+
+    def test_filters_compose(self):
+        out = filter_aoi_cm(self._scoped_df(), (2,), ('Front',),
+                            panel_filter=('Panel_30',), verif_filter=('CU22',))
+        assert len(out) == 1
+        assert out.iloc[0]['X_MM'] == 3
+
+    def test_missing_columns_are_ignored(self):
+        # A frame without PANEL_ID/VERIFICATION must not raise.
+        out = filter_aoi_cm(self._df(), (), ('Front', 'Back'),
+                            panel_filter=('Panel_29',), verif_filter=('CU22',))
+        assert len(out) == 4
+
 
 # ---------------------------------------------------------------------------
 # 3. _align_defects — rotation-aware + validation
