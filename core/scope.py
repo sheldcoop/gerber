@@ -48,14 +48,22 @@ def read_scope(aoi) -> dict:
     bu = st.session_state.get('scope_bu_sel', getattr(aoi, 'buildup_numbers', []))
     side = st.session_state.get('scope_side_sel', default_side(aoi))
 
-    # None (not ()) when unset, so a missing key means "all panels", not "no panels".
     panels = st.session_state.get('scope_panel_sel', None)
     verif = st.session_state.get('scope_verif_sel', None)
 
+    # Panels and verification codes treat "empty" differently on purpose.
+    #
+    # An empty panel list is never a real user intent — the scope bar enforces a
+    # min-1 guard, so empty only happens when the dataset has no panels to pick
+    # from. It must therefore mean "don't filter", or a dataset whose panel_ids
+    # failed to populate would silently filter every view down to nothing.
+    #
+    # An empty verification list IS a real intent: the user deliberately cleared
+    # the multiselect, and must then see nothing rather than everything.
     return {
         'bu': tuple(sorted(bu)) if bu else (),
         'side': tuple(sorted(side)) if side else tuple(default_side(aoi)),
-        'panels': None if panels is None else tuple(panels),
+        'panels': tuple(panels) if panels else None,
         'verif': None if verif is None else tuple(verif),
     }
 

@@ -28,7 +28,7 @@ st.set_page_config(
 # Core Imports and Initialization
 # ---------------------------------------------------------------------------
 
-from core.state import init_state, sync_layers_to_aoi
+from core.state import init_state
 init_state()
 
 

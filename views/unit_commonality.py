@@ -213,7 +213,8 @@ def _render_defect_state(rodb, aoi, align_args):
     cfg.color_mode     = st.session_state.get('color_mode_select', 'by_type')
     cfg.marker_style   = st.session_state.get('marker_style_select', 'crosshair')
     cfg.buildup_filter = bu
-    cfg.defect_types   = st.session_state.get('defect_type_select', aoi.defect_types)
+    # src is already scope-filtered; side_filter stays 'Both' and defect_types stays
+    # at its empty default so the figure doesn't re-filter what scope already did.
     cfg.side_filter    = 'Both'
 
     # ── Display orientation: defects are already in the panel frame (translation), so we

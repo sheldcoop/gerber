@@ -54,9 +54,10 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
 
         hm_config.color_mode    = st.session_state.get('color_mode_select', 'by_type')
         hm_config.marker_style  = st.session_state.get('marker_style_select', 'dot')
-        hm_config.defect_types  = st.session_state.get('defect_type_select', aoi.defect_types)
-        # hm_df is already scope-filtered, so leave the figure-level buildup/side masks
-        # off — same reason unit_commonality pins side_filter to 'Both'.
+        # hm_df is already scope-filtered, so leave the figure-level masks off —
+        # same reason unit_commonality pins side_filter to 'Both'. defect_types is
+        # left at its empty default: it only ever drove a filter, and the widget
+        # that was supposed to populate it never existed.
         hm_config.buildup_filter = []
         hm_config.side_filter   = 'Both'
 
