@@ -70,6 +70,19 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
         else:
             _sel_sources = []
 
+        # ── Verification filter ────────────────────────────────────────────
+        if 'VERIFICATION' in hm_df.columns:
+            _all_verif = sorted(hm_df['VERIFICATION'].dropna().unique().tolist())
+            _sel_verif = st.multiselect(
+                "Filter by verification code",
+                options=_all_verif,
+                default=_all_verif,
+                key="hm_verif_filter",
+                help="Only defects with these verification codes are shown in the heatmap.",
+            )
+            if _sel_verif:
+                hm_df = hm_df[hm_df['VERIFICATION'].isin(_sel_verif)]
+
         # ── View mode toggle ───────────────────────────────────────────────
         _hm_mode = st.radio(
             "Heatmap Mode",
@@ -150,19 +163,6 @@ def render_panel_heatmap(parsed, aoi, align_args) -> None:
                            "\n\n*Repeatability % requires more than 1 panel.*")
                     ),
                 )
-
-                # ── Verification filter ────────────────────────────────────
-                if 'VERIFICATION' in hm_df.columns:
-                    _all_verif = sorted(hm_df['VERIFICATION'].dropna().unique().tolist())
-                    _sel_verif = st.multiselect(
-                        "Filter by verification code",
-                        options=_all_verif,
-                        default=_all_verif,
-                        key="hm_verif_filter",
-                        help="Only defects with these verification codes count toward repeatability and raw count.",
-                    )
-                    if _sel_verif:
-                        hm_df = hm_df[hm_df['VERIFICATION'].isin(_sel_verif)]
 
                 _max_col = int(hm_df['UNIT_INDEX_X'].max())
                 _max_row = int(hm_df['UNIT_INDEX_Y'].max())

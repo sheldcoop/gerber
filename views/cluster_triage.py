@@ -27,6 +27,19 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
         if _ct_panel is not None and 'PANEL_ID' in _ct_df.columns:
             _ct_df = _ct_df[_ct_df['PANEL_ID'].isin(_ct_panel)].copy()
 
+        # ── Verification code filter ──────────────────────────────────────
+        if 'VERIFICATION' in _ct_df.columns:
+            _ct_all_verif = sorted(_ct_df['VERIFICATION'].dropna().unique().tolist())
+            _ct_sel_verif = st.multiselect(
+                "Filter by verification code",
+                options=_ct_all_verif,
+                default=_ct_all_verif,
+                key="ct_verif_filter",
+                help="Only defects with these verification codes are clustered and counted.",
+            )
+            if _ct_sel_verif:
+                _ct_df = _ct_df[_ct_df['VERIFICATION'].isin(_ct_sel_verif)]
+
         _scope_bits = [f"BU-{int(b):02d}" for b in (_ct_bu or [])] + list(_ct_side or [])
         if _ct_panel:
             _scope_bits += [str(p) for p in _ct_panel]
