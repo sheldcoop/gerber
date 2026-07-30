@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from core.data_utils import compute_cm_geometry
 from core.scope import scoped_defects, scope_caption
 
@@ -136,7 +137,11 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
             if not _rows:
                 st.info("No clusters found. Try increasing the cluster radius or lowering the min defects slider.")
             else:
-                _ct_summary = pd.DataFrame(_rows).sort_values('Severity ▼', ascending=False)
+                # reset_index because row selection below is POSITIONAL — the index has
+                # to match the displayed order or the wrong cluster gets picked.
+                _ct_summary = (pd.DataFrame(_rows)
+                               .sort_values('Severity ▼', ascending=False)
+                               .reset_index(drop=True))
 
                 # ── Metrics row ───────────────────────────────────────
                 _m1, _m2, _m3, _m4 = st.columns(4)
@@ -164,11 +169,14 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                         f"{_top_ct['Top Type']}. Severity: **{_top_ct['Severity ▼']}**"
                     )
 
-                # ── Ranked table ──────────────────────────────────────
-                st.dataframe(
+                # ── Ranked table — click a row to drill into that cluster ──
+                _ct_event = st.dataframe(
                     _ct_summary,
                     use_container_width=True,
                     hide_index=True,
+                    key="ct_cluster_table",
+                    on_select="rerun",
+                    selection_mode="single-row",
                     column_config={
                         'Severity ▼': st.column_config.ProgressColumn(
                             'Severity ▼', min_value=0,
@@ -179,6 +187,31 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                         'Units Affected': st.column_config.NumberColumn('Units Affected', format='%d'),
                     },
                 )
+
+                # The selection is a row POSITION, and it outlives the table: moving the
+                # eps/min-samples sliders rebuilds a shorter summary while the stored
+                # index stays put, so bounds-check before trusting it.
+                _ct_selection = getattr(_ct_event, 'selection', None)
+                _sel_rows = list(getattr(_ct_selection, 'rows', None) or [])
+                _sel_cid = None
+                if _sel_rows and _sel_rows[0] < len(_ct_summary):
+                    _sel_cid = int(_ct_summary.iloc[_sel_rows[0]]['Cluster'])
+
+                if _sel_cid is not None:
+                    _members = _ct_df[_ct_df['CLUSTER_ID'] == _sel_cid]
+                    _mcols = [c for c in ('PANEL_ID', 'BUILDUP', 'SIDE', 'VERIFICATION',
+                                          'DEFECT_TYPE', 'UNIT_INDEX_Y', 'UNIT_INDEX_X',
+                                          'ALIGNED_X', 'ALIGNED_Y')
+                              if c in _members.columns]
+                    with st.expander(
+                        f"🔎 Cluster {_sel_cid} — {len(_members)} defects", expanded=True
+                    ):
+                        st.dataframe(
+                            _members[_mcols].round(3),
+                            use_container_width=True, hide_index=True,
+                        )
+                else:
+                    st.caption("Click a row above to inspect that cluster's individual defects.")
 
                 st.divider()
                 _tp1, _tp2 = st.columns(2)
@@ -228,4 +261,16 @@ def render_cluster_triage(parsed, aoi, align_args) -> None:
                             line=dict(color="rgba(0,220,130,0.5)", width=1, dash="dot"),
                             fillcolor="rgba(0,0,0,0)",
                         )
+                    # Ring the row picked in the table so it's findable among the dots.
+                    if _sel_cid is not None:
+                        _hl = _ct_summary[_ct_summary['Cluster'] == _sel_cid]
+                        if not _hl.empty:
+                            _sc_fig.add_trace(go.Scatter(
+                                x=[float(_hl.iloc[0]['X (mm)'])],
+                                y=[float(_hl.iloc[0]['Y (mm)'])],
+                                mode='markers',
+                                marker=dict(size=30, color='rgba(0,0,0,0)',
+                                            line=dict(color='#00e5ff', width=3)),
+                                hoverinfo='skip', showlegend=False,
+                            ))
                     st.plotly_chart(_sc_fig, width='stretch')
