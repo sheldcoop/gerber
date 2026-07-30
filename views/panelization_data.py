@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 from collections import defaultdict
 
+from core.scope import scoped_defects, scope_caption
+
 
 @st.fragment
 def render_panelization_data(parsed, aoi, align_args) -> None:
@@ -241,21 +243,23 @@ def render_panelization_data(parsed, aoi, align_args) -> None:
         )
 
         # ── Quick verification helper ─────────────────────────────────────────
-        if aoi and aoi.has_data and 'UNIT_INDEX_Y' in aoi.all_defects.columns:
+        _pz_df = scoped_defects(aoi)
+        if _pz_df is not None and not _pz_df.empty and 'UNIT_INDEX_Y' in _pz_df.columns:
             st.divider()
             st.markdown("#### AOI ↔ Unit Coordinate Verification")
             st.caption(
                 "Pick a unit to check that defect coordinates land inside it. "
                 "A defect should satisfy:  0 ≤ (X_MM − unit_X) ≤ unit_width  and similarly for Y."
             )
-            _sel_row = st.selectbox("Unit Row (UNIT_INDEX_Y)", options=sorted(aoi.all_defects['UNIT_INDEX_Y'].unique().astype(int)))
-            _sel_col = st.selectbox("Unit Col (UNIT_INDEX_X)", options=sorted(aoi.all_defects['UNIT_INDEX_X'].unique().astype(int)))
+            st.caption("Scope: " + scope_caption(aoi))
+            _sel_row = st.selectbox("Unit Row (UNIT_INDEX_Y)", options=sorted(_pz_df['UNIT_INDEX_Y'].unique().astype(int)))
+            _sel_col = st.selectbox("Unit Col (UNIT_INDEX_X)", options=sorted(_pz_df['UNIT_INDEX_X'].unique().astype(int)))
 
             _mask = (
-                (aoi.all_defects['UNIT_INDEX_Y'].astype(int) == _sel_row) &
-                (aoi.all_defects['UNIT_INDEX_X'].astype(int) == _sel_col)
+                (_pz_df['UNIT_INDEX_Y'].astype(int) == _sel_row) &
+                (_pz_df['UNIT_INDEX_X'].astype(int) == _sel_col)
             )
-            _sample = aoi.all_defects[_mask][['X_MM', 'Y_MM']].head(10).copy()
+            _sample = _pz_df[_mask][['X_MM', 'Y_MM']].head(10).copy()
 
             if not _sample.empty and _sel_row < len(_uniq_y) and _sel_col < len(_uniq_x):
                 _ux_sel = _uniq_x[_sel_col]
